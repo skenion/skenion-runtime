@@ -4,6 +4,7 @@ mod planner;
 mod project;
 mod registry;
 mod scheduler;
+mod server;
 mod validation;
 mod visual;
 
@@ -22,6 +23,11 @@ pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadE
 pub use scheduler::{
     DummyExecutionReport, DummyFrameReport, DummyNodeExecution, format_dummy_execution_text,
     run_dummy_execution,
+};
+pub use server::{
+    DEFAULT_HOST, DEFAULT_PORT, DiagnosticSeverity, HealthResponse, ProjectRequest,
+    RUNTIME_API_VERSION, RunProjectRequest, RuntimeApiResponse, RuntimeDiagnostic,
+    RuntimeInfoResponse, runtime_router, serve_runtime,
 };
 pub use validation::{
     ValidationError, ValidationReport, compatible_data_types, type_label, validate_graph_document,
