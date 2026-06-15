@@ -48,6 +48,40 @@ jobs:
           echo "runtime health endpoint did not become ready" >&2
           exit 1
       - run: |
+          cargo run -- serve --host 127.0.0.1 --port 3761 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID" EXIT
+          READY=false
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:3761/health >/dev/null; then
+              READY=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${READY}" != "true" ]]; then
+            echo "runtime health endpoint did not become ready" >&2
+            exit 1
+          fi
+
+          post_expect_ok() {
+            local expected="$1"
+            local endpoint="$2"
+            local payload="$3"
+            local response
+            response="$(curl --fail --silent \
+              -H "content-type: application/json" \
+              --data @"${payload}" \
+              "http://127.0.0.1:3761${endpoint}")"
+            python3 -c 'import json, sys; expected = sys.argv[1] == "true"; response = json.loads(sys.argv[2]); ok = response.get("ok"); print(json.dumps(response)) if ok != expected else None; sys.exit(0 if ok == expected else 1)' "${expected}" "${response}"
+          }
+
+          post_expect_ok true /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/valid/minimal-value.project.json
+          post_expect_ok true /v0/plan .deps/skenion-examples/compatibility/v0.1/projects/valid/minimal-value.project.json
+          post_expect_ok true /v0/run .deps/skenion-examples/compatibility/v0.1/projects/valid/minimal-value.project.json
+          post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/invalid/missing-definition.project.json
+          post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/invalid/incompatible-edge.project.json
+      - run: |
           if cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/invalid/missing-definition.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes; then
             echo "missing-definition fixture unexpectedly passed" >&2
             exit 1
