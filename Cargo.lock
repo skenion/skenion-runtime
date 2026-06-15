@@ -190,12 +190,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "skenion-contracts"
+version = "0.3.0"
+source = "git+https://github.com/echovisionlab/skenion-contracts?tag=skenion-contracts-v0.3.0#32297f97ec808dc9dc410585bed74cbb93df8dd7"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "skenion-runtime"
 version = "0.2.0"
 dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "skenion-contracts",
  "thiserror",
 ]
 

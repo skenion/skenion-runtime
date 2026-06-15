@@ -27,3 +27,10 @@ jobs:
       - run: cargo test --all-targets --all-features
       - run: bash scripts/validate-with-runtime.sh ../..
         working-directory: .deps/skenion-examples
+      - run: cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes
+      - run: cargo run -- plan --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes --format json
+      - run: |
+          if cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/invalid/missing-definition.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes; then
+            echo "missing-definition fixture unexpectedly passed" >&2
+            exit 1
+          fi
