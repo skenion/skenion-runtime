@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.5.0...skenion-runtime-v0.6.0) (2026-06-15)
+
+
+### Features
+
+* **runtime:** add local session state API ([3d1a782](https://github.com/echovisionlab/skenion-runtime/commit/3d1a78251b358fa4a5c442ea84a2ce040594d521))
+
 ## [0.5.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.4.0...skenion-runtime-v0.5.0) (2026-06-15)
 
 
