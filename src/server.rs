@@ -1,12 +1,9 @@
-use std::error::Error;
-
 use axum::{
     Json, Router,
     http::{HeaderValue, Method, header::CONTENT_TYPE},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
@@ -82,14 +79,6 @@ pub fn runtime_router() -> Router {
         .layer(cors_layer())
 }
 
-pub async fn serve_runtime(host: &str, port: u16) -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind((host, port)).await?;
-    let local_addr = listener.local_addr()?;
-    println!("skenion-runtime listening on http://{local_addr}");
-    axum::serve(listener, runtime_router()).await?;
-    Ok(())
-}
-
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
@@ -127,17 +116,14 @@ async fn plan_project_endpoint(Json(request): Json<ProjectRequest>) -> Json<Runt
         return Json(RuntimeApiResponse::diagnostics(diagnostics));
     }
 
-    match build_execution_plan(&request.graph, &registry) {
-        Ok(plan) => Json(RuntimeApiResponse {
-            ok: true,
-            diagnostics: Vec::new(),
-            plan: Some(plan),
-            report: None,
-        }),
-        Err(error) => Json(RuntimeApiResponse::diagnostics(vec![
-            RuntimeDiagnostic::error(error.to_string()),
-        ])),
-    }
+    let plan =
+        build_execution_plan(&request.graph, &registry).expect("validated project should plan");
+    Json(RuntimeApiResponse {
+        ok: true,
+        diagnostics: Vec::new(),
+        plan: Some(plan),
+        report: None,
+    })
 }
 
 async fn run_project_endpoint(Json(request): Json<RunProjectRequest>) -> Json<RuntimeApiResponse> {
@@ -150,20 +136,15 @@ async fn run_project_endpoint(Json(request): Json<RunProjectRequest>) -> Json<Ru
         return Json(RuntimeApiResponse::diagnostics(diagnostics));
     }
 
-    match build_execution_plan(&request.graph, &registry) {
-        Ok(plan) => {
-            let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
-            Json(RuntimeApiResponse {
-                ok: true,
-                diagnostics: Vec::new(),
-                plan: Some(plan),
-                report: Some(report),
-            })
-        }
-        Err(error) => Json(RuntimeApiResponse::diagnostics(vec![
-            RuntimeDiagnostic::error(error.to_string()),
-        ])),
-    }
+    let plan =
+        build_execution_plan(&request.graph, &registry).expect("validated project should plan");
+    let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
+    Json(RuntimeApiResponse {
+        ok: true,
+        diagnostics: Vec::new(),
+        plan: Some(plan),
+        report: Some(report),
+    })
 }
 
 impl RuntimeApiResponse {
@@ -249,7 +230,12 @@ fn cors_layer() -> CorsLayer {
 mod tests {
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode, header::CONTENT_TYPE},
+        http::{
+            Method, Request, StatusCode,
+            header::{
+                ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_METHOD, CONTENT_TYPE, ORIGIN,
+            },
+        },
     };
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -272,6 +258,54 @@ mod tests {
         assert_eq!(response["name"], "skenion-runtime");
         assert_eq!(response["apiVersion"], RUNTIME_API_VERSION);
         assert_eq!(response["capabilities"][0], "project.validate");
+        assert_eq!(response["capabilities"][1], "project.plan");
+        assert_eq!(response["capabilities"][2], "dummy.run");
+    }
+
+    #[tokio::test]
+    async fn cors_allows_local_studio_origin() {
+        let response = runtime_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/v0/runtime/info")
+                    .header(ORIGIN, "http://127.0.0.1:5173")
+                    .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+            "http://127.0.0.1:5173"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_rejects_unknown_origin() {
+        let response = runtime_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/v0/runtime/info")
+                    .header(ORIGIN, "http://example.test")
+                    .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -300,6 +334,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validation_response_reports_registry_errors() {
+        let mut request = sample_project();
+        let duplicate = request["nodes"][0].clone();
+        request["nodes"].as_array_mut().unwrap().push(duplicate);
+
+        let response = post_json("/v0/validate", request).await;
+
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("duplicate node definition")
+        );
+    }
+
+    #[tokio::test]
     async fn plan_endpoint_returns_execution_plan() {
         let response = post_json("/v0/plan", sample_project()).await;
 
@@ -307,6 +358,38 @@ mod tests {
         assert_eq!(response["plan"]["graphId"], "minimal-value");
         assert_eq!(response["plan"]["nodes"][0]["nodeId"], "value_1");
         assert_eq!(response["report"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn plan_endpoint_reports_registry_errors() {
+        let mut request = sample_project();
+        request["nodes"][0]["schemaVersion"] = json!("9.9.9");
+
+        let response = post_json("/v0/plan", request).await;
+
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid node definition")
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_endpoint_reports_graph_errors() {
+        let mut request = sample_project();
+        request["nodes"] = json!([]);
+
+        let response = post_json("/v0/plan", request).await;
+
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing node definition")
+        );
     }
 
     #[tokio::test]
@@ -320,6 +403,47 @@ mod tests {
         assert_eq!(
             response["report"]["frames"][0]["executedNodes"][0]["status"],
             "simulated"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_endpoint_defaults_to_one_frame() {
+        let response = post_json("/v0/run", sample_project()).await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["report"]["frameCount"], 1);
+        assert_eq!(response["report"]["frames"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_endpoint_reports_registry_errors() {
+        let mut request = sample_project();
+        request["nodes"][0]["schemaVersion"] = json!("9.9.9");
+
+        let response = post_json("/v0/run", request).await;
+
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid node definition")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_endpoint_reports_graph_errors() {
+        let mut request = sample_project();
+        request["nodes"] = json!([]);
+
+        let response = post_json("/v0/run", request).await;
+
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing node definition")
         );
     }
 

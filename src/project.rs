@@ -78,10 +78,10 @@ pub fn validate_project(
 
     validate_edges(graph, &definitions_by_node, &mut errors);
 
-    if detect_cycle(graph).is_some() {
+    if let Some(nodes) = detect_cycle(graph) {
         errors.push(ProjectValidationError::new(format!(
             "cycle detected: {}",
-            cycle_node_list(graph)
+            nodes.join(", ")
         )));
     }
 
@@ -249,13 +249,6 @@ pub(crate) fn detect_cycle(graph: &GraphDocument) -> Option<Vec<String>> {
     None
 }
 
-fn cycle_node_list(graph: &GraphDocument) -> String {
-    detect_cycle(graph)
-        .filter(|nodes| !nodes.is_empty())
-        .unwrap_or_else(|| graph.nodes.iter().map(|node| node.id.clone()).collect())
-        .join(", ")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisitState {
     Unvisited,
@@ -287,5 +280,333 @@ fn visit<'a>(
             state.insert(node, VisitState::Visited);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn graph(value: Value) -> GraphDocument {
+        serde_json::from_value(value).expect("graph fixture should deserialize")
+    }
+
+    fn definition(value: Value) -> NodeDefinition {
+        serde_json::from_value(value).expect("definition fixture should deserialize")
+    }
+
+    fn registry(definitions: Vec<NodeDefinition>) -> NodeRegistry {
+        let mut registry = NodeRegistry::new();
+        for definition in definitions {
+            registry
+                .insert(definition)
+                .expect("definition fixture should be valid");
+        }
+        registry
+    }
+
+    fn value_source_definition() -> NodeDefinition {
+        definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.source",
+          "version": "0.1.0",
+          "displayName": "Source",
+          "category": "Core",
+          "ports": [
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+          ],
+          "execution": { "model": "value" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+    }
+
+    fn value_target_definition() -> NodeDefinition {
+        definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.target",
+          "version": "0.1.0",
+          "displayName": "Target",
+          "category": "Core",
+          "ports": [
+            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" }
+          ],
+          "execution": { "model": "value" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+    }
+
+    fn base_graph() -> GraphDocument {
+        graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "project",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "source",
+              "kind": "core.source",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+              ]
+            },
+            {
+              "id": "target",
+              "kind": "core.target",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" }
+              ]
+            }
+          ],
+          "edges": [
+            { "from": { "node": "source", "port": "out" }, "to": { "node": "target", "port": "in" } }
+          ]
+        }))
+    }
+
+    #[test]
+    fn validates_project_against_registry() {
+        let graph = base_graph();
+        let registry = registry(vec![value_source_definition(), value_target_definition()]);
+
+        assert!(validate_project(&graph, &registry).is_ok());
+    }
+
+    #[test]
+    fn reports_graph_schema_and_missing_definition_errors() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "broken",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "dup",
+              "kind": "core.source",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+              ]
+            },
+            {
+              "id": "dup",
+              "kind": "core.missing",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+              ]
+            }
+          ],
+          "edges": []
+        }));
+
+        let report = validate_project(&graph, &NodeRegistry::new()).unwrap_err();
+        let display = report.to_string();
+
+        assert!(report.errors().len() >= 3);
+        assert!(display.contains("duplicate node id: dup"));
+        assert!(display.contains("missing node definition: core.source@0.1.0"));
+        assert!(display.contains("missing node definition: core.missing@0.1.0"));
+    }
+
+    #[test]
+    fn reports_snapshot_manifest_mismatches() {
+        let definition = definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.snapshot",
+          "version": "0.1.0",
+          "displayName": "Snapshot",
+          "category": "Core",
+          "ports": [
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32", "range": { "min": 0, "max": 1 } } },
+            { "id": "unused", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+          ],
+          "execution": { "model": "value" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }));
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "snapshot",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "node",
+              "kind": "core.snapshot",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "out", "direction": "input", "type": { "flow": "event", "dataKind": "bang" }, "activation": "trigger" },
+                { "id": "ghost", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+              ]
+            }
+          ],
+          "edges": []
+        }));
+        let report = validate_project(&graph, &registry(vec![definition])).unwrap_err();
+        let display = report.to_string();
+
+        assert!(display.contains("port snapshot missing manifest port: node.unused"));
+        assert!(display.contains("port snapshot references missing manifest port: node.ghost"));
+        assert!(display.contains("direction Input != definition direction Output"));
+        assert!(display.contains("flow Event != definition flow Value"));
+        assert!(display.contains("dataKind bang != definition dataKind f32"));
+        assert!(display.contains("event<bang> is not compatible with definition type value<f32>"));
+    }
+
+    #[test]
+    fn reports_edge_endpoint_direction_and_type_errors() {
+        let source_definition = definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.edge-source",
+          "version": "0.1.0",
+          "displayName": "Edge Source",
+          "category": "Core",
+          "ports": [
+            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+          ],
+          "execution": { "model": "value" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }));
+        let target_definition = definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.edge-target",
+          "version": "0.1.0",
+          "displayName": "Edge Target",
+          "category": "Core",
+          "ports": [
+            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+          ],
+          "execution": { "model": "value" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }));
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "edges",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "source",
+              "kind": "core.edge-source",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+              ]
+            },
+            {
+              "id": "target",
+              "kind": "core.edge-target",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+              ]
+            }
+          ],
+          "edges": [
+            { "from": { "node": "source", "port": "missing" }, "to": { "node": "target", "port": "missing" } },
+            { "from": { "node": "source", "port": "in" }, "to": { "node": "target", "port": "out" } },
+            { "from": { "node": "source", "port": "out" }, "to": { "node": "target", "port": "in" } }
+          ]
+        }));
+
+        let report = validate_project(
+            &graph,
+            &registry(vec![source_definition, target_definition]),
+        )
+        .unwrap_err();
+        let display = report.to_string();
+
+        assert!(display.contains("edge references missing manifest source port source:missing"));
+        assert!(display.contains("edge references missing manifest target port target:missing"));
+        assert!(display.contains("edge source source:in is not an output port"));
+        assert!(display.contains("edge target target:out is not an input port"));
+        assert!(
+            display.contains("incompatible edge source:out value<f32> -> target:in value<boolean>")
+        );
+    }
+
+    #[test]
+    fn reports_cycles() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "cycle",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "a",
+              "kind": "core.target",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+              ]
+            },
+            {
+              "id": "b",
+              "kind": "core.target",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+              ]
+            }
+          ],
+          "edges": [
+            { "from": { "node": "a", "port": "out" }, "to": { "node": "b", "port": "in" } },
+            { "from": { "node": "b", "port": "out" }, "to": { "node": "a", "port": "in" } }
+          ]
+        }));
+        let pass_definition = definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.target",
+          "version": "0.1.0",
+          "displayName": "Target",
+          "category": "Core",
+          "ports": [
+            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+          ],
+          "execution": { "model": "value" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }));
+
+        let report = validate_project(&graph, &registry(vec![pass_definition])).unwrap_err();
+
+        assert!(report.to_string().contains("cycle detected: a, b, a"));
     }
 }

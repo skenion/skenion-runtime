@@ -269,6 +269,18 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    fn graph_node(id: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "core.value-f32",
+          "kindVersion": "0.1.0",
+          "params": {},
+          "ports": [
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+          ]
+        })
+    }
+
     #[test]
     fn builds_plan_for_dag() {
         let graph = graph(json!({
@@ -306,6 +318,24 @@ mod tests {
         assert_eq!(plan.nodes[0].node_id, "value");
         assert_eq!(plan.nodes[1].node_id, "pass");
         assert_eq!(plan.groups[0].node_ids, vec!["value", "pass"]);
+        assert_eq!(plan.edges[0].from_node, "value");
+        assert!(format_plan_text(&plan).contains("model=value"));
+    }
+
+    #[test]
+    fn rejects_invalid_project_before_planning() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "missing-definition",
+          "revision": "1",
+          "nodes": [graph_node("value")],
+          "edges": []
+        }));
+
+        let error = build_execution_plan(&graph, &NodeRegistry::new()).unwrap_err();
+
+        assert!(matches!(error, PlanError::InvalidProject(_)));
     }
 
     #[test]
@@ -345,5 +375,99 @@ mod tests {
 
         let error = build_execution_plan(&graph, &registry()).unwrap_err();
         assert!(error.to_string().contains("cycle detected"));
+    }
+
+    #[test]
+    fn topological_order_ignores_edges_with_missing_nodes() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "dangling",
+          "revision": "1",
+          "nodes": [graph_node("value")],
+          "edges": [
+            { "from": { "node": "value", "port": "out" }, "to": { "node": "missing", "port": "in" } },
+            { "from": { "node": "missing", "port": "out" }, "to": { "node": "value", "port": "out" } }
+          ]
+        }));
+
+        assert_eq!(topological_order(&graph).unwrap(), vec!["value"]);
+    }
+
+    #[test]
+    fn topological_order_reports_cycles() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "cycle",
+          "revision": "1",
+          "nodes": [graph_node("a"), graph_node("b")],
+          "edges": [
+            { "from": { "node": "a", "port": "out" }, "to": { "node": "b", "port": "out" } },
+            { "from": { "node": "b", "port": "out" }, "to": { "node": "a", "port": "out" } }
+          ]
+        }));
+
+        let error = topological_order(&graph).unwrap_err();
+
+        assert!(matches!(error, PlanError::Cycle { .. }));
+        assert!(error.to_string().contains("cycle detected"));
+    }
+
+    #[test]
+    fn formats_all_execution_model_labels() {
+        let models = [
+            ExecutionModel::Event,
+            ExecutionModel::Value,
+            ExecutionModel::Frame,
+            ExecutionModel::AudioBlock,
+            ExecutionModel::VideoFrame,
+            ExecutionModel::GpuPass,
+            ExecutionModel::AsyncResource,
+            ExecutionModel::ScriptControl,
+            ExecutionModel::NativePlugin,
+        ];
+        let nodes = models
+            .iter()
+            .enumerate()
+            .map(|(order, execution_model)| PlanNode {
+                node_id: format!("node-{order}"),
+                kind: "core.node".to_owned(),
+                kind_version: "0.1.0".to_owned(),
+                execution_model: execution_model.clone(),
+                order,
+            })
+            .collect::<Vec<_>>();
+        let groups = models
+            .iter()
+            .enumerate()
+            .map(|(order, execution_model)| ExecutionGroup {
+                execution_model: execution_model.clone(),
+                node_ids: vec![format!("node-{order}")],
+            })
+            .collect();
+        let plan = ExecutionPlan {
+            graph_id: "models".to_owned(),
+            graph_revision: "1".to_owned(),
+            nodes,
+            edges: Vec::new(),
+            groups,
+        };
+
+        let text = format_plan_text(&plan);
+
+        for label in [
+            "event",
+            "value",
+            "frame",
+            "audio_block",
+            "video_frame",
+            "gpu_pass",
+            "async_resource",
+            "script_control",
+            "native_plugin",
+        ] {
+            assert!(text.contains(label));
+        }
     }
 }

@@ -25,6 +25,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
+      - run: rustup component add llvm-tools-preview
+      - run: cargo install cargo-llvm-cov --locked
+      - run: cargo llvm-cov --all-targets --all-features --ignore-filename-regex '(src/main\.rs|src/visual\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 100 --fail-under-functions 100 --summary-only
       - run: bash scripts/validate-with-runtime.sh ../..
         working-directory: .deps/skenion-examples
       - run: cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes
