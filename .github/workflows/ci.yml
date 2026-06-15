@@ -29,6 +29,8 @@ jobs:
         working-directory: .deps/skenion-examples
       - run: cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes
       - run: cargo run -- plan --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes --format json
+      - run: cargo run -- run --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes --frames 2 --format json
+      - run: cargo run -- preview --help
       - run: |
           if cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/invalid/missing-definition.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes; then
             echo "missing-definition fixture unexpectedly passed" >&2

@@ -3,7 +3,9 @@ mod loader;
 mod planner;
 mod project;
 mod registry;
+mod scheduler;
 mod validation;
+mod visual;
 
 pub use contract::{
     DataFlow, DataType, Edge, ExecutionModel, GraphDocument, GraphNode, NodeDefinition,
@@ -17,7 +19,12 @@ pub use planner::{
 };
 pub use project::{ProjectValidationError, ProjectValidationReport, validate_project};
 pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadError};
+pub use scheduler::{
+    DummyExecutionReport, DummyFrameReport, DummyNodeExecution, format_dummy_execution_text,
+    run_dummy_execution,
+};
 pub use validation::{
     ValidationError, ValidationReport, compatible_data_types, type_label, validate_graph_document,
     validate_node_definition,
 };
+pub use visual::run_preview_window;

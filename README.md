@@ -24,6 +24,8 @@ It can validate and plan:
 - graph port snapshots against authoritative node definitions
 - topological execution plan skeletons
 - cycle detection
+- deterministic dummy execution reports
+- a local winit placeholder preview window
 
 ```sh
 cargo run -- validate-node path/to/node-definition.json
@@ -31,10 +33,13 @@ cargo run -- validate-graph path/to/graph.json
 cargo run -- validate-project --graph path/to/graph.json --nodes path/to/node-definitions
 cargo run -- plan --graph path/to/graph.json --nodes path/to/node-definitions --format text
 cargo run -- plan --graph path/to/graph.json --nodes path/to/node-definitions --format json
+cargo run -- run --graph path/to/graph.json --nodes path/to/node-definitions --frames 2 --format json
+cargo run -- preview --graph path/to/graph.json --nodes path/to/node-definitions --frames 300
 ```
 
-This loader is intentionally conservative. Video, audio, GPU, and resource
-conversions must appear as explicit converter nodes in saved graph documents.
+The preview window is a visual shell only. It advances a placeholder frame
+counter from the execution plan and does not perform GPU rendering, video/audio
+processing, or script execution yet.
 
 ## Status
 

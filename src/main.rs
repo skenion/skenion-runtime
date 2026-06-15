@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
-    NodeRegistry, build_execution_plan, format_plan_text, load_graph_document,
-    load_node_definition, validate_project,
+    ExecutionPlan, NodeRegistry, build_execution_plan, format_dummy_execution_text,
+    format_plan_text, load_graph_document, load_node_definition, run_dummy_execution,
+    run_preview_window, validate_project,
 };
 
 #[derive(Debug, Parser)]
@@ -43,13 +44,40 @@ enum Command {
         #[arg(long)]
         nodes: PathBuf,
         /// Output format.
-        #[arg(long, value_enum, default_value_t = PlanFormat::Text)]
-        format: PlanFormat,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Run a deterministic dummy execution from an execution plan.
+    Run {
+        /// Path to the graph document.
+        #[arg(long)]
+        graph: PathBuf,
+        /// Directory containing node definition manifests.
+        #[arg(long)]
+        nodes: PathBuf,
+        /// Number of dummy frames to simulate.
+        #[arg(long, default_value_t = 1)]
+        frames: usize,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Open a local placeholder preview window driven by the execution plan.
+    Preview {
+        /// Path to the graph document.
+        #[arg(long)]
+        graph: PathBuf,
+        /// Directory containing node definition manifests.
+        #[arg(long)]
+        nodes: PathBuf,
+        /// Number of placeholder frames before the preview exits.
+        #[arg(long, default_value_t = 300)]
+        frames: usize,
     },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum PlanFormat {
+enum OutputFormat {
     Text,
     Json,
 }
@@ -90,18 +118,48 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             nodes,
             format,
         } => {
-            let graph = load_graph_document(&graph)?;
-            let registry = NodeRegistry::load_dir(&nodes)?;
-            let plan = build_execution_plan(&graph, &registry)?;
+            let plan = load_plan(graph, nodes)?;
             match format {
-                PlanFormat::Text => {
+                OutputFormat::Text => {
                     print!("{}", format_plan_text(&plan));
                 }
-                PlanFormat::Json => {
+                OutputFormat::Json => {
                     println!("{}", serde_json::to_string_pretty(&plan)?);
                 }
             }
             Ok(())
         }
+        Command::Run {
+            graph,
+            nodes,
+            frames,
+            format,
+        } => {
+            let plan = load_plan(graph, nodes)?;
+            let report = run_dummy_execution(&plan, frames);
+            match format {
+                OutputFormat::Text => {
+                    print!("{}", format_dummy_execution_text(&report));
+                }
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+            }
+            Ok(())
+        }
+        Command::Preview {
+            graph,
+            nodes,
+            frames,
+        } => {
+            let plan = load_plan(graph, nodes)?;
+            run_preview_window(plan, frames)
+        }
     }
+}
+
+fn load_plan(graph: PathBuf, nodes: PathBuf) -> Result<ExecutionPlan, Box<dyn std::error::Error>> {
+    let graph = load_graph_document(&graph)?;
+    let registry = NodeRegistry::load_dir(&nodes)?;
+    Ok(build_execution_plan(&graph, &registry)?)
 }
