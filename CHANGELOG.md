@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.3.0...skenion-runtime-v0.4.0) (2026-06-15)
+
+
+### Features
+
+* **runtime:** add visual shell ([#5](https://github.com/echovisionlab/skenion-runtime/issues/5)) ([c7d5fd3](https://github.com/echovisionlab/skenion-runtime/commit/c7d5fd3976a91ddb8baeb22d1a8bb200c35e6b67))
+
 ## [0.3.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.2.0...skenion-runtime-v0.3.0) (2026-06-15)
 
 
