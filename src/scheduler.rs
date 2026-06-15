@@ -79,12 +79,12 @@ pub fn format_dummy_execution_text(report: &DummyExecutionReport) -> String {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ExecutionGroup, ExecutionModel, ExecutionPlan, PlanEdge, PlanNode, run_dummy_execution,
+        ExecutionGroup, ExecutionModel, ExecutionPlan, PlanEdge, PlanNode,
+        format_dummy_execution_text, run_dummy_execution,
     };
 
-    #[test]
-    fn dummy_execution_follows_plan_order_for_each_frame() {
-        let plan = ExecutionPlan {
+    fn plan() -> ExecutionPlan {
+        ExecutionPlan {
             graph_id: "graph".to_owned(),
             graph_revision: "1".to_owned(),
             nodes: vec![
@@ -113,11 +113,26 @@ mod tests {
                 execution_model: ExecutionModel::Value,
                 node_ids: vec!["a".to_owned(), "b".to_owned()],
             }],
-        };
+        }
+    }
 
-        let report = run_dummy_execution(&plan, 2);
+    #[test]
+    fn dummy_execution_follows_plan_order_for_each_frame() {
+        let report = run_dummy_execution(&plan(), 2);
         assert_eq!(report.frame_count, 2);
         assert_eq!(report.frames[0].executed_nodes[0].node_id, "a");
         assert_eq!(report.frames[1].executed_nodes[1].node_id, "b");
+    }
+
+    #[test]
+    fn dummy_execution_clamps_zero_frames_and_formats_report() {
+        let report = run_dummy_execution(&plan(), 0);
+        let text = format_dummy_execution_text(&report);
+
+        assert_eq!(report.frame_count, 1);
+        assert_eq!(report.frames.len(), 1);
+        assert!(text.contains("dummy execution: graph revision 1 frames=1"));
+        assert!(text.contains("frame 0:"));
+        assert!(text.contains("a core.value-f32@0.1.0 order=0 status=simulated"));
     }
 }
