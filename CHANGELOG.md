@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.4.0...skenion-runtime-v0.5.0) (2026-06-15)
+
+
+### Features
+
+* **runtime:** add local control server ([#7](https://github.com/echovisionlab/skenion-runtime/issues/7)) ([995b78b](https://github.com/echovisionlab/skenion-runtime/commit/995b78b02c92b4ffa6465ebcdd51cecc416b9cfb))
+
 ## [0.4.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.3.0...skenion-runtime-v0.4.0) (2026-06-15)
 
 
