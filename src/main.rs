@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
-    ExecutionPlan, NodeRegistry, build_execution_plan, format_dummy_execution_text,
-    format_plan_text, load_graph_document, load_node_definition, run_dummy_execution,
-    run_preview_window, validate_project,
+    DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeRegistry, build_execution_plan,
+    format_dummy_execution_text, format_plan_text, load_graph_document, load_node_definition,
+    run_dummy_execution, run_preview_window, serve_runtime, validate_project,
 };
 
 #[derive(Debug, Parser)]
@@ -74,6 +74,15 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         frames: usize,
     },
+    /// Start the local HTTP JSON control API.
+    Serve {
+        /// Host to bind. Defaults to localhost for local development safety.
+        #[arg(long, default_value = DEFAULT_HOST)]
+        host: String,
+        /// Port to bind.
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -82,16 +91,17 @@ enum OutputFormat {
     Json,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
-    if let Err(error) = run(cli) {
+    if let Err(error) = run(cli).await {
         eprintln!("{error}");
         std::process::exit(1);
     }
 }
 
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::ValidateNode { path } => load_node_definition(&path)
             .map(|definition| {
@@ -155,6 +165,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let plan = load_plan(graph, nodes)?;
             run_preview_window(plan, frames)
         }
+        Command::Serve { host, port } => serve_runtime(&host, port).await,
     }
 }
 
