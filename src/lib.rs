@@ -12,8 +12,9 @@ mod visual;
 
 pub use contract::{
     ApplyPatchError, DataFlow, DataType, Edge, ExecutionModel, GraphDocument, GraphNode,
-    GraphPatch, GraphPatchOperation, NodeDefinition, NodeExecution, NodeState, NumberRange, Port,
-    PortActivation, PortDirection, PortRef, StringOrStrings,
+    GraphPatch, GraphPatchEvent, GraphPatchEventKind, GraphPatchHistory, GraphPatchOperation,
+    InvertPatchError, NodeDefinition, NodeExecution, NodeState, NumberRange, Port, PortActivation,
+    PortDirection, PortRef, StringOrStrings,
 };
 pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
@@ -37,7 +38,7 @@ pub use session::{
     SessionRunRequest,
 };
 pub use validation::{
-    ValidationError, ValidationReport, apply_graph_patch, compatible_data_types, type_label,
-    validate_graph_document, validate_node_definition,
+    ValidationError, ValidationReport, apply_graph_patch, compatible_data_types,
+    invert_graph_patch, type_label, validate_graph_document, validate_node_definition,
 };
 pub use visual::run_preview_window;
