@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.7.0...skenion-runtime-v0.7.1) (2026-06-16)
+
+
+### Bug Fixes
+
+* **runtime:** consume contracts graph serialization fix ([6936c85](https://github.com/echovisionlab/skenion-runtime/commit/6936c854e6d07d87769f79e0e70a878256da99c9))
+
 ## [0.7.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.6.0...skenion-runtime-v0.7.0) (2026-06-16)
 
 
