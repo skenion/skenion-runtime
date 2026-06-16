@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.7.1...skenion-runtime-v0.8.0) (2026-06-16)
+
+
+### Features
+
+* **runtime:** record patch event history ([f53e61c](https://github.com/echovisionlab/skenion-runtime/commit/f53e61c6d93668494efaf38e356b022a2e96ecc5))
+
 ## [0.7.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.7.0...skenion-runtime-v0.7.1) (2026-06-16)
 
 
