@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Edge, ExecutionModel, GraphDocument, NodeRegistry, ProjectValidationReport, validate_project,
+    Edge, ExecutionModel, FeedbackPolicyV02, GraphDocument, NodeRegistry, ProjectValidationReport,
+    validate_project,
 };
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -34,6 +35,25 @@ pub struct PlanEdge {
     pub from_port: String,
     pub to_node: String,
     pub to_port: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<PlanEdgeMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEdgeMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fan_out_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<FeedbackPolicyV02>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle_classification: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -199,6 +219,7 @@ fn plan_edge(edge: &Edge) -> PlanEdge {
         from_port: edge.from.port.clone(),
         to_node: edge.to.node.clone(),
         to_port: edge.to.port.clone(),
+        metadata: None,
     }
 }
 

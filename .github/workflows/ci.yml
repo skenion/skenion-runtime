@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: echovisionlab/skenion-examples
+          ref: codex/examples-port-edge-feedback-v014
           path: .deps/skenion-examples
       - run: rustup show
       - run: cargo fmt --check
@@ -83,6 +84,10 @@ jobs:
           post_expect_ok true /v0/run .deps/skenion-examples/compatibility/v0.1/projects/valid/minimal-value.project.json
           post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/invalid/missing-definition.project.json
           post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/invalid/incompatible-edge.project.json
+          post_expect_ok true /v0/validate .deps/skenion-examples/compatibility/v0.2/projects/valid/render-output.project.json
+          post_expect_ok true /v0/plan .deps/skenion-examples/compatibility/v0.2/projects/valid/render-output.project.json
+          post_expect_ok true /v0/run .deps/skenion-examples/compatibility/v0.2/projects/valid/render-output.project.json
+          post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.2/projects/invalid/ambiguous-algebraic-loop.project.json
 
           (
             cd .deps/skenion-examples

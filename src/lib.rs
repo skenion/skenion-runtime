@@ -3,6 +3,7 @@ mod loader;
 mod planner;
 mod preview_manager;
 mod project;
+mod project_v02;
 mod registry;
 mod render;
 mod scheduler;
@@ -14,21 +15,26 @@ mod validation;
 mod visual;
 
 pub use contract::{
-    ApplyPatchError, DataFlow, DataType, Edge, ExecutionModel, GraphDocument, GraphNode,
-    GraphPatch, GraphPatchEvent, GraphPatchEventKind, GraphPatchHistory, GraphPatchOperation,
-    InvertPatchError, NodeDefinition, NodeExecution, NodeState, NumberRange, Port, PortActivation,
-    PortDirection, PortRef, StringOrStrings,
+    ApplyPatchError, CycleValidationV02, DataFlow, DataType, Edge, EdgeSpecV02, ExecutionModel,
+    ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02, FeedbackPolicyV02, GraphDocument,
+    GraphDocumentV02, GraphNode, GraphNodeV02, GraphPatch, GraphPatchEvent, GraphPatchEventKind,
+    GraphPatchHistory, GraphPatchOperation, GraphValidationResultV02, InvertPatchError,
+    MergePolicyV02, NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState, NumberRange, Port,
+    PortActivation, PortDirection, PortDirectionV02, PortRef, PortSpecV02, StringOrStrings,
 };
 pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
-    ExecutionGroup, ExecutionPlan, PlanEdge, PlanError, PlanNode, build_execution_plan,
-    format_plan_text,
+    ExecutionGroup, ExecutionPlan, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode,
+    build_execution_plan, format_plan_text,
 };
 pub use preview_manager::{
     PreviewContext, PreviewManager, PreviewState, RuntimePreviewStartRequest,
     RuntimePreviewStatusResponse,
 };
 pub use project::{ProjectValidationError, ProjectValidationReport, validate_project};
+pub use project_v02::{
+    ProjectRequestV02, RunProjectRequestV02, build_execution_plan_v02, validate_project_v02,
+};
 pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadError};
 pub use render::{
     ClearColorScene, DEFAULT_CLEAR_COLOR, FullscreenShaderScene, PREVIEW_DOCUMENT_SCHEMA,
