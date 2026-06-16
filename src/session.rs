@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DummyExecutionReport, ExecutionPlan, GraphDocument, NodeRegistry, ProjectRequest,
-    RuntimeDiagnostic, build_execution_plan, run_dummy_execution,
+    DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, NodeRegistry, ProjectRequest,
+    RuntimeDiagnostic, apply_graph_patch, build_execution_plan, run_dummy_execution,
     server::{registry_from_nodes, validate_graph_with_registry},
 };
 
@@ -28,6 +28,17 @@ pub struct RuntimeSessionResponse {
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
     pub report: Option<DummyExecutionReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePatchResponse {
+    pub ok: bool,
+    pub applied: bool,
+    pub conflict: bool,
+    pub graph: Option<GraphDocument>,
+    pub session: RuntimeSessionResponse,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,6 +150,72 @@ impl RuntimeSession {
         self.response(true, self.diagnostics.clone(), report)
     }
 
+    pub fn apply_patch(&mut self, patch: GraphPatch) -> RuntimePatchResponse {
+        let (graph, registry) = match (self.graph.clone(), self.registry.clone()) {
+            (Some(graph), Some(registry)) => (graph, registry),
+            _ => {
+                return self.patch_response(
+                    false,
+                    false,
+                    false,
+                    None,
+                    vec![RuntimeDiagnostic::error(
+                        "no project loaded in runtime session",
+                    )],
+                );
+            }
+        };
+
+        if patch.base_revision != graph.revision {
+            return self.patch_response(
+                false,
+                false,
+                true,
+                Some(graph.clone()),
+                vec![RuntimeDiagnostic::error(format!(
+                    "patch baseRevision {} does not match session graph revision {}",
+                    patch.base_revision, graph.revision
+                ))],
+            );
+        }
+
+        let next_revision = next_graph_revision(&graph.revision);
+        let patched_graph = match apply_graph_patch(&graph, &patch, Some(&next_revision)) {
+            Ok(patched_graph) => patched_graph,
+            Err(error) => {
+                return self.patch_response(
+                    false,
+                    false,
+                    false,
+                    Some(graph.clone()),
+                    vec![RuntimeDiagnostic::error(error.to_string())],
+                );
+            }
+        };
+
+        if let Err(diagnostics) = validate_graph_with_registry(&patched_graph, &registry) {
+            return self.patch_response(false, false, false, Some(graph.clone()), diagnostics);
+        }
+
+        let plan =
+            build_execution_plan(&patched_graph, &registry).expect("validated project should plan");
+        self.graph = Some(patched_graph.clone());
+        self.registry = Some(registry);
+        self.plan = Some(plan);
+        self.diagnostics = Vec::new();
+        self.revision += 1;
+
+        self.patch_response(true, true, false, Some(patched_graph), Vec::new())
+    }
+
+    pub fn reject_patch(
+        &self,
+        conflict: bool,
+        diagnostics: Vec<RuntimeDiagnostic>,
+    ) -> RuntimePatchResponse {
+        self.patch_response(false, false, conflict, self.graph.clone(), diagnostics)
+    }
+
     pub fn clear(&mut self) -> RuntimeSessionResponse {
         self.graph = None;
         self.registry = None;
@@ -167,16 +244,41 @@ impl RuntimeSession {
         }
     }
 
+    fn patch_response(
+        &self,
+        ok: bool,
+        applied: bool,
+        conflict: bool,
+        graph: Option<GraphDocument>,
+        diagnostics: Vec<RuntimeDiagnostic>,
+    ) -> RuntimePatchResponse {
+        RuntimePatchResponse {
+            ok,
+            applied,
+            conflict,
+            graph,
+            session: self.response(ok, diagnostics.clone(), None),
+            diagnostics,
+        }
+    }
+
     fn loaded_project(&self) -> Option<(&GraphDocument, &NodeRegistry)> {
         Some((self.graph.as_ref()?, self.registry.as_ref()?))
     }
+}
+
+fn next_graph_revision(current: &str) -> String {
+    current
+        .parse::<u64>()
+        .map(|revision| (revision + 1).to_string())
+        .unwrap_or_else(|_| format!("{current}+1"))
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
-    use crate::{NodeRegistry, ProjectRequest};
+    use crate::{GraphPatch, NodeRegistry, ProjectRequest, RuntimeDiagnostic};
 
     use super::RuntimeSession;
 
@@ -270,6 +372,264 @@ mod tests {
         );
     }
 
+    #[test]
+    fn patch_without_loaded_session_returns_error() {
+        let mut session = RuntimeSession::default();
+
+        let response = session.apply_patch(set_value_patch("1", 0.75));
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(!response.conflict);
+        assert!(response.graph.is_none());
+        assert!(!response.session.loaded);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("no project loaded in runtime session")
+        );
+    }
+
+    #[test]
+    fn patch_with_matching_revision_applies_and_rebuilds_plan() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+        assert!(loaded.ok);
+
+        let response = session.apply_patch(set_value_patch("1", 0.75));
+
+        assert!(response.ok);
+        assert!(response.applied);
+        assert!(!response.conflict);
+        assert_eq!(response.graph.as_ref().unwrap().revision, "2");
+        assert_eq!(response.session.graph_revision.as_deref(), Some("2"));
+        assert_eq!(response.session.session_revision, 2);
+        assert_eq!(response.session.plan.as_ref().unwrap().graph_revision, "2");
+        assert_eq!(
+            response.graph.as_ref().unwrap().nodes[0].params["value"],
+            Value::from(0.75)
+        );
+    }
+
+    #[test]
+    fn patch_with_wrong_base_revision_conflicts_without_mutating_session() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+
+        let response = session.apply_patch(set_value_patch("0", 0.75));
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(response.conflict);
+        assert_eq!(response.graph.as_ref().unwrap().revision, "1");
+        assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
+        assert_eq!(snapshot.session_revision, 1);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("does not match session graph revision")
+        );
+    }
+
+    #[test]
+    fn invalid_patch_operations_do_not_mutate_session() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+
+        let duplicate = session.apply_patch(duplicate_edge_patch());
+        let missing = session.apply_patch(missing_node_patch());
+        let snapshot = session.snapshot();
+
+        assert!(!duplicate.ok);
+        assert!(!duplicate.applied);
+        assert!(!duplicate.conflict);
+        assert!(duplicate.diagnostics[0].message.contains("already exists"));
+        assert!(!missing.ok);
+        assert!(missing.diagnostics[0].message.contains("does not exist"));
+        assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
+        assert_eq!(snapshot.session_revision, 1);
+    }
+
+    #[test]
+    fn incompatible_patch_result_does_not_mutate_session() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+
+        let response = session.apply_patch(incompatible_edge_patch());
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(!response.conflict);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("incompatible edge")
+        );
+        assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
+        assert_eq!(snapshot.session_revision, 1);
+    }
+
+    #[test]
+    fn registry_invalid_patch_result_does_not_mutate_session() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+
+        let response = session.apply_patch(missing_definition_node_patch());
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(!response.conflict);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("missing node definition")
+        );
+        assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
+        assert_eq!(snapshot.session_revision, 1);
+    }
+
+    #[test]
+    fn remove_node_patch_removes_incident_edges() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+
+        let response = session.apply_patch(graph_patch(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "remove-node",
+          "baseRevision": "1",
+          "ops": [
+            { "op": "removeNode", "nodeId": "value_1" }
+          ]
+        })));
+
+        assert!(response.ok);
+        let graph = response.graph.as_ref().unwrap();
+        assert_eq!(graph.revision, "2");
+        assert!(graph.nodes.iter().all(|node| node.id != "value_1"));
+        assert!(graph.edges.is_empty());
+    }
+
+    #[test]
+    fn patch_non_numeric_revision_gets_suffix() {
+        let mut project = sample_project();
+        project.graph.revision = "rev_0001".to_owned();
+        let mut session = RuntimeSession::default();
+        session.load_project(project);
+
+        let response = session.apply_patch(set_value_patch("rev_0001", 0.75));
+
+        assert!(response.ok);
+        assert_eq!(response.graph.as_ref().unwrap().revision, "rev_0001+1");
+    }
+
+    #[test]
+    fn reject_patch_uses_current_session_snapshot() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+
+        let response = session.reject_patch(
+            false,
+            vec![RuntimeDiagnostic::error(
+                "invalid graph patch: unsupported op",
+            )],
+        );
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(response.graph.as_ref().unwrap().revision, "1");
+        assert_eq!(response.session.graph_revision.as_deref(), Some("1"));
+        assert!(response.diagnostics[0].message.contains("unsupported op"));
+    }
+
+    fn graph_patch(value: Value) -> GraphPatch {
+        serde_json::from_value(value).expect("patch should parse")
+    }
+
+    fn set_value_patch(base_revision: &str, value: f64) -> GraphPatch {
+        graph_patch(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "set-value",
+          "baseRevision": base_revision,
+          "ops": [
+            { "op": "setNodeParam", "nodeId": "value_1", "key": "value", "value": value }
+          ]
+        }))
+    }
+
+    fn duplicate_edge_patch() -> GraphPatch {
+        graph_patch(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "duplicate-edge",
+          "baseRevision": "1",
+          "ops": [
+            {
+              "op": "addEdge",
+              "edge": {
+                "from": { "node": "value_1", "port": "value" },
+                "to": { "node": "target_1", "port": "value" }
+              }
+            }
+          ]
+        }))
+    }
+
+    fn missing_node_patch() -> GraphPatch {
+        graph_patch(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "missing-node",
+          "baseRevision": "1",
+          "ops": [
+            { "op": "setNodeParam", "nodeId": "missing", "key": "value", "value": 1 }
+          ]
+        }))
+    }
+
+    fn incompatible_edge_patch() -> GraphPatch {
+        graph_patch(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "incompatible-edge",
+          "baseRevision": "1",
+          "ops": [
+            {
+              "op": "addEdge",
+              "edge": {
+                "from": { "node": "value_1", "port": "value" },
+                "to": { "node": "target_1", "port": "bang" }
+              }
+            }
+          ]
+        }))
+    }
+
+    fn missing_definition_node_patch() -> GraphPatch {
+        graph_patch(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "missing-definition-node",
+          "baseRevision": "1",
+          "ops": [
+            {
+              "op": "addNode",
+              "node": {
+                "id": "missing_kind_1",
+                "kind": "missing.kind",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": []
+              }
+            }
+          ]
+        }))
+    }
+
     fn sample_project() -> ProjectRequest {
         serde_json::from_value(sample_project_json()).expect("sample project should parse")
     }
@@ -297,7 +657,8 @@ mod tests {
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" }
+                  { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
+                  { "id": "bang", "direction": "input", "type": { "flow": "event", "dataKind": "bang" }, "activation": "trigger" }
                 ]
               }
             ],
@@ -329,7 +690,8 @@ mod tests {
               "displayName": "Target",
               "category": "Values",
               "ports": [
-                { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" }
+                { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
+                { "id": "bang", "direction": "input", "type": { "flow": "event", "dataKind": "bang" }, "activation": "trigger" }
               ],
               "execution": { "model": "value" },
               "state": { "persistent": false },

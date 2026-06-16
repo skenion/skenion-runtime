@@ -2,7 +2,7 @@ pub use skenion_contracts::{
     ValidationErrorV01 as ValidationError, ValidationReportV01 as ValidationReport,
 };
 
-use crate::{DataType, GraphDocument, NodeDefinition};
+use crate::{ApplyPatchError, DataType, GraphDocument, GraphPatch, NodeDefinition};
 
 pub fn validate_node_definition(definition: &NodeDefinition) -> Result<(), ValidationReport> {
     skenion_contracts::validate_node_definition_v01(definition)
@@ -10,6 +10,14 @@ pub fn validate_node_definition(definition: &NodeDefinition) -> Result<(), Valid
 
 pub fn validate_graph_document(graph: &GraphDocument) -> Result<(), ValidationReport> {
     skenion_contracts::validate_graph_document_v01(graph)
+}
+
+pub fn apply_graph_patch(
+    graph: &GraphDocument,
+    patch: &GraphPatch,
+    next_graph_revision: Option<&str>,
+) -> Result<GraphDocument, ApplyPatchError> {
+    skenion_contracts::apply_graph_patch_v01(graph, patch, next_graph_revision)
 }
 
 pub fn compatible_data_types(source_type: &DataType, target_type: &DataType) -> bool {
@@ -22,7 +30,7 @@ pub fn type_label(data_type: &DataType) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -105,5 +113,43 @@ mod tests {
 
         assert!(!report.errors().is_empty());
         assert!(!report.to_string().is_empty());
+    }
+
+    #[test]
+    fn wraps_contract_graph_patch_application() {
+        let graph: GraphDocument = serde_json::from_value(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "wrapper-patch",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "node",
+              "kind": "core.wrapper",
+              "kindVersion": "0.1.0",
+              "params": { "value": 0.5 },
+              "ports": [
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+              ]
+            }
+          ],
+          "edges": []
+        }))
+        .unwrap();
+        let patch: GraphPatch = serde_json::from_value(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "patch",
+          "baseRevision": "1",
+          "ops": [
+            { "op": "setNodeParam", "nodeId": "node", "key": "value", "value": true }
+          ]
+        }))
+        .unwrap();
+
+        let patched = apply_graph_patch(&graph, &patch, Some("2")).unwrap();
+
+        assert_eq!(patched.revision, "2");
+        assert_eq!(patched.nodes[0].params["value"], Value::Bool(true));
     }
 }

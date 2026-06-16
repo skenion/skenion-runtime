@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    DummyExecutionReport, ExecutionPlan, GraphDocument, NodeDefinition, NodeRegistry,
+    DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, NodeDefinition, NodeRegistry,
     RuntimeSession, SessionRunRequest, build_execution_plan, run_dummy_execution, validate_project,
 };
 
@@ -101,6 +101,7 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/validate", post(validate_session))
         .route("/v0/session/plan", post(plan_session))
         .route("/v0/session/run", post(run_session))
+        .route("/v0/session/patch", post(patch_session))
         .with_state(state)
         .layer(cors_layer())
 }
@@ -126,6 +127,7 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.validate",
             "session.plan",
             "session.run",
+            "session.patch",
             "session.clear",
         ],
     })
@@ -232,6 +234,29 @@ async fn run_session(
         .write()
         .expect("runtime session lock should not be poisoned");
     Json(session.run_current(request.frames.unwrap_or(1)))
+}
+
+async fn patch_session(
+    State(state): State<RuntimeServerState>,
+    Json(value): Json<serde_json::Value>,
+) -> Json<crate::RuntimePatchResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    let patch = match serde_json::from_value::<GraphPatch>(value) {
+        Ok(patch) => patch,
+        Err(error) => {
+            return Json(session.reject_patch(
+                false,
+                vec![RuntimeDiagnostic::error(format!(
+                    "invalid graph patch: {error}"
+                ))],
+            ));
+        }
+    };
+
+    Json(session.apply_patch(patch))
 }
 
 async fn clear_session(
@@ -360,6 +385,13 @@ mod tests {
         assert_eq!(response["capabilities"][1], "project.plan");
         assert_eq!(response["capabilities"][2], "dummy.run");
         assert_eq!(response["capabilities"][3], "session.load");
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "session.patch")
+        );
     }
 
     #[tokio::test]
@@ -629,6 +661,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_patch_endpoint_applies_and_rejects_conflicts() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let patched = post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+        assert_eq!(patched["ok"], true);
+        assert_eq!(patched["applied"], true);
+        assert_eq!(patched["conflict"], false);
+        assert_eq!(patched["graph"]["revision"], "2");
+        assert_eq!(patched["session"]["graphRevision"], "2");
+        assert_eq!(patched["session"]["sessionRevision"], 2);
+        assert_eq!(patched["session"]["plan"]["graphRevision"], "2");
+
+        let conflict = post_json_with(app, "/v0/session/patch", set_value_patch("1")).await;
+        assert_eq!(conflict["ok"], false);
+        assert_eq!(conflict["applied"], false);
+        assert_eq!(conflict["conflict"], true);
+        assert_eq!(conflict["graph"]["revision"], "2");
+        assert!(
+            conflict["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not match session graph revision")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_patch_endpoint_reports_errors_without_loaded_session() {
+        let response = post_json("/v0/session/patch", set_value_patch("1")).await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["applied"], false);
+        assert_eq!(response["conflict"], false);
+        assert_eq!(response["graph"], Value::Null);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no project loaded")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_patch_endpoint_reports_unsupported_operations() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let response = post_json_with(
+            app,
+            "/v0/session/patch",
+            json!({
+              "schema": "skenion.graph.patch",
+              "schemaVersion": "0.1.0",
+              "id": "unsupported",
+              "baseRevision": "1",
+              "ops": [
+                { "op": "moveNode", "nodeId": "value_1" }
+              ]
+            }),
+        )
+        .await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["applied"], false);
+        assert_eq!(response["conflict"], false);
+        assert_eq!(response["graph"]["revision"], "1");
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid graph patch")
+        );
+    }
+
+    #[tokio::test]
     async fn session_run_fails_without_loaded_project() {
         let response = post_json("/v0/session/run", json!({ "frames": 2 })).await;
 
@@ -793,6 +900,18 @@ mod tests {
               "permissions": [],
               "capabilities": []
             }
+          ]
+        })
+    }
+
+    fn set_value_patch(base_revision: &str) -> Value {
+        json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "set-value",
+          "baseRevision": base_revision,
+          "ops": [
+            { "op": "setNodeParam", "nodeId": "value_1", "key": "value", "value": 0.75 }
           ]
         })
     }
