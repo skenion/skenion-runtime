@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.10.0...skenion-runtime-v0.11.0) (2026-06-16)
+
+
+### Features
+
+* **runtime:** stream session telemetry ([#23](https://github.com/echovisionlab/skenion-runtime/issues/23)) ([5184b53](https://github.com/echovisionlab/skenion-runtime/commit/5184b5315d63bbe1fea3e522053196d68a16881b))
+
 ## [0.10.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.9.0...skenion-runtime-v0.10.0) (2026-06-16)
 
 
