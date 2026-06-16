@@ -102,6 +102,9 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/plan", post(plan_session))
         .route("/v0/session/run", post(run_session))
         .route("/v0/session/patch", post(patch_session))
+        .route("/v0/session/history", get(session_history))
+        .route("/v0/session/undo", post(undo_session))
+        .route("/v0/session/redo", post(redo_session))
         .with_state(state)
         .layer(cors_layer())
 }
@@ -128,6 +131,9 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.plan",
             "session.run",
             "session.patch",
+            "session.history",
+            "session.undo",
+            "session.redo",
             "session.clear",
         ],
     })
@@ -257,6 +263,36 @@ async fn patch_session(
     };
 
     Json(session.apply_patch(patch))
+}
+
+async fn session_history(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::GraphPatchHistory> {
+    let session = state
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.history())
+}
+
+async fn undo_session(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimePatchResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.undo())
+}
+
+async fn redo_session(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimePatchResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.redo())
 }
 
 async fn clear_session(
@@ -391,6 +427,27 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|capability| capability == "session.patch")
+        );
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "session.history")
+        );
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "session.undo")
+        );
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "session.redo")
         );
     }
 
@@ -670,6 +727,11 @@ mod tests {
         assert_eq!(patched["applied"], true);
         assert_eq!(patched["conflict"], false);
         assert_eq!(patched["graph"]["revision"], "2");
+        assert_eq!(patched["event"]["kind"], "apply");
+        assert_eq!(patched["event"]["revisionBefore"], "1");
+        assert_eq!(patched["event"]["revisionAfter"], "2");
+        assert_eq!(patched["history"]["undoDepth"], 1);
+        assert_eq!(patched["history"]["redoDepth"], 0);
         assert_eq!(patched["session"]["graphRevision"], "2");
         assert_eq!(patched["session"]["sessionRevision"], 2);
         assert_eq!(patched["session"]["plan"]["graphRevision"], "2");
@@ -679,6 +741,8 @@ mod tests {
         assert_eq!(conflict["applied"], false);
         assert_eq!(conflict["conflict"], true);
         assert_eq!(conflict["graph"]["revision"], "2");
+        assert_eq!(conflict["event"], Value::Null);
+        assert_eq!(conflict["history"]["events"].as_array().unwrap().len(), 1);
         assert!(
             conflict["diagnostics"][0]["message"]
                 .as_str()
@@ -695,6 +759,8 @@ mod tests {
         assert_eq!(response["applied"], false);
         assert_eq!(response["conflict"], false);
         assert_eq!(response["graph"], Value::Null);
+        assert_eq!(response["event"], Value::Null);
+        assert_eq!(response["history"]["events"].as_array().unwrap().len(), 0);
         assert!(
             response["diagnostics"][0]["message"]
                 .as_str()
@@ -727,11 +793,85 @@ mod tests {
         assert_eq!(response["applied"], false);
         assert_eq!(response["conflict"], false);
         assert_eq!(response["graph"]["revision"], "1");
+        assert_eq!(response["event"], Value::Null);
+        assert_eq!(response["history"]["events"].as_array().unwrap().len(), 0);
         assert!(
             response["diagnostics"][0]["message"]
                 .as_str()
                 .unwrap()
                 .contains("invalid graph patch")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_history_endpoint_returns_empty_and_event_history() {
+        let app = runtime_router();
+
+        let empty = get_json_with(app.clone(), "/v0/session/history").await;
+        assert_eq!(empty["schema"], "skenion.graph.patch.history");
+        assert_eq!(empty["events"].as_array().unwrap().len(), 0);
+        assert_eq!(empty["canUndo"], false);
+        assert_eq!(empty["canRedo"], false);
+
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+        let history = get_json_with(app, "/v0/session/history").await;
+
+        assert_eq!(history["events"].as_array().unwrap().len(), 1);
+        assert_eq!(history["events"][0]["kind"], "apply");
+        assert_eq!(history["undoDepth"], 1);
+        assert_eq!(history["redoDepth"], 0);
+    }
+
+    #[tokio::test]
+    async fn session_undo_and_redo_endpoints_update_graph_and_history() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+
+        let undo = post_empty_with(app.clone(), "/v0/session/undo").await;
+        assert_eq!(undo["ok"], true);
+        assert_eq!(undo["applied"], true);
+        assert_eq!(undo["event"]["kind"], "undo");
+        assert_eq!(undo["graph"]["revision"], "3");
+        assert_eq!(undo["history"]["events"].as_array().unwrap().len(), 2);
+        assert_eq!(undo["history"]["undoDepth"], 0);
+        assert_eq!(undo["history"]["redoDepth"], 1);
+
+        let redo = post_empty_with(app, "/v0/session/redo").await;
+        assert_eq!(redo["ok"], true);
+        assert_eq!(redo["applied"], true);
+        assert_eq!(redo["event"]["kind"], "redo");
+        assert_eq!(redo["graph"]["revision"], "4");
+        assert_eq!(redo["history"]["events"].as_array().unwrap().len(), 3);
+        assert_eq!(redo["history"]["undoDepth"], 1);
+        assert_eq!(redo["history"]["redoDepth"], 0);
+    }
+
+    #[tokio::test]
+    async fn session_undo_and_redo_endpoints_report_empty_history() {
+        let app = runtime_router();
+
+        let undo = post_empty_with(app.clone(), "/v0/session/undo").await;
+        let redo = post_empty_with(app, "/v0/session/redo").await;
+
+        assert_eq!(undo["ok"], false);
+        assert_eq!(undo["applied"], false);
+        assert_eq!(undo["event"], Value::Null);
+        assert!(
+            undo["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("available to undo")
+        );
+        assert_eq!(redo["ok"], false);
+        assert_eq!(redo["applied"], false);
+        assert_eq!(redo["event"], Value::Null);
+        assert!(
+            redo["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("available to redo")
         );
     }
 
