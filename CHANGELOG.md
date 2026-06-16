@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.8.0...skenion-runtime-v0.9.0) (2026-06-16)
+
+
+### Features
+
+* **runtime:** manage local preview lifecycle ([a2dfb8f](https://github.com/echovisionlab/skenion-runtime/commit/a2dfb8f5911a3fb21ad002d5f8e306a78bff6a14))
+
 ## [0.8.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.7.1...skenion-runtime-v0.8.0) (2026-06-16)
 
 
