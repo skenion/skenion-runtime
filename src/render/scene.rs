@@ -26,6 +26,7 @@ pub struct FullscreenShaderScene {
     pub language: ShaderLanguage,
     pub source: String,
     pub source_node_id: String,
+    pub u_value: f32,
     pub fallback_clear_color: [f64; 4],
 }
 
@@ -159,7 +160,9 @@ fn explicit_render_output_scene(
 
     match source_node.kind.as_str() {
         RENDER_CLEAR_COLOR_KIND => Ok(Some(clear_color_scene_from_node(source_node))),
-        RENDER_FULLSCREEN_SHADER_KIND => fullscreen_shader_scene_from_node(source_node).map(Some),
+        RENDER_FULLSCREEN_SHADER_KIND => {
+            fullscreen_shader_scene_from_node(document, source_node).map(Some)
+        }
         _ => Err(RenderSceneBuildError::UnsupportedRenderOutputSource {
             output_node_id: node.id.clone(),
             source_node_id: source_node.id.clone(),
@@ -175,7 +178,7 @@ fn legacy_render_scene(document: &PreviewDocument) -> Result<RenderScene, Render
         .iter()
         .find(|node| node.kind == RENDER_FULLSCREEN_SHADER_KIND)
     {
-        return fullscreen_shader_scene_from_node(node);
+        return fullscreen_shader_scene_from_node(document, node);
     }
 
     Ok(clear_color_scene_from_preview_document(document))
@@ -206,6 +209,7 @@ fn clear_color_scene_from_node(node: &GraphNode) -> RenderScene {
 }
 
 fn fullscreen_shader_scene_from_node(
+    document: &PreviewDocument,
     node: &GraphNode,
 ) -> Result<RenderScene, RenderSceneBuildError> {
     let language = match node.params.get("language").and_then(Value::as_str) {
@@ -251,8 +255,40 @@ fn fullscreen_shader_scene_from_node(
         language,
         source: source.to_owned(),
         source_node_id: node.id.clone(),
+        u_value: fullscreen_shader_u_value(document, node),
         fallback_clear_color: DEFAULT_CLEAR_COLOR,
     }))
+}
+
+fn fullscreen_shader_u_value(document: &PreviewDocument, node: &GraphNode) -> f32 {
+    let Some(edge) = document
+        .graph
+        .edges
+        .iter()
+        .find(|edge| edge.to.node == node.id && edge.to.port == "u_value")
+    else {
+        return 0.0;
+    };
+
+    let Some(source_node) = document
+        .graph
+        .nodes
+        .iter()
+        .find(|candidate| candidate.id == edge.from.node)
+    else {
+        return 0.0;
+    };
+
+    if source_node.kind != "core.value-f32" {
+        return 0.0;
+    }
+
+    source_node
+        .params
+        .get("value")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0) as f32
 }
 
 fn source_has_output_port(node: &GraphNode, port_id: &str) -> bool {
@@ -347,6 +383,7 @@ mod tests {
                 language: ShaderLanguage::Wgsl,
                 source: shader_source().to_owned(),
                 source_node_id: "shader_1".to_owned(),
+                u_value: 0.0,
                 fallback_clear_color: DEFAULT_CLEAR_COLOR
             })
         );
@@ -496,6 +533,116 @@ mod tests {
 
         assert!(matches!(scene, RenderScene::FullscreenShader(_)));
         assert_eq!(scene.source_node_id().as_deref(), Some("shader_1"));
+    }
+
+    #[test]
+    fn fullscreen_shader_defaults_u_value_to_zero() {
+        let document =
+            document_with_nodes(vec![shader_node(json!("wgsl"), json!(shader_source()))]);
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value(&scene), 0.0);
+    }
+
+    #[test]
+    fn fullscreen_shader_reads_connected_value_node() {
+        let document = document_with_edges(
+            vec![
+                value_node_with_value(json!(0.42)),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("value_1", "value", "shader_1", "u_value")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value(&scene), 0.42);
+    }
+
+    #[test]
+    fn fullscreen_shader_clamps_connected_value_node() {
+        for (value, expected) in [(json!(-0.25), 0.0), (json!(1.25), 1.0)] {
+            let document = document_with_edges(
+                vec![
+                    value_node_with_value(value),
+                    shader_node(json!("wgsl"), json!(shader_source())),
+                ],
+                vec![edge("value_1", "value", "shader_1", "u_value")],
+            );
+
+            let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+            assert_eq!(shader_u_value(&scene), expected);
+        }
+    }
+
+    #[test]
+    fn fullscreen_shader_ignores_incompatible_u_value_source() {
+        let document = document_with_edges(
+            vec![
+                clear_node(json!([0.1, 0.2, 0.3, 1.0])),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("clear_1", "out", "shader_1", "u_value")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value(&scene), 0.0);
+    }
+
+    #[test]
+    fn fullscreen_shader_defaults_u_value_for_missing_source_node() {
+        let document = document_with_edges(
+            vec![shader_node(json!("wgsl"), json!(shader_source()))],
+            vec![edge("missing_value", "value", "shader_1", "u_value")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value(&scene), 0.0);
+    }
+
+    #[test]
+    fn fullscreen_shader_defaults_u_value_for_non_numeric_value() {
+        let document = document_with_edges(
+            vec![
+                value_node_with_value(json!("not-a-number")),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("value_1", "value", "shader_1", "u_value")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value(&scene), 0.0);
+    }
+
+    #[test]
+    fn fullscreen_shader_defaults_u_value_for_missing_value_param() {
+        let document = document_with_edges(
+            vec![
+                value_node(),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("value_1", "value", "shader_1", "u_value")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value(&scene), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected fullscreen shader scene")]
+    fn shader_u_value_helper_rejects_non_shader_scene() {
+        let scene = RenderScene::ClearColor(ClearColorScene {
+            clear_color: DEFAULT_CLEAR_COLOR,
+            source_node_id: None,
+        });
+
+        let _ = shader_u_value(&scene);
     }
 
     #[test]
@@ -662,11 +809,21 @@ mod tests {
     }
 
     fn value_node() -> GraphNode {
+        value_node_with_params(serde_json::Map::new())
+    }
+
+    fn value_node_with_value(value: Value) -> GraphNode {
+        let mut params = serde_json::Map::new();
+        params.insert("value".to_owned(), value);
+        value_node_with_params(params)
+    }
+
+    fn value_node_with_params(params: serde_json::Map<String, Value>) -> GraphNode {
         GraphNode {
             id: "value_1".to_owned(),
             kind: "core.value-f32".to_owned(),
             kind_version: "0.1.0".to_owned(),
-            params: serde_json::Map::new(),
+            params,
             ports: vec![
                 serde_json::from_value(json!({
                     "id": "value",
@@ -679,6 +836,13 @@ mod tests {
                 }))
                 .expect("valid value port"),
             ],
+        }
+    }
+
+    fn shader_u_value(scene: &RenderScene) -> f32 {
+        match scene {
+            RenderScene::FullscreenShader(shader) => shader.u_value,
+            _ => panic!("expected fullscreen shader scene"),
         }
     }
 

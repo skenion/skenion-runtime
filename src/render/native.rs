@@ -248,15 +248,19 @@ enum WgpuPreviewMode {
 struct SkenionFrameUniform {
     resolution: [f32; 2],
     time: f32,
+    u_value: f32,
     frame: u32,
+    _pad0: [u32; 3],
 }
 
 impl SkenionFrameUniform {
-    fn new(width: u32, height: u32, time: f32, frame: u32) -> Self {
+    fn new(width: u32, height: u32, time: f32, u_value: f32, frame: u32) -> Self {
         Self {
             resolution: [width as f32, height as f32],
             time,
+            u_value,
             frame,
+            _pad0: [0; 3],
         }
     }
 }
@@ -366,6 +370,7 @@ impl WgpuPreviewRenderer {
                     self.config.width,
                     self.config.height,
                     time,
+                    shader_u_value(scene),
                     frame_index,
                 );
                 self.queue
@@ -416,7 +421,7 @@ impl WgpuPreviewMode {
         config: &wgpu::SurfaceConfiguration,
         source: &str,
     ) -> Result<Self, String> {
-        let uniform = SkenionFrameUniform::new(config.width, config.height, 0.0, 0);
+        let uniform = SkenionFrameUniform::new(config.width, config.height, 0.0, 0.0, 0);
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("skenion-frame-uniform"),
             contents: bytemuck::bytes_of(&uniform),
@@ -505,6 +510,13 @@ fn wgpu_color(color: [f64; 4]) -> wgpu::Color {
     }
 }
 
+fn shader_u_value(scene: &RenderScene) -> f32 {
+    match scene {
+        RenderScene::FullscreenShader(shader_scene) => shader_scene.u_value,
+        RenderScene::ClearColor(_) => 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,12 +533,14 @@ mod tests {
 
     #[test]
     fn frame_uniform_uses_resolution_time_and_frame() {
-        let uniform = SkenionFrameUniform::new(960, 540, 1.25, 12);
+        let uniform = SkenionFrameUniform::new(960, 540, 1.25, 0.75, 12);
 
         assert_eq!(uniform.resolution, [960.0, 540.0]);
         assert_eq!(uniform.time, 1.25);
+        assert_eq!(uniform.u_value, 0.75);
         assert_eq!(uniform.frame, 12);
-        assert_eq!(std::mem::size_of::<SkenionFrameUniform>(), 16);
+        assert_eq!(uniform._pad0, [0; 3]);
+        assert_eq!(std::mem::size_of::<SkenionFrameUniform>(), 32);
     }
 
     #[test]
