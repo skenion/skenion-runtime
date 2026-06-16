@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.13.0...skenion-runtime-v0.14.0) (2026-06-16)
+
+
+### Features
+
+* **runtime:** pass value input into fullscreen shader uniform ([ec15210](https://github.com/echovisionlab/skenion-runtime/commit/ec15210bfbd0f4221fd4d8f3683339768b7d141c))
+
 ## [0.13.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.12.0...skenion-runtime-v0.13.0) (2026-06-16)
 
 
