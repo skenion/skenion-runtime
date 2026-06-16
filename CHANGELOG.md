@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.9.0...skenion-runtime-v0.10.0) (2026-06-16)
+
+
+### Features
+
+* **runtime:** render clear color preview documents ([#21](https://github.com/echovisionlab/skenion-runtime/issues/21)) ([4ea6534](https://github.com/echovisionlab/skenion-runtime/commit/4ea653451d896816f24740f17d60502ae7d6b951))
+
 ## [0.9.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.8.0...skenion-runtime-v0.9.0) (2026-06-16)
 
 
