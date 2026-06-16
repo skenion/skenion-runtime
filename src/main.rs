@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
-    DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeRegistry, PreviewFrameLimit,
+    DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit,
     build_execution_plan, format_dummy_execution_text, format_plan_text, load_graph_document,
-    load_node_definition, run_dummy_execution, run_preview_window, serve_runtime, validate_project,
+    load_node_definition, run_dummy_execution, run_preview_window, run_render_preview_window,
+    serve_runtime, validate_project,
 };
 
 #[derive(Debug, Parser)]
@@ -83,6 +84,18 @@ enum Command {
         #[arg(long)]
         until_close: bool,
         /// Number of placeholder frames before the preview exits.
+        #[arg(long, default_value_t = 300)]
+        frames: usize,
+    },
+    /// Open a local render preview window from a prepared preview document.
+    PreviewDocument {
+        /// Path to the prepared preview document JSON.
+        #[arg(long)]
+        document: PathBuf,
+        /// Keep the preview open until the window is closed.
+        #[arg(long)]
+        until_close: bool,
+        /// Number of frames before the preview exits.
         #[arg(long, default_value_t = 300)]
         frames: usize,
     },
@@ -190,6 +203,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             run_preview_window(plan, frame_limit)
         }
+        Command::PreviewDocument {
+            document,
+            until_close,
+            frames,
+        } => {
+            let document = load_preview_document(document)?;
+            let frame_limit = if until_close {
+                PreviewFrameLimit::UntilClose
+            } else {
+                PreviewFrameLimit::Frames(frames)
+            };
+            run_render_preview_window(document, frame_limit)
+        }
         Command::Serve { host, port } => serve_runtime(&host, port).await,
     }
 }
@@ -203,4 +229,54 @@ fn load_plan(graph: PathBuf, nodes: PathBuf) -> Result<ExecutionPlan, Box<dyn st
 fn load_execution_plan(path: PathBuf) -> Result<ExecutionPlan, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn load_preview_document(path: PathBuf) -> Result<PreviewDocument, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use skenion_runtime::{
+        ExecutionModel, ExecutionPlan, GraphDocument, PlanNode, PreviewDocument,
+        RENDER_CLEAR_COLOR_KIND, write_preview_document,
+    };
+
+    #[test]
+    fn binary_target_covers_preview_document_public_surface() {
+        let document = PreviewDocument::new(graph(), plan(), 5);
+        let path = write_preview_document(&document).expect("document should be written");
+        let decoded = super::load_preview_document(path.clone()).expect("document should load");
+
+        assert_eq!(decoded, document);
+        std::fs::remove_file(path).expect("test document should be removable");
+    }
+
+    fn graph() -> GraphDocument {
+        GraphDocument {
+            schema: "skenion.graph".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: "render-graph".to_owned(),
+            revision: "1".to_owned(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    fn plan() -> ExecutionPlan {
+        ExecutionPlan {
+            graph_id: "render-graph".to_owned(),
+            graph_revision: "1".to_owned(),
+            nodes: vec![PlanNode {
+                node_id: "clear_1".to_owned(),
+                kind: RENDER_CLEAR_COLOR_KIND.to_owned(),
+                kind_version: "0.1.0".to_owned(),
+                execution_model: ExecutionModel::GpuPass,
+                order: 0,
+            }],
+            edges: Vec::new(),
+            groups: Vec::new(),
+        }
+    }
 }

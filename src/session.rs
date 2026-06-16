@@ -138,6 +138,7 @@ impl RuntimeSession {
             graph_id: graph.id.clone(),
             graph_revision: graph.revision.clone(),
             session_revision: self.revision,
+            graph: graph.clone(),
             plan: plan.clone(),
         })
     }

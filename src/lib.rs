@@ -4,6 +4,7 @@ mod planner;
 mod preview_manager;
 mod project;
 mod registry;
+mod render;
 mod scheduler;
 mod serve;
 mod server;
@@ -28,6 +29,11 @@ pub use preview_manager::{
 };
 pub use project::{ProjectValidationError, ProjectValidationReport, validate_project};
 pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadError};
+pub use render::{
+    DEFAULT_CLEAR_COLOR, PREVIEW_DOCUMENT_SCHEMA, PREVIEW_DOCUMENT_SCHEMA_VERSION, PreviewDocument,
+    RENDER_CLEAR_COLOR_KIND, RenderScene, render_scene_from_preview_document,
+    run_render_preview_window, write_preview_document,
+};
 pub use scheduler::{
     DummyExecutionReport, DummyFrameReport, DummyNodeExecution, format_dummy_execution_text,
     run_dummy_execution,

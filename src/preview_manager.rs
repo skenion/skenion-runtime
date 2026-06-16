@@ -2,7 +2,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ExecutionPlan, RuntimeDiagnostic, RuntimeSessionSnapshot};
+use crate::{
+    ExecutionPlan, GraphDocument, PreviewDocument, RuntimeDiagnostic, RuntimeSessionSnapshot,
+};
 
 pub(crate) trait PreviewHandle: Send {
     fn pid(&self) -> Option<u32>;
@@ -10,13 +12,14 @@ pub(crate) trait PreviewHandle: Send {
     fn stop(&mut self) -> Result<Option<i32>, String>;
 }
 
-pub(crate) type PreviewSpawner = fn(&ExecutionPlan, u64) -> Result<Box<dyn PreviewHandle>, String>;
+pub(crate) type PreviewSpawner = fn(&PreviewDocument) -> Result<Box<dyn PreviewHandle>, String>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewContext {
     pub graph_id: String,
     pub graph_revision: String,
     pub session_revision: u64,
+    pub graph: GraphDocument,
     pub plan: ExecutionPlan,
 }
 
@@ -85,12 +88,12 @@ impl PreviewManager {
     pub fn from_env() -> Self {
         Self::with_spawner(
             dry_run_enabled(std::env::var("SKENION_PREVIEW_DRY_RUN").ok().as_deref()),
-            crate::visual::spawn_preview_plan_handle,
+            crate::visual::spawn_preview_document_handle,
         )
     }
 
     pub fn dry_run() -> Self {
-        Self::with_spawner(true, crate::visual::spawn_preview_plan_handle)
+        Self::with_spawner(true, crate::visual::spawn_preview_document_handle)
     }
 
     pub fn status(&mut self, snapshot: RuntimeSessionSnapshot) -> RuntimePreviewStatusResponse {
@@ -129,10 +132,15 @@ impl PreviewManager {
             message: None,
         };
 
+        let document = PreviewDocument::new(
+            context.graph.clone(),
+            context.plan.clone(),
+            context.session_revision,
+        );
         let handle = if self.dry_run {
             Ok(Box::new(DryRunPreviewHandle) as Box<dyn PreviewHandle>)
         } else {
-            (self.spawner)(&context.plan, context.session_revision)
+            (self.spawner)(&document)
         };
 
         match handle {
@@ -325,8 +333,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ExecutionGroup, ExecutionModel, PlanEdge, PlanNode, RuntimeSessionSnapshot,
-        preview_manager::PreviewHandle,
+        ExecutionGroup, ExecutionModel, GraphDocument, GraphNode, PlanEdge, PlanNode,
+        RuntimeSessionSnapshot, preview_manager::PreviewHandle,
     };
 
     #[test]
@@ -515,25 +523,19 @@ mod tests {
         assert!(!request.restart);
     }
 
-    fn spawn_exiting_handle(
-        plan: &ExecutionPlan,
-        session_revision: u64,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
-        assert_eq!(plan.graph_id, "minimal-value");
-        assert_eq!(session_revision, 1);
+    fn spawn_exiting_handle(document: &PreviewDocument) -> Result<Box<dyn PreviewHandle>, String> {
+        assert_eq!(document.plan.graph_id, "minimal-value");
+        assert_eq!(document.graph.id, "minimal-value");
+        assert_eq!(document.session_revision, 1);
         Ok(Box::new(FakePreviewHandle::new(Some(0), None, None)))
     }
 
-    fn spawn_running_handle(
-        _plan: &ExecutionPlan,
-        _session_revision: u64,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
+    fn spawn_running_handle(_document: &PreviewDocument) -> Result<Box<dyn PreviewHandle>, String> {
         Ok(Box::new(FakePreviewHandle::new(None, None, None)))
     }
 
     fn spawn_erroring_handle(
-        _plan: &ExecutionPlan,
-        _session_revision: u64,
+        _document: &PreviewDocument,
     ) -> Result<Box<dyn PreviewHandle>, String> {
         Ok(Box::new(FakePreviewHandle::new(
             None,
@@ -543,8 +545,7 @@ mod tests {
     }
 
     fn spawn_unstoppable_handle(
-        _plan: &ExecutionPlan,
-        _session_revision: u64,
+        _document: &PreviewDocument,
     ) -> Result<Box<dyn PreviewHandle>, String> {
         Ok(Box::new(FakePreviewHandle::new(
             None,
@@ -553,10 +554,7 @@ mod tests {
         )))
     }
 
-    fn spawn_failure(
-        _plan: &ExecutionPlan,
-        _session_revision: u64,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
+    fn spawn_failure(_document: &PreviewDocument) -> Result<Box<dyn PreviewHandle>, String> {
         Err("spawn failed".to_owned())
     }
 
@@ -605,7 +603,25 @@ mod tests {
             graph_id: "minimal-value".to_owned(),
             graph_revision: session_revision.to_string(),
             session_revision,
+            graph: graph(&session_revision.to_string()),
             plan: plan(&session_revision.to_string()),
+        }
+    }
+
+    fn graph(graph_revision: &str) -> GraphDocument {
+        GraphDocument {
+            schema: "skenion.graph".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: "minimal-value".to_owned(),
+            revision: graph_revision.to_owned(),
+            nodes: vec![GraphNode {
+                id: "value_1".to_owned(),
+                kind: "core.value-f32".to_owned(),
+                kind_version: "0.1.0".to_owned(),
+                params: serde_json::Map::new(),
+                ports: Vec::new(),
+            }],
+            edges: Vec::new(),
         }
     }
 

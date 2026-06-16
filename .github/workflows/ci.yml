@@ -27,7 +27,7 @@ jobs:
       - run: cargo test --all-targets --all-features
       - run: rustup component add llvm-tools-preview
       - run: cargo install cargo-llvm-cov --locked
-      - run: cargo llvm-cov --all-targets --all-features --ignore-filename-regex '(src/main\.rs|src/visual\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 100 --fail-under-functions 100 --summary-only
+      - run: cargo llvm-cov --all-targets --all-features --ignore-filename-regex '(src/main\.rs|src/visual\.rs|src/render/native\.rs|src/render/preview_document\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 100 --fail-under-functions 100 --summary-only
       - run: bash scripts/validate-with-runtime.sh ../..
         working-directory: .deps/skenion-examples
       - run: cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes
@@ -36,6 +36,7 @@ jobs:
       - run: cargo run -- serve --help
       - run: cargo run -- preview --help
       - run: cargo run -- preview-plan --help
+      - run: cargo run -- preview-document --help
       - run: |
           SKENION_PREVIEW_DRY_RUN=1 cargo run -- serve --host 127.0.0.1 --port 3761 &
           SERVER_PID=$!
@@ -88,6 +89,7 @@ jobs:
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-session.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-patch.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-history.sh
+            SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-render-clear-color.sh
           )
 
           curl --fail --silent \

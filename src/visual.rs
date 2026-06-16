@@ -1,7 +1,5 @@
 use std::{
     error::Error,
-    fs,
-    path::PathBuf,
     process::{Child, Command},
     time::{Duration, Instant},
 };
@@ -13,7 +11,11 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-use crate::{ExecutionPlan, preview_manager::PreviewHandle};
+use crate::{
+    ExecutionPlan,
+    preview_manager::PreviewHandle,
+    render::{PreviewDocument, write_preview_document},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewFrameLimit {
@@ -31,15 +33,14 @@ pub fn run_preview_window(
     Ok(())
 }
 
-pub(crate) fn spawn_preview_plan_handle(
-    plan: &ExecutionPlan,
-    session_revision: u64,
+pub(crate) fn spawn_preview_document_handle(
+    document: &PreviewDocument,
 ) -> Result<Box<dyn PreviewHandle>, String> {
-    let plan_path = write_preview_plan(plan, session_revision)?;
+    let document_path = write_preview_document(document)?;
     let child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
-        .arg("preview-plan")
-        .arg("--plan")
-        .arg(plan_path)
+        .arg("preview-document")
+        .arg("--document")
+        .arg(document_path)
         .arg("--until-close")
         .spawn()
         .map_err(|error| error.to_string())?;
@@ -176,18 +177,6 @@ impl PreviewHandle for ChildPreviewHandle {
             .map(|status| Some(exit_code(status)))
             .map_err(|error| error.to_string())
     }
-}
-
-fn write_preview_plan(plan: &ExecutionPlan, session_revision: u64) -> Result<PathBuf, String> {
-    let directory = std::env::temp_dir().join("skenion-runtime-preview");
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let path = directory.join(format!(
-        "preview-plan-{}-{session_revision}.json",
-        std::process::id()
-    ));
-    let bytes = serde_json::to_vec_pretty(plan).map_err(|error| error.to_string())?;
-    fs::write(&path, bytes).map_err(|error| error.to_string())?;
-    Ok(path)
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {
