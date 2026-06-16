@@ -1,6 +1,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,6 +15,7 @@ pub const TELEMETRY_SCHEMA: &str = "skenion.runtime.telemetry";
 pub const TELEMETRY_SCHEMA_VERSION: &str = "0.1.0";
 pub const PREVIEW_TELEMETRY_SCHEMA: &str = "skenion.preview.telemetry";
 pub const PREVIEW_TELEMETRY_SCHEMA_VERSION: &str = "0.1.0";
+static PREVIEW_TELEMETRY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -233,9 +235,11 @@ impl PreviewTelemetryWriter {
 
 pub fn preview_telemetry_path(session_revision: u64) -> PathBuf {
     let directory = std::env::temp_dir().join("skenion-runtime-preview");
+    let nonce = PREVIEW_TELEMETRY_COUNTER.fetch_add(1, Ordering::Relaxed);
     directory.join(format!(
-        "preview-{}-{}-telemetry.json",
+        "preview-{}-{}-{}-telemetry.json",
         std::process::id(),
+        nonce,
         session_revision
     ))
 }

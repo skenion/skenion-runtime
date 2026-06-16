@@ -181,17 +181,7 @@ impl PreviewManager {
             context.session_revision,
         );
         let handle = if self.dry_run {
-            let telemetry_path = self
-                .status
-                .telemetry_path
-                .as_deref()
-                .expect("preview telemetry path should be prepared before dry-run start");
-            let heartbeat = dry_run_heartbeat(&document);
-            if let Err(error) = write_preview_telemetry_heartbeat(telemetry_path, &heartbeat) {
-                self.status.message = Some(format!(
-                    "failed to write dry-run preview telemetry: {error}"
-                ));
-            }
+            record_dry_run_heartbeat(&mut self.status, &document);
             Ok(Box::new(DryRunPreviewHandle) as Box<dyn PreviewHandle>)
         } else {
             let telemetry_path = self
@@ -416,6 +406,19 @@ fn dry_run_heartbeat(document: &PreviewDocument) -> PreviewTelemetryHeartbeat {
     }
 }
 
+fn record_dry_run_heartbeat(status: &mut PreviewStatus, document: &PreviewDocument) {
+    let telemetry_path = status
+        .telemetry_path
+        .as_deref()
+        .expect("preview telemetry path should be prepared before dry-run start");
+    let heartbeat = dry_run_heartbeat(document);
+    if let Err(error) = write_preview_telemetry_heartbeat(telemetry_path, &heartbeat) {
+        status.message = Some(format!(
+            "failed to write dry-run preview telemetry: {error}"
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -489,6 +492,43 @@ mod tests {
         assert_eq!(telemetry.render.backend.as_deref(), Some("dry-run"));
         assert_eq!(telemetry.render.renderer.as_deref(), Some("clear-color"));
         assert_eq!(telemetry.process.uptime_ms, 120);
+    }
+
+    #[test]
+    fn dry_run_heartbeat_write_failure_is_reported_on_status() {
+        let blocker = std::env::temp_dir().join(format!(
+            "skenion-dry-run-heartbeat-blocker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&blocker, b"blocker").expect("blocker should write");
+        let mut status = PreviewStatus {
+            state: PreviewState::Starting,
+            pid: None,
+            graph_id: Some("minimal-value".to_owned()),
+            graph_revision: Some("1".to_owned()),
+            preview_session_revision: Some(1),
+            started_at: None,
+            exited_at: None,
+            exit_code: None,
+            message: None,
+            telemetry_path: Some(blocker.join("telemetry.json")),
+        };
+        let document = PreviewDocument::new(graph("1"), plan("1"), 1);
+
+        record_dry_run_heartbeat(&mut status, &document);
+
+        assert!(
+            status
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("failed to write dry-run preview telemetry")
+        );
+        std::fs::remove_file(blocker).expect("blocker should remove");
     }
 
     #[test]
