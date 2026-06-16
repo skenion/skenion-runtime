@@ -300,15 +300,25 @@ fn render_from_preview(
         PreviewState::Starting | PreviewState::Running
     );
     if dry_run && active {
+        let renderer = heartbeat
+            .as_ref()
+            .map(|heartbeat| heartbeat.renderer.clone())
+            .unwrap_or_else(|| "none".to_owned());
+        let source_node_id = heartbeat
+            .as_ref()
+            .and_then(|heartbeat| heartbeat.source_node_id.clone());
+        let last_error = heartbeat
+            .and_then(|heartbeat| heartbeat.last_error)
+            .or_else(|| preview.message.clone());
         return RuntimeTelemetryRender {
             active,
             backend: Some("dry-run".to_owned()),
-            renderer: Some("none".to_owned()),
+            renderer: Some(renderer),
             frames_rendered: 0,
             approx_fps: None,
             last_frame_ms: None,
-            last_error: preview.message.clone(),
-            source_node_id: None,
+            last_error,
+            source_node_id,
         };
     }
 

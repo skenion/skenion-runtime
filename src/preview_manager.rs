@@ -8,7 +8,12 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ExecutionPlan, GraphDocument, PreviewDocument, RuntimeDiagnostic, RuntimeSessionSnapshot,
     RuntimeTelemetrySnapshot,
-    telemetry::{preview_telemetry_path, read_preview_telemetry},
+    render::render_scene_from_preview_document,
+    telemetry::{
+        PREVIEW_TELEMETRY_SCHEMA, PREVIEW_TELEMETRY_SCHEMA_VERSION, PreviewTelemetryHeartbeat,
+        preview_telemetry_path, read_preview_telemetry, unix_ms_timestamp,
+        write_preview_telemetry_heartbeat,
+    },
 };
 
 pub(crate) trait PreviewHandle: Send {
@@ -176,6 +181,17 @@ impl PreviewManager {
             context.session_revision,
         );
         let handle = if self.dry_run {
+            let telemetry_path = self
+                .status
+                .telemetry_path
+                .as_deref()
+                .expect("preview telemetry path should be prepared before dry-run start");
+            let heartbeat = dry_run_heartbeat(&document);
+            if let Err(error) = write_preview_telemetry_heartbeat(telemetry_path, &heartbeat) {
+                self.status.message = Some(format!(
+                    "failed to write dry-run preview telemetry: {error}"
+                ));
+            }
             Ok(Box::new(DryRunPreviewHandle) as Box<dyn PreviewHandle>)
         } else {
             let telemetry_path = self
@@ -371,6 +387,35 @@ fn now_string() -> String {
     format!("unix-ms:{millis}")
 }
 
+fn dry_run_heartbeat(document: &PreviewDocument) -> PreviewTelemetryHeartbeat {
+    let scene = render_scene_from_preview_document(document);
+    let (renderer, source_node_id, last_error) = match scene {
+        Ok(scene) => (
+            scene.renderer_label().to_owned(),
+            scene.source_node_id(),
+            None,
+        ),
+        Err(error) => ("clear-color".to_owned(), None, Some(error.to_string())),
+    };
+
+    PreviewTelemetryHeartbeat {
+        schema: PREVIEW_TELEMETRY_SCHEMA.to_owned(),
+        schema_version: PREVIEW_TELEMETRY_SCHEMA_VERSION.to_owned(),
+        timestamp: unix_ms_timestamp(),
+        pid: std::process::id(),
+        graph_id: document.graph.id.clone(),
+        graph_revision: document.graph.revision.clone(),
+        session_revision: document.session_revision,
+        renderer,
+        backend: "dry-run".to_owned(),
+        frames_rendered: 0,
+        approx_fps: None,
+        last_frame_ms: None,
+        last_error,
+        source_node_id,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -432,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_telemetry_reports_active_render_without_heartbeat() {
+    fn dry_run_telemetry_reports_active_render_with_synthetic_heartbeat() {
         let mut manager = PreviewManager::dry_run();
         manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
 
@@ -442,8 +487,41 @@ mod tests {
         assert_eq!(telemetry.preview.state, PreviewState::Running);
         assert!(telemetry.render.active);
         assert_eq!(telemetry.render.backend.as_deref(), Some("dry-run"));
-        assert_eq!(telemetry.render.renderer.as_deref(), Some("none"));
+        assert_eq!(telemetry.render.renderer.as_deref(), Some("clear-color"));
         assert_eq!(telemetry.process.uptime_ms, 120);
+    }
+
+    #[test]
+    fn dry_run_heartbeat_reports_fullscreen_shader_renderer() {
+        let document = PreviewDocument::new(shader_graph("7"), shader_plan("7"), 7);
+
+        let heartbeat = dry_run_heartbeat(&document);
+
+        assert_eq!(heartbeat.backend, "dry-run");
+        assert_eq!(heartbeat.renderer, "fullscreen-shader");
+        assert_eq!(heartbeat.source_node_id.as_deref(), Some("shader_1"));
+        assert_eq!(heartbeat.graph_revision, "7");
+    }
+
+    #[test]
+    fn dry_run_heartbeat_reports_scene_errors() {
+        let mut graph = shader_graph("8");
+        graph.nodes[0]
+            .params
+            .insert("language".to_owned(), json!("glsl"));
+        let document = PreviewDocument::new(graph, shader_plan("8"), 8);
+
+        let heartbeat = dry_run_heartbeat(&document);
+
+        assert_eq!(heartbeat.renderer, "clear-color");
+        assert_eq!(heartbeat.backend, "dry-run");
+        assert!(
+            heartbeat
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("unsupported language glsl")
+        );
     }
 
     #[test]
@@ -713,6 +791,9 @@ mod tests {
         _document: &PreviewDocument,
         telemetry_path: &Path,
     ) -> Result<Box<dyn PreviewHandle>, String> {
+        if let Some(parent) = telemetry_path.parent() {
+            std::fs::create_dir_all(parent).expect("invalid heartbeat parent should create");
+        }
         std::fs::write(telemetry_path, b"{").expect("invalid heartbeat should write");
         Ok(Box::new(FakePreviewHandle::new(None, None, None)))
     }
@@ -806,6 +887,69 @@ mod tests {
                 node_ids: vec!["value_1".to_owned()],
             }],
         }
+    }
+
+    fn shader_graph(graph_revision: &str) -> GraphDocument {
+        let mut params = serde_json::Map::new();
+        params.insert("language".to_owned(), json!("wgsl"));
+        params.insert("source".to_owned(), json!(shader_source()));
+        GraphDocument {
+            schema: "skenion.graph".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: "fullscreen-shader".to_owned(),
+            revision: graph_revision.to_owned(),
+            nodes: vec![GraphNode {
+                id: "shader_1".to_owned(),
+                kind: "render.fullscreen-shader".to_owned(),
+                kind_version: "0.1.0".to_owned(),
+                params,
+                ports: Vec::new(),
+            }],
+            edges: Vec::new(),
+        }
+    }
+
+    fn shader_plan(graph_revision: &str) -> ExecutionPlan {
+        ExecutionPlan {
+            graph_id: "fullscreen-shader".to_owned(),
+            graph_revision: graph_revision.to_owned(),
+            nodes: vec![PlanNode {
+                node_id: "shader_1".to_owned(),
+                kind: "render.fullscreen-shader".to_owned(),
+                kind_version: "0.1.0".to_owned(),
+                execution_model: ExecutionModel::GpuPass,
+                order: 0,
+            }],
+            edges: Vec::new(),
+            groups: vec![ExecutionGroup {
+                execution_model: ExecutionModel::GpuPass,
+                node_ids: vec!["shader_1".to_owned()],
+            }],
+        }
+    }
+
+    fn shader_source() -> &'static str {
+        r#"struct VertexOut {
+  @builtin(position) position: vec4<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+  var positions = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -3.0),
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 3.0,  1.0)
+  );
+
+  var out: VertexOut;
+  out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+  return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.2, 0.3, 0.8, 1.0);
+}"#
     }
 
     fn loaded_snapshot(session_revision: u64, graph_revision: &str) -> RuntimeSessionSnapshot {

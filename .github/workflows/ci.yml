@@ -91,6 +91,11 @@ jobs:
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-history.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-render-clear-color.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-telemetry.sh
+            if [[ -x scripts/smoke-runtime-fullscreen-shader.sh ]]; then
+              SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-fullscreen-shader.sh
+            else
+              echo "fullscreen shader smoke script is not available on examples main yet"
+            fi
           )
 
           curl --fail --silent \

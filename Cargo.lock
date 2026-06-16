@@ -1865,6 +1865,7 @@ name = "skenion-runtime"
 version = "0.11.0"
 dependencies = [
  "axum",
+ "bytemuck",
  "clap",
  "pollster",
  "serde",

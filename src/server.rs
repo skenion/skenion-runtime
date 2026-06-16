@@ -1265,7 +1265,7 @@ mod tests {
         assert_eq!(response["preview"]["stale"], false);
         assert_eq!(response["render"]["active"], true);
         assert_eq!(response["render"]["backend"], "dry-run");
-        assert_eq!(response["render"]["renderer"], "none");
+        assert_eq!(response["render"]["renderer"], "clear-color");
         assert_eq!(response["render"]["framesRendered"], 0);
     }
 
