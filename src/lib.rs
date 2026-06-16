@@ -33,8 +33,9 @@ pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadE
 pub use render::{
     ClearColorScene, DEFAULT_CLEAR_COLOR, FullscreenShaderScene, PREVIEW_DOCUMENT_SCHEMA,
     PREVIEW_DOCUMENT_SCHEMA_VERSION, PreviewDocument, RENDER_CLEAR_COLOR_KIND,
-    RENDER_FULLSCREEN_SHADER_KIND, RenderScene, RenderSceneBuildError, ShaderLanguage,
-    render_scene_from_preview_document, run_render_preview_window, write_preview_document,
+    RENDER_FULLSCREEN_SHADER_KIND, RENDER_OUTPUT_KIND, RenderScene, RenderSceneBuildError,
+    ShaderLanguage, render_scene_from_preview_document, run_render_preview_window,
+    write_preview_document,
 };
 pub use scheduler::{
     DummyExecutionReport, DummyFrameReport, DummyNodeExecution, format_dummy_execution_text,

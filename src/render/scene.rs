@@ -2,9 +2,11 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::render::PreviewDocument;
+use crate::{GraphNode, PortDirection};
 
 pub const RENDER_CLEAR_COLOR_KIND: &str = "render.clear-color";
 pub const RENDER_FULLSCREEN_SHADER_KIND: &str = "render.fullscreen-shader";
+pub const RENDER_OUTPUT_KIND: &str = "render.output";
 pub const DEFAULT_CLEAR_COLOR: [f64; 4] = [0.02, 0.02, 0.025, 1.0];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,21 +47,39 @@ pub enum RenderSceneBuildError {
         node_id: String,
         entrypoint: &'static str,
     },
+    #[error("render output node {node_id} has no incoming edge to port in")]
+    RenderOutputWithoutInput { node_id: String },
+    #[error("render output node {output_node_id} references missing source node {source_node_id}")]
+    MissingRenderOutputSourceNode {
+        output_node_id: String,
+        source_node_id: String,
+    },
+    #[error(
+        "render output node {output_node_id} references missing output port {port_id} on source node {source_node_id}"
+    )]
+    MissingRenderOutputSourcePort {
+        output_node_id: String,
+        source_node_id: String,
+        port_id: String,
+    },
+    #[error(
+        "render output node {output_node_id} is connected to unsupported render source {source_node_id} ({source_kind})"
+    )]
+    UnsupportedRenderOutputSource {
+        output_node_id: String,
+        source_node_id: String,
+        source_kind: String,
+    },
 }
 
 pub fn render_scene_from_preview_document(
     document: &PreviewDocument,
 ) -> Result<RenderScene, RenderSceneBuildError> {
-    if let Some(node) = document
-        .graph
-        .nodes
-        .iter()
-        .find(|node| node.kind == RENDER_FULLSCREEN_SHADER_KIND)
-    {
-        return fullscreen_shader_scene_from_node(node);
+    if let Some(scene) = explicit_render_output_scene(document)? {
+        return Ok(scene);
     }
 
-    Ok(clear_color_scene_from_preview_document(document))
+    legacy_render_scene(document)
 }
 
 impl RenderScene {
@@ -94,6 +114,73 @@ impl Default for RenderScene {
     }
 }
 
+fn explicit_render_output_scene(
+    document: &PreviewDocument,
+) -> Result<Option<RenderScene>, RenderSceneBuildError> {
+    let Some(node) = document
+        .graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == RENDER_OUTPUT_KIND)
+    else {
+        return Ok(None);
+    };
+
+    let Some(edge) = document
+        .graph
+        .edges
+        .iter()
+        .find(|edge| edge.to.node == node.id && edge.to.port == "in")
+    else {
+        return Err(RenderSceneBuildError::RenderOutputWithoutInput {
+            node_id: node.id.clone(),
+        });
+    };
+
+    let Some(source_node) = document
+        .graph
+        .nodes
+        .iter()
+        .find(|candidate| candidate.id == edge.from.node)
+    else {
+        return Err(RenderSceneBuildError::MissingRenderOutputSourceNode {
+            output_node_id: node.id.clone(),
+            source_node_id: edge.from.node.clone(),
+        });
+    };
+
+    if !source_has_output_port(source_node, &edge.from.port) {
+        return Err(RenderSceneBuildError::MissingRenderOutputSourcePort {
+            output_node_id: node.id.clone(),
+            source_node_id: source_node.id.clone(),
+            port_id: edge.from.port.clone(),
+        });
+    }
+
+    match source_node.kind.as_str() {
+        RENDER_CLEAR_COLOR_KIND => Ok(Some(clear_color_scene_from_node(source_node))),
+        RENDER_FULLSCREEN_SHADER_KIND => fullscreen_shader_scene_from_node(source_node).map(Some),
+        _ => Err(RenderSceneBuildError::UnsupportedRenderOutputSource {
+            output_node_id: node.id.clone(),
+            source_node_id: source_node.id.clone(),
+            source_kind: source_node.kind.clone(),
+        }),
+    }
+}
+
+fn legacy_render_scene(document: &PreviewDocument) -> Result<RenderScene, RenderSceneBuildError> {
+    if let Some(node) = document
+        .graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == RENDER_FULLSCREEN_SHADER_KIND)
+    {
+        return fullscreen_shader_scene_from_node(node);
+    }
+
+    Ok(clear_color_scene_from_preview_document(document))
+}
+
 fn clear_color_scene_from_preview_document(document: &PreviewDocument) -> RenderScene {
     let Some(node) = document
         .graph
@@ -104,6 +191,10 @@ fn clear_color_scene_from_preview_document(document: &PreviewDocument) -> Render
         return RenderScene::default();
     };
 
+    clear_color_scene_from_node(node)
+}
+
+fn clear_color_scene_from_node(node: &GraphNode) -> RenderScene {
     let Some(color) = node.params.get("color").and_then(read_color) else {
         return RenderScene::default();
     };
@@ -115,7 +206,7 @@ fn clear_color_scene_from_preview_document(document: &PreviewDocument) -> Render
 }
 
 fn fullscreen_shader_scene_from_node(
-    node: &crate::GraphNode,
+    node: &GraphNode,
 ) -> Result<RenderScene, RenderSceneBuildError> {
     let language = match node.params.get("language").and_then(Value::as_str) {
         Some("wgsl") => ShaderLanguage::Wgsl,
@@ -164,6 +255,12 @@ fn fullscreen_shader_scene_from_node(
     }))
 }
 
+fn source_has_output_port(node: &GraphNode, port_id: &str) -> bool {
+    node.ports
+        .iter()
+        .any(|port| port.id == port_id && port.direction == PortDirection::Output)
+}
+
 fn read_color(value: &Value) -> Option<[f64; 4]> {
     let values = value.as_array()?;
     let [r, g, b, a] = values.as_slice() else {
@@ -178,7 +275,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        ExecutionPlan, GraphDocument, GraphNode,
+        Edge, ExecutionPlan, GraphDocument, GraphNode, Port, PortRef,
         render::{PREVIEW_DOCUMENT_SCHEMA, PREVIEW_DOCUMENT_SCHEMA_VERSION},
     };
 
@@ -362,7 +459,151 @@ mod tests {
         assert!(matches!(scene, RenderScene::FullscreenShader(_)));
     }
 
+    #[test]
+    fn selects_clear_color_connected_to_render_output() {
+        let document = document_with_edges(
+            vec![
+                clear_node(json!([0.05, 0.08, 0.12, 1.0])),
+                shader_node(json!("wgsl"), json!(shader_source())),
+                output_node("output_1"),
+            ],
+            vec![edge("clear_1", "out", "output_1", "in")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(
+            scene,
+            RenderScene::ClearColor(ClearColorScene {
+                clear_color: [0.05, 0.08, 0.12, 1.0],
+                source_node_id: Some("clear_1".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn selects_fullscreen_shader_connected_to_render_output() {
+        let document = document_with_edges(
+            vec![
+                clear_node(json!([0.05, 0.08, 0.12, 1.0])),
+                shader_node(json!("wgsl"), json!(shader_source())),
+                output_node("output_1"),
+            ],
+            vec![edge("shader_1", "out", "output_1", "in")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert!(matches!(scene, RenderScene::FullscreenShader(_)));
+        assert_eq!(scene.source_node_id().as_deref(), Some("shader_1"));
+    }
+
+    #[test]
+    fn rejects_render_output_without_input_edge() {
+        let document = document_with_nodes(vec![
+            clear_node(json!([0.05, 0.08, 0.12, 1.0])),
+            output_node("output_1"),
+        ]);
+
+        let error = render_scene_from_preview_document(&document).expect_err("scene should fail");
+
+        assert_eq!(
+            error,
+            RenderSceneBuildError::RenderOutputWithoutInput {
+                node_id: "output_1".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_render_output_source_without_matching_output_port() {
+        let mut clear = clear_node(json!([0.05, 0.08, 0.12, 1.0]));
+        clear.ports.clear();
+        let document = document_with_edges(
+            vec![clear, output_node("output_1")],
+            vec![edge("clear_1", "out", "output_1", "in")],
+        );
+
+        let error = render_scene_from_preview_document(&document).expect_err("scene should fail");
+
+        assert_eq!(
+            error,
+            RenderSceneBuildError::MissingRenderOutputSourcePort {
+                output_node_id: "output_1".to_owned(),
+                source_node_id: "clear_1".to_owned(),
+                port_id: "out".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_render_output_missing_source_node() {
+        let document = document_with_edges(
+            vec![output_node("output_1")],
+            vec![edge("missing", "out", "output_1", "in")],
+        );
+
+        let error = render_scene_from_preview_document(&document).expect_err("scene should fail");
+
+        assert_eq!(
+            error,
+            RenderSceneBuildError::MissingRenderOutputSourceNode {
+                output_node_id: "output_1".to_owned(),
+                source_node_id: "missing".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_render_output_source() {
+        let document = document_with_edges(
+            vec![value_node(), output_node("output_1")],
+            vec![edge("value_1", "value", "output_1", "in")],
+        );
+
+        let error = render_scene_from_preview_document(&document).expect_err("scene should fail");
+
+        assert_eq!(
+            error,
+            RenderSceneBuildError::UnsupportedRenderOutputSource {
+                output_node_id: "output_1".to_owned(),
+                source_node_id: "value_1".to_owned(),
+                source_kind: "core.value-f32".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn selects_first_render_output_deterministically() {
+        let document = document_with_edges(
+            vec![
+                clear_node(json!([0.1, 0.2, 0.3, 1.0])),
+                shader_node(json!("wgsl"), json!(shader_source())),
+                output_node("output_a"),
+                output_node("output_b"),
+            ],
+            vec![
+                edge("clear_1", "out", "output_a", "in"),
+                edge("shader_1", "out", "output_b", "in"),
+            ],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(
+            scene,
+            RenderScene::ClearColor(ClearColorScene {
+                clear_color: [0.1, 0.2, 0.3, 1.0],
+                source_node_id: Some("clear_1".to_owned())
+            })
+        );
+    }
+
     fn document_with_nodes(nodes: Vec<GraphNode>) -> PreviewDocument {
+        document_with_edges(nodes, Vec::new())
+    }
+
+    fn document_with_edges(nodes: Vec<GraphNode>, edges: Vec<Edge>) -> PreviewDocument {
         PreviewDocument {
             schema: PREVIEW_DOCUMENT_SCHEMA.to_owned(),
             schema_version: PREVIEW_DOCUMENT_SCHEMA_VERSION.to_owned(),
@@ -372,7 +613,7 @@ mod tests {
                 id: "render-graph".to_owned(),
                 revision: "1".to_owned(),
                 nodes,
-                edges: Vec::new(),
+                edges,
             },
             plan: ExecutionPlan {
                 graph_id: "render-graph".to_owned(),
@@ -385,6 +626,16 @@ mod tests {
         }
     }
 
+    fn output_node(id: &str) -> GraphNode {
+        GraphNode {
+            id: id.to_owned(),
+            kind: RENDER_OUTPUT_KIND.to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params: serde_json::Map::new(),
+            ports: vec![gpu_input_port()],
+        }
+    }
+
     fn clear_node(color: Value) -> GraphNode {
         let mut params = serde_json::Map::new();
         params.insert("color".to_owned(), color);
@@ -393,7 +644,7 @@ mod tests {
             kind: RENDER_CLEAR_COLOR_KIND.to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
-            ports: Vec::new(),
+            ports: vec![gpu_output_port()],
         }
     }
 
@@ -406,8 +657,72 @@ mod tests {
             kind: RENDER_FULLSCREEN_SHADER_KIND.to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
-            ports: Vec::new(),
+            ports: vec![gpu_output_port()],
         }
+    }
+
+    fn value_node() -> GraphNode {
+        GraphNode {
+            id: "value_1".to_owned(),
+            kind: "core.value-f32".to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params: serde_json::Map::new(),
+            ports: vec![
+                serde_json::from_value(json!({
+                    "id": "value",
+                    "direction": "output",
+                    "label": "Value",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "f32"
+                    }
+                }))
+                .expect("valid value port"),
+            ],
+        }
+    }
+
+    fn edge(from_node: &str, from_port: &str, to_node: &str, to_port: &str) -> Edge {
+        Edge {
+            from: PortRef {
+                node: from_node.to_owned(),
+                port: from_port.to_owned(),
+            },
+            to: PortRef {
+                node: to_node.to_owned(),
+                port: to_port.to_owned(),
+            },
+        }
+    }
+
+    fn gpu_output_port() -> Port {
+        serde_json::from_value(json!({
+            "id": "out",
+            "direction": "output",
+            "label": "Out",
+            "type": gpu_texture_type()
+        }))
+        .expect("valid gpu output port")
+    }
+
+    fn gpu_input_port() -> Port {
+        serde_json::from_value(json!({
+            "id": "in",
+            "direction": "input",
+            "label": "In",
+            "type": gpu_texture_type(),
+            "activation": "latched"
+        }))
+        .expect("valid gpu input port")
+    }
+
+    fn gpu_texture_type() -> Value {
+        json!({
+            "flow": "resource",
+            "dataKind": "gpu.texture2d",
+            "format": "rgba8unorm",
+            "colorSpace": "srgb"
+        })
     }
 
     fn shader_source() -> &'static str {
