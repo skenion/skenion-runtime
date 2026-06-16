@@ -18,8 +18,9 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, NodeDefinition, NodeRegistry,
-    PreviewManager, RuntimePreviewStartRequest, RuntimeSession, RuntimeTelemetrySnapshot,
-    SessionRunRequest, build_execution_plan, run_dummy_execution, validate_project,
+    PreviewManager, ProjectRequestV02, RunProjectRequestV02, RuntimePreviewStartRequest,
+    RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest, build_execution_plan,
+    build_execution_plan_v02, run_dummy_execution, validate_project, validate_project_v02,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -147,7 +148,9 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
         api_version: RUNTIME_API_VERSION,
         capabilities: vec![
             "project.validate",
+            "project.validate.v0.2",
             "project.plan",
+            "project.plan.v0.2",
             "dummy.run",
             "session.load",
             "session.validate",
@@ -169,54 +172,104 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
 }
 
 async fn validate_project_endpoint(
-    Json(request): Json<ProjectRequest>,
+    Json(value): Json<serde_json::Value>,
 ) -> Json<RuntimeApiResponse> {
-    let diagnostics = validate_project_request(&request.graph, request.nodes);
-    Json(match diagnostics {
-        Ok(()) => RuntimeApiResponse::ok(),
+    Json(match decode_project_payload(value) {
+        Ok(ProjectPayload::V01(request)) => {
+            match validate_project_request(&request.graph, request.nodes) {
+                Ok(()) => RuntimeApiResponse::ok(),
+                Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
+            }
+        }
+        Ok(ProjectPayload::V02(request)) => {
+            match validate_project_v02(&request.graph, &request.nodes) {
+                Ok((diagnostics, _)) => RuntimeApiResponse {
+                    ok: true,
+                    diagnostics,
+                    plan: None,
+                    report: None,
+                },
+                Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
+            }
+        }
         Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
     })
 }
 
-async fn plan_project_endpoint(Json(request): Json<ProjectRequest>) -> Json<RuntimeApiResponse> {
-    let registry = match registry_from_nodes(request.nodes) {
-        Ok(registry) => registry,
-        Err(diagnostics) => return Json(RuntimeApiResponse::diagnostics(diagnostics)),
-    };
+async fn plan_project_endpoint(Json(value): Json<serde_json::Value>) -> Json<RuntimeApiResponse> {
+    match decode_project_payload(value) {
+        Ok(ProjectPayload::V01(request)) => {
+            let registry = match registry_from_nodes(request.nodes) {
+                Ok(registry) => registry,
+                Err(diagnostics) => return Json(RuntimeApiResponse::diagnostics(diagnostics)),
+            };
 
-    if let Err(diagnostics) = validate_graph_with_registry(&request.graph, &registry) {
-        return Json(RuntimeApiResponse::diagnostics(diagnostics));
+            if let Err(diagnostics) = validate_graph_with_registry(&request.graph, &registry) {
+                return Json(RuntimeApiResponse::diagnostics(diagnostics));
+            }
+
+            let plan = build_execution_plan(&request.graph, &registry)
+                .expect("validated project should plan");
+            Json(RuntimeApiResponse {
+                ok: true,
+                diagnostics: Vec::new(),
+                plan: Some(plan),
+                report: None,
+            })
+        }
+        Ok(ProjectPayload::V02(request)) => {
+            match build_execution_plan_v02(&request.graph, &request.nodes) {
+                Ok((plan, diagnostics)) => Json(RuntimeApiResponse {
+                    ok: true,
+                    diagnostics,
+                    plan: Some(plan),
+                    report: None,
+                }),
+                Err(diagnostics) => Json(RuntimeApiResponse::diagnostics(diagnostics)),
+            }
+        }
+        Err(diagnostics) => Json(RuntimeApiResponse::diagnostics(diagnostics)),
     }
-
-    let plan =
-        build_execution_plan(&request.graph, &registry).expect("validated project should plan");
-    Json(RuntimeApiResponse {
-        ok: true,
-        diagnostics: Vec::new(),
-        plan: Some(plan),
-        report: None,
-    })
 }
 
-async fn run_project_endpoint(Json(request): Json<RunProjectRequest>) -> Json<RuntimeApiResponse> {
-    let registry = match registry_from_nodes(request.nodes) {
-        Ok(registry) => registry,
-        Err(diagnostics) => return Json(RuntimeApiResponse::diagnostics(diagnostics)),
-    };
+async fn run_project_endpoint(Json(value): Json<serde_json::Value>) -> Json<RuntimeApiResponse> {
+    match decode_run_project_payload(value) {
+        Ok(RunProjectPayload::V01(request)) => {
+            let registry = match registry_from_nodes(request.nodes) {
+                Ok(registry) => registry,
+                Err(diagnostics) => return Json(RuntimeApiResponse::diagnostics(diagnostics)),
+            };
 
-    if let Err(diagnostics) = validate_graph_with_registry(&request.graph, &registry) {
-        return Json(RuntimeApiResponse::diagnostics(diagnostics));
+            if let Err(diagnostics) = validate_graph_with_registry(&request.graph, &registry) {
+                return Json(RuntimeApiResponse::diagnostics(diagnostics));
+            }
+
+            let plan = build_execution_plan(&request.graph, &registry)
+                .expect("validated project should plan");
+            let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
+            Json(RuntimeApiResponse {
+                ok: true,
+                diagnostics: Vec::new(),
+                plan: Some(plan),
+                report: Some(report),
+            })
+        }
+        Ok(RunProjectPayload::V02(request)) => {
+            match build_execution_plan_v02(&request.graph, &request.nodes) {
+                Ok((plan, diagnostics)) => {
+                    let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
+                    Json(RuntimeApiResponse {
+                        ok: true,
+                        diagnostics,
+                        plan: Some(plan),
+                        report: Some(report),
+                    })
+                }
+                Err(diagnostics) => Json(RuntimeApiResponse::diagnostics(diagnostics)),
+            }
+        }
+        Err(diagnostics) => Json(RuntimeApiResponse::diagnostics(diagnostics)),
     }
-
-    let plan =
-        build_execution_plan(&request.graph, &registry).expect("validated project should plan");
-    let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
-    Json(RuntimeApiResponse {
-        ok: true,
-        diagnostics: Vec::new(),
-        plan: Some(plan),
-        report: Some(report),
-    })
 }
 
 async fn session_snapshot(
@@ -520,6 +573,68 @@ fn validate_project_request(
     validate_graph_with_registry(graph, &registry)
 }
 
+enum ProjectPayload {
+    V01(ProjectRequest),
+    V02(ProjectRequestV02),
+}
+
+enum RunProjectPayload {
+    V01(RunProjectRequest),
+    V02(RunProjectRequestV02),
+}
+
+fn decode_project_payload(
+    value: serde_json::Value,
+) -> Result<ProjectPayload, Vec<RuntimeDiagnostic>> {
+    match project_schema_version(&value).as_deref() {
+        Some("0.2.0") => serde_json::from_value(value)
+            .map(ProjectPayload::V02)
+            .map_err(invalid_project_payload),
+        Some("0.1.0") => serde_json::from_value(value)
+            .map(ProjectPayload::V01)
+            .map_err(invalid_project_payload),
+        Some(version) => Err(vec![RuntimeDiagnostic::error(format!(
+            "unsupported graph schemaVersion: {version}"
+        ))]),
+        None => Err(vec![RuntimeDiagnostic::error(
+            "missing graph.schemaVersion in project request",
+        )]),
+    }
+}
+
+fn decode_run_project_payload(
+    value: serde_json::Value,
+) -> Result<RunProjectPayload, Vec<RuntimeDiagnostic>> {
+    match project_schema_version(&value).as_deref() {
+        Some("0.2.0") => serde_json::from_value(value)
+            .map(RunProjectPayload::V02)
+            .map_err(invalid_project_payload),
+        Some("0.1.0") => serde_json::from_value(value)
+            .map(RunProjectPayload::V01)
+            .map_err(invalid_project_payload),
+        Some(version) => Err(vec![RuntimeDiagnostic::error(format!(
+            "unsupported graph schemaVersion: {version}"
+        ))]),
+        None => Err(vec![RuntimeDiagnostic::error(
+            "missing graph.schemaVersion in project request",
+        )]),
+    }
+}
+
+fn project_schema_version(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("graph")
+        .and_then(|graph| graph.get("schemaVersion"))
+        .and_then(|version| version.as_str())
+        .map(str::to_owned)
+}
+
+fn invalid_project_payload(error: serde_json::Error) -> Vec<RuntimeDiagnostic> {
+    vec![RuntimeDiagnostic::error(format!(
+        "invalid project request: {error}"
+    ))]
+}
+
 pub(crate) fn registry_from_nodes(
     nodes: Vec<NodeDefinition>,
 ) -> Result<NodeRegistry, Vec<RuntimeDiagnostic>> {
@@ -604,59 +719,29 @@ mod tests {
 
         assert_eq!(response["name"], "skenion-runtime");
         assert_eq!(response["apiVersion"], RUNTIME_API_VERSION);
-        assert_eq!(response["capabilities"][0], "project.validate");
-        assert_eq!(response["capabilities"][1], "project.plan");
-        assert_eq!(response["capabilities"][2], "dummy.run");
-        assert_eq!(response["capabilities"][3], "session.load");
-        assert!(
-            response["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|capability| capability == "session.patch")
-        );
-        assert!(
-            response["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|capability| capability == "session.history")
-        );
-        assert!(
-            response["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|capability| capability == "session.undo")
-        );
-        assert!(
-            response["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|capability| capability == "session.redo")
-        );
-        assert!(
-            response["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|capability| capability == "session.preview.start")
-        );
-        assert!(
-            response["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|capability| capability == "session.telemetry")
-        );
-        assert!(
-            response["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|capability| capability == "session.telemetry.stream")
-        );
+        let capabilities = response["capabilities"].as_array().unwrap();
+        for expected in [
+            "project.validate",
+            "project.validate.v0.2",
+            "project.plan",
+            "project.plan.v0.2",
+            "dummy.run",
+            "session.load",
+            "session.patch",
+            "session.history",
+            "session.undo",
+            "session.redo",
+            "session.preview.start",
+            "session.telemetry",
+            "session.telemetry.stream",
+        ] {
+            assert!(
+                capabilities
+                    .iter()
+                    .any(|capability| capability.as_str() == Some(expected)),
+                "missing capability {expected}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -841,6 +926,150 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("missing node definition")
+        );
+    }
+
+    #[tokio::test]
+    async fn v02_project_endpoints_validate_plan_and_run_with_edge_metadata() {
+        let validation = post_json("/v0/validate", sample_project_v02()).await;
+        assert_eq!(validation["ok"], true);
+        assert_eq!(validation["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(validation["plan"], Value::Null);
+
+        let plan = post_json("/v0/plan", sample_project_v02()).await;
+        assert_eq!(plan["ok"], true);
+        assert_eq!(plan["plan"]["graphId"], "render-output-v02");
+        assert_eq!(plan["plan"]["graphRevision"], "1");
+        assert_eq!(
+            plan["plan"]["edges"][0]["metadata"]["resolvedType"],
+            "render.frame"
+        );
+        assert_eq!(
+            plan["plan"]["edges"][0]["metadata"]["mergePolicy"],
+            "forbid"
+        );
+        assert_eq!(
+            plan["plan"]["edges"][0]["metadata"]["fanOutPolicy"],
+            "allow"
+        );
+        assert_eq!(
+            plan["plan"]["edges"][0]["metadata"]["cycleClassification"],
+            Value::Null
+        );
+        assert_eq!(plan["report"], Value::Null);
+
+        let mut run_request = sample_project_v02();
+        run_request["frames"] = json!(3);
+        let run = post_json("/v0/run", run_request).await;
+        assert_eq!(run["ok"], true);
+        assert_eq!(run["report"]["frameCount"], 3);
+        assert_eq!(
+            run["report"]["frames"][0]["executedNodes"][0]["status"],
+            "simulated"
+        );
+    }
+
+    #[tokio::test]
+    async fn v02_project_endpoints_reject_ambiguous_algebraic_loop() {
+        let response = post_json("/v0/validate", sample_ambiguous_loop_project_v02()).await;
+
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("ambiguous-algebraic-loop"))
+        );
+
+        let plan = post_json("/v0/plan", sample_ambiguous_loop_project_v02()).await;
+        assert_eq!(plan["ok"], false);
+        assert!(
+            plan["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ambiguous-algebraic-loop")
+        );
+
+        let run = post_json("/v0/run", sample_ambiguous_loop_project_v02()).await;
+        assert_eq!(run["ok"], false);
+        assert!(
+            run["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ambiguous-algebraic-loop")
+        );
+    }
+
+    #[tokio::test]
+    async fn project_endpoints_reject_missing_and_unsupported_schema_versions() {
+        let mut missing = sample_project_v02();
+        missing["graph"]
+            .as_object_mut()
+            .unwrap()
+            .remove("schemaVersion");
+        let missing_response = post_json("/v0/validate", missing).await;
+        assert_eq!(missing_response["ok"], false);
+        assert!(
+            missing_response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing graph.schemaVersion")
+        );
+
+        let mut unsupported = sample_project_v02();
+        unsupported["graph"]["schemaVersion"] = json!("9.9.9");
+        let unsupported_response = post_json("/v0/plan", unsupported).await;
+        assert_eq!(unsupported_response["ok"], false);
+        assert!(
+            unsupported_response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported graph schemaVersion: 9.9.9")
+        );
+
+        let mut missing_run = sample_project_v02();
+        missing_run["graph"]
+            .as_object_mut()
+            .unwrap()
+            .remove("schemaVersion");
+        let missing_run_response = post_json("/v0/run", missing_run).await;
+        assert_eq!(missing_run_response["ok"], false);
+        assert!(
+            missing_run_response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing graph.schemaVersion")
+        );
+
+        let mut unsupported_run = sample_project_v02();
+        unsupported_run["graph"]["schemaVersion"] = json!("9.9.9");
+        let unsupported_run_response = post_json("/v0/run", unsupported_run).await;
+        assert_eq!(unsupported_run_response["ok"], false);
+        assert!(
+            unsupported_run_response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported graph schemaVersion: 9.9.9")
+        );
+    }
+
+    #[tokio::test]
+    async fn project_endpoints_reject_malformed_payloads() {
+        let mut request = sample_project_v02();
+        request["nodes"] = json!({});
+
+        let response = post_json("/v0/validate", request).await;
+
+        assert_eq!(response["ok"], false);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid project request")
         );
     }
 
@@ -1477,6 +1706,162 @@ mod tests {
               "state": { "persistent": false },
               "permissions": [],
               "capabilities": []
+            }
+          ]
+        })
+    }
+
+    fn sample_project_v02() -> Value {
+        json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.2.0",
+            "id": "render-output-v02",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "clear_color",
+                "kind": "render.clear-color",
+                "kindVersion": "0.2.0",
+                "params": { "color": [0.12, 0.2, 0.34, 1] },
+                "ports": [
+                  {
+                    "id": "out",
+                    "direction": "output",
+                    "type": "render.frame",
+                    "rate": "render"
+                  }
+                ]
+              },
+              {
+                "id": "output",
+                "kind": "render.output",
+                "kindVersion": "0.2.0",
+                "params": {},
+                "ports": [
+                  {
+                    "id": "in",
+                    "direction": "input",
+                    "type": "render.frame",
+                    "rate": "render",
+                    "required": true
+                  }
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "id": "edge_clear_output",
+                "source": { "nodeId": "clear_color", "portId": "out" },
+                "target": { "nodeId": "output", "portId": "in" },
+                "resolvedType": "render.frame"
+              }
+            ]
+          },
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.2.0",
+              "id": "render.clear-color",
+              "version": "0.2.0",
+              "displayName": "Clear Color",
+              "category": "Render",
+              "ports": [
+                {
+                  "id": "out",
+                  "direction": "output",
+                  "type": "render.frame",
+                  "rate": "render"
+                }
+              ],
+              "execution": { "model": "gpu_pass", "clock": "frame" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": ["render.frame.v0.2"]
+            },
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.2.0",
+              "id": "render.output",
+              "version": "0.2.0",
+              "displayName": "Render Output",
+              "category": "Render",
+              "ports": [
+                {
+                  "id": "in",
+                  "direction": "input",
+                  "type": "render.frame",
+                  "rate": "render",
+                  "required": true
+                }
+              ],
+              "execution": { "model": "gpu_pass", "clock": "frame" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": ["render.output.v0.2"]
+            }
+          ]
+        })
+    }
+
+    fn sample_ambiguous_loop_project_v02() -> Value {
+        json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.2.0",
+            "id": "ambiguous-algebraic-loop-v02",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "a",
+                "kind": "core.value-transform",
+                "kindVersion": "0.2.0",
+                "params": {},
+                "ports": [
+                  { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
+                  { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+                ]
+              },
+              {
+                "id": "b",
+                "kind": "core.value-transform",
+                "kindVersion": "0.2.0",
+                "params": {},
+                "ports": [
+                  { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
+                  { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "id": "edge_a_b",
+                "source": { "nodeId": "a", "portId": "out" },
+                "target": { "nodeId": "b", "portId": "in" }
+              },
+              {
+                "id": "edge_b_a",
+                "source": { "nodeId": "b", "portId": "out" },
+                "target": { "nodeId": "a", "portId": "in" }
+              }
+            ]
+          },
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.2.0",
+              "id": "core.value-transform",
+              "version": "0.2.0",
+              "displayName": "Value Transform",
+              "category": "Core",
+              "ports": [
+                { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
+                { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+              ],
+              "execution": { "model": "value" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": ["value.number.v0.2"]
             }
           ]
         })

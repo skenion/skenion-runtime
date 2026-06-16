@@ -108,6 +108,7 @@ mod tests {
                 from_port: "out".to_owned(),
                 to_node: "b".to_owned(),
                 to_port: "value".to_owned(),
+                metadata: None,
             }],
             groups: vec![ExecutionGroup {
                 execution_model: ExecutionModel::Value,
