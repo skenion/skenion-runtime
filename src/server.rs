@@ -1,7 +1,8 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::State,
     http::{HeaderValue, Method, header::CONTENT_TYPE},
     routing::{get, post},
@@ -11,7 +12,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, NodeDefinition, NodeRegistry,
-    RuntimeSession, SessionRunRequest, build_execution_plan, run_dummy_execution, validate_project,
+    PreviewManager, RuntimePreviewStartRequest, RuntimeSession, SessionRunRequest,
+    build_execution_plan, run_dummy_execution, validate_project,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -75,12 +77,14 @@ pub enum DiagnosticSeverity {
 #[derive(Clone)]
 pub struct RuntimeServerState {
     pub session: Arc<RwLock<RuntimeSession>>,
+    pub preview: Arc<Mutex<PreviewManager>>,
 }
 
 impl Default for RuntimeServerState {
     fn default() -> Self {
         Self {
             session: Arc::new(RwLock::new(RuntimeSession::default())),
+            preview: Arc::new(Mutex::new(PreviewManager::from_env())),
         }
     }
 }
@@ -105,6 +109,10 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/history", get(session_history))
         .route("/v0/session/undo", post(undo_session))
         .route("/v0/session/redo", post(redo_session))
+        .route("/v0/session/preview", get(preview_status))
+        .route("/v0/session/preview/start", post(start_preview))
+        .route("/v0/session/preview/stop", post(stop_preview))
+        .route("/v0/session/preview/restart", post(restart_preview))
         .with_state(state)
         .layer(cors_layer())
 }
@@ -135,6 +143,10 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.undo",
             "session.redo",
             "session.clear",
+            "session.preview.status",
+            "session.preview.start",
+            "session.preview.stop",
+            "session.preview.restart",
         ],
     })
 }
@@ -298,11 +310,110 @@ async fn redo_session(
 async fn clear_session(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimeSessionResponse> {
+    let snapshot = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        session.snapshot()
+    };
+    let _ = state
+        .preview
+        .lock()
+        .expect("runtime preview lock should not be poisoned")
+        .stop(snapshot);
+
     let mut session = state
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
     Json(session.clear())
+}
+
+async fn preview_status(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    let snapshot = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        session.snapshot()
+    };
+    let mut preview = state
+        .preview
+        .lock()
+        .expect("runtime preview lock should not be poisoned");
+    Json(preview.status(snapshot))
+}
+
+async fn start_preview(
+    State(state): State<RuntimeServerState>,
+    body: Bytes,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    let snapshot = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        session.snapshot()
+    };
+    let request = match preview_start_request(&body) {
+        Ok(request) => request,
+        Err(diagnostic) => {
+            let preview = state
+                .preview
+                .lock()
+                .expect("runtime preview lock should not be poisoned");
+            return Json(preview.request_error(snapshot, diagnostic));
+        }
+    };
+    let context = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        session.preview_context()
+    };
+    let mut preview = state
+        .preview
+        .lock()
+        .expect("runtime preview lock should not be poisoned");
+    Json(preview.start(context, snapshot, request.restart))
+}
+
+async fn restart_preview(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    let (snapshot, context) = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        (session.snapshot(), session.preview_context())
+    };
+    let mut preview = state
+        .preview
+        .lock()
+        .expect("runtime preview lock should not be poisoned");
+    Json(preview.restart(context, snapshot))
+}
+
+async fn stop_preview(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    let snapshot = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        session.snapshot()
+    };
+    let mut preview = state
+        .preview
+        .lock()
+        .expect("runtime preview lock should not be poisoned");
+    Json(preview.stop(snapshot))
 }
 
 impl RuntimeApiResponse {
@@ -371,6 +482,15 @@ pub(crate) fn validate_graph_with_registry(
             .iter()
             .map(|error| RuntimeDiagnostic::error(error.message.clone()))
             .collect()
+    })
+}
+
+fn preview_start_request(body: &[u8]) -> Result<RuntimePreviewStartRequest, RuntimeDiagnostic> {
+    if body.is_empty() {
+        return Ok(RuntimePreviewStartRequest { restart: false });
+    }
+    serde_json::from_slice(body).map_err(|error| {
+        RuntimeDiagnostic::error(format!("invalid preview start request: {error}"))
     })
 }
 
@@ -448,6 +568,13 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|capability| capability == "session.redo")
+        );
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "session.preview.start")
         );
     }
 
@@ -903,6 +1030,116 @@ mod tests {
         assert_eq!(response["plan"], Value::Null);
     }
 
+    #[tokio::test]
+    async fn preview_status_reports_stopped_without_loaded_session() {
+        let response =
+            get_json_with(runtime_router_with_dry_preview(), "/v0/session/preview").await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["state"], "stopped");
+        assert_eq!(response["sessionRevision"], Value::Null);
+        assert_eq!(response["previewSessionRevision"], Value::Null);
+        assert_eq!(response["stale"], false);
+    }
+
+    #[tokio::test]
+    async fn preview_start_requires_loaded_session() {
+        let response = post_json_with(
+            runtime_router_with_dry_preview(),
+            "/v0/session/preview/start",
+            json!({}),
+        )
+        .await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["state"], "stopped");
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no project loaded")
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_start_stop_and_restart_use_session_plan() {
+        let app = runtime_router_with_dry_preview();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let started = post_empty_with(app.clone(), "/v0/session/preview/start").await;
+        assert_eq!(started["ok"], true);
+        assert_eq!(started["state"], "running");
+        assert_eq!(started["graphId"], "minimal-value");
+        assert_eq!(started["graphRevision"], "1");
+        assert_eq!(started["sessionRevision"], 1);
+        assert_eq!(started["previewSessionRevision"], 1);
+        assert_eq!(started["stale"], false);
+
+        let stopped = post_empty_with(app.clone(), "/v0/session/preview/stop").await;
+        assert_eq!(stopped["ok"], true);
+        assert_eq!(stopped["state"], "stopped");
+        assert_eq!(stopped["graphId"], Value::Null);
+
+        let restarted = post_empty_with(app, "/v0/session/preview/restart").await;
+        assert_eq!(restarted["ok"], true);
+        assert_eq!(restarted["state"], "running");
+        assert_eq!(restarted["previewSessionRevision"], 1);
+    }
+
+    #[tokio::test]
+    async fn preview_start_request_restart_replaces_existing_preview() {
+        let app = runtime_router_with_dry_preview();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_empty_with(app.clone(), "/v0/session/preview/start").await;
+        post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+
+        let stale = get_json_with(app.clone(), "/v0/session/preview").await;
+        assert_eq!(stale["state"], "running");
+        assert_eq!(stale["graphRevision"], "1");
+        assert_eq!(stale["sessionRevision"], 2);
+        assert_eq!(stale["previewSessionRevision"], 1);
+        assert_eq!(stale["stale"], true);
+
+        let restarted =
+            post_json_with(app, "/v0/session/preview/start", json!({ "restart": true })).await;
+        assert_eq!(restarted["ok"], true);
+        assert_eq!(restarted["graphRevision"], "2");
+        assert_eq!(restarted["previewSessionRevision"], 2);
+        assert_eq!(restarted["stale"], false);
+    }
+
+    #[tokio::test]
+    async fn preview_start_rejects_invalid_request_json() {
+        let app = runtime_router_with_dry_preview();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let response = post_raw_with(app, "/v0/session/preview/start", b"{".to_vec()).await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["state"], "stopped");
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid preview start request")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_clear_stops_preview() {
+        let app = runtime_router_with_dry_preview();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_empty_with(app.clone(), "/v0/session/preview/start").await;
+
+        let cleared = delete_json_with(app.clone(), "/v0/session").await;
+        assert_eq!(cleared["ok"], true);
+
+        let preview = get_json_with(app, "/v0/session/preview").await;
+        assert_eq!(preview["state"], "stopped");
+        assert_eq!(preview["sessionRevision"], Value::Null);
+        assert_eq!(preview["stale"], false);
+    }
+
     async fn get_json(path: &str) -> Value {
         get_json_with(runtime_router(), path).await
     }
@@ -933,6 +1170,22 @@ mod tests {
                     .uri(path)
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(payload.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        body_json(response.into_body()).await
+    }
+
+    async fn post_raw_with(app: Router, path: &str, payload: Vec<u8>) -> Value {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload))
                     .expect("request should build"),
             )
             .await
@@ -976,6 +1229,13 @@ mod tests {
             .await
             .expect("body should collect");
         serde_json::from_slice(&bytes).expect("body should be json")
+    }
+
+    fn runtime_router_with_dry_preview() -> Router {
+        runtime_router_with_state(RuntimeServerState {
+            session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
+            preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
+        })
     }
 
     fn sample_project() -> Value {

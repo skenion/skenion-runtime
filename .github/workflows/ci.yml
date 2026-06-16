@@ -35,8 +35,9 @@ jobs:
       - run: cargo run -- run --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes --frames 2 --format json
       - run: cargo run -- serve --help
       - run: cargo run -- preview --help
+      - run: cargo run -- preview-plan --help
       - run: |
-          cargo run -- serve --host 127.0.0.1 --port 3761 &
+          SKENION_PREVIEW_DRY_RUN=1 cargo run -- serve --host 127.0.0.1 --port 3761 &
           SERVER_PID=$!
           trap "kill $SERVER_PID" EXIT
           for attempt in $(seq 1 20); do
@@ -48,7 +49,7 @@ jobs:
           echo "runtime health endpoint did not become ready" >&2
           exit 1
       - run: |
-          cargo run -- serve --host 127.0.0.1 --port 3761 &
+          SKENION_PREVIEW_DRY_RUN=1 cargo run -- serve --host 127.0.0.1 --port 3761 &
           SERVER_PID=$!
           trap "kill $SERVER_PID" EXIT
           READY=false
@@ -88,6 +89,35 @@ jobs:
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-patch.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-history.sh
           )
+
+          curl --fail --silent \
+            -H "content-type: application/json" \
+            --data @.deps/skenion-examples/compatibility/v0.1/projects/valid/minimal-value.project.json \
+            http://127.0.0.1:3761/v0/session/load >/dev/null
+
+          PREVIEW_START="$(curl --fail --silent \
+            -H "content-type: application/json" \
+            --data '{}' \
+            http://127.0.0.1:3761/v0/session/preview/start)"
+          python3 -c 'import json, sys; r=json.loads(sys.argv[1]); assert r["ok"] is True; assert r["state"] == "running"; assert r["stale"] is False' "${PREVIEW_START}"
+
+          curl --fail --silent \
+            -H "content-type: application/json" \
+            --data @.deps/skenion-examples/compatibility/v0.1/patches/valid/set-value-param.patch.json \
+            http://127.0.0.1:3761/v0/session/patch >/dev/null
+
+          PREVIEW_STALE="$(curl --fail --silent http://127.0.0.1:3761/v0/session/preview)"
+          python3 -c 'import json, sys; r=json.loads(sys.argv[1]); assert r["ok"] is True; assert r["state"] == "running"; assert r["stale"] is True' "${PREVIEW_STALE}"
+
+          PREVIEW_RESTART="$(curl --fail --silent \
+            -X POST \
+            http://127.0.0.1:3761/v0/session/preview/restart)"
+          python3 -c 'import json, sys; r=json.loads(sys.argv[1]); assert r["ok"] is True; assert r["state"] == "running"; assert r["stale"] is False; assert r["previewSessionRevision"] == r["sessionRevision"]' "${PREVIEW_RESTART}"
+
+          PREVIEW_STOP="$(curl --fail --silent \
+            -X POST \
+            http://127.0.0.1:3761/v0/session/preview/stop)"
+          python3 -c 'import json, sys; r=json.loads(sys.argv[1]); assert r["ok"] is True; assert r["state"] == "stopped"; assert r["stale"] is False' "${PREVIEW_STOP}"
       - run: |
           if cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/invalid/missing-definition.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes; then
             echo "missing-definition fixture unexpectedly passed" >&2

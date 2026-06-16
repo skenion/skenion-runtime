@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, GraphPatchEvent,
-    GraphPatchEventKind, GraphPatchHistory, NodeRegistry, ProjectRequest, RuntimeDiagnostic,
-    apply_graph_patch, build_execution_plan, invert_graph_patch, run_dummy_execution,
+    GraphPatchEventKind, GraphPatchHistory, NodeRegistry, PreviewContext, ProjectRequest,
+    RuntimeDiagnostic, apply_graph_patch, build_execution_plan, invert_graph_patch,
+    run_dummy_execution,
     server::{registry_from_nodes, validate_graph_with_registry},
 };
 
@@ -119,6 +120,26 @@ impl RuntimeSession {
             diagnostics: self.diagnostics.clone(),
             plan: self.plan.clone(),
         }
+    }
+
+    pub fn preview_context(&self) -> Result<PreviewContext, Vec<RuntimeDiagnostic>> {
+        let Some(graph) = &self.graph else {
+            return Err(vec![RuntimeDiagnostic::error(
+                "no project loaded in runtime session",
+            )]);
+        };
+        let Some(plan) = &self.plan else {
+            return Err(vec![RuntimeDiagnostic::error(
+                "no execution plan available in runtime session",
+            )]);
+        };
+
+        Ok(PreviewContext {
+            graph_id: graph.id.clone(),
+            graph_revision: graph.revision.clone(),
+            session_revision: self.revision,
+            plan: plan.clone(),
+        })
     }
 
     pub fn load_project(&mut self, request: ProjectRequest) -> RuntimeSessionResponse {
@@ -710,6 +731,39 @@ mod tests {
             response.diagnostics[0]
                 .message
                 .contains("missing node definition")
+        );
+    }
+
+    #[test]
+    fn preview_context_requires_loaded_project_and_plan() {
+        let mut session = RuntimeSession::default();
+
+        let missing_project = session.preview_context();
+        assert!(
+            missing_project
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("no project loaded")
+        );
+
+        session.load_project(sample_project());
+        let context = session.preview_context().expect("context should exist");
+        assert_eq!(context.graph_id, "minimal-value");
+        assert_eq!(context.graph_revision, "1");
+        assert_eq!(context.session_revision, 1);
+        assert_eq!(context.plan.graph_id, "minimal-value");
+
+        session.plan = None;
+        let missing_plan = session.preview_context();
+        assert!(
+            missing_plan
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("no execution plan available")
         );
     }
 

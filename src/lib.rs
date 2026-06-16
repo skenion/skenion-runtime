@@ -1,6 +1,7 @@
 mod contract;
 mod loader;
 mod planner;
+mod preview_manager;
 mod project;
 mod registry;
 mod scheduler;
@@ -20,6 +21,10 @@ pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
     ExecutionGroup, ExecutionPlan, PlanEdge, PlanError, PlanNode, build_execution_plan,
     format_plan_text,
+};
+pub use preview_manager::{
+    PreviewContext, PreviewManager, PreviewState, RuntimePreviewStartRequest,
+    RuntimePreviewStatusResponse,
 };
 pub use project::{ProjectValidationError, ProjectValidationReport, validate_project};
 pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadError};
@@ -41,4 +46,4 @@ pub use validation::{
     ValidationError, ValidationReport, apply_graph_patch, compatible_data_types,
     invert_graph_patch, type_label, validate_graph_document, validate_node_definition,
 };
-pub use visual::run_preview_window;
+pub use visual::{PreviewFrameLimit, run_preview_window};

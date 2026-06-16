@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
     Edge, ExecutionModel, GraphDocument, NodeRegistry, ProjectValidationReport, validate_project,
 };
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionPlan {
     pub graph_id: String,
@@ -17,7 +17,7 @@ pub struct ExecutionPlan {
     pub groups: Vec<ExecutionGroup>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanNode {
     pub node_id: String,
@@ -27,7 +27,7 @@ pub struct PlanNode {
     pub order: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanEdge {
     pub from_node: String,
@@ -36,7 +36,7 @@ pub struct PlanEdge {
     pub to_port: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionGroup {
     pub execution_model: ExecutionModel,

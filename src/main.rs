@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
-    DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeRegistry, build_execution_plan,
-    format_dummy_execution_text, format_plan_text, load_graph_document, load_node_definition,
-    run_dummy_execution, run_preview_window, serve_runtime, validate_project,
+    DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeRegistry, PreviewFrameLimit,
+    build_execution_plan, format_dummy_execution_text, format_plan_text, load_graph_document,
+    load_node_definition, run_dummy_execution, run_preview_window, serve_runtime, validate_project,
 };
 
 #[derive(Debug, Parser)]
@@ -70,6 +70,18 @@ enum Command {
         /// Directory containing node definition manifests.
         #[arg(long)]
         nodes: PathBuf,
+        /// Number of placeholder frames before the preview exits.
+        #[arg(long, default_value_t = 300)]
+        frames: usize,
+    },
+    /// Open a local placeholder preview window from a prepared execution plan.
+    PreviewPlan {
+        /// Path to the prepared execution plan JSON.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Keep the preview open until the window is closed.
+        #[arg(long)]
+        until_close: bool,
         /// Number of placeholder frames before the preview exits.
         #[arg(long, default_value_t = 300)]
         frames: usize,
@@ -163,7 +175,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             frames,
         } => {
             let plan = load_plan(graph, nodes)?;
-            run_preview_window(plan, frames)
+            run_preview_window(plan, PreviewFrameLimit::Frames(frames))
+        }
+        Command::PreviewPlan {
+            plan,
+            until_close,
+            frames,
+        } => {
+            let plan = load_execution_plan(plan)?;
+            let frame_limit = if until_close {
+                PreviewFrameLimit::UntilClose
+            } else {
+                PreviewFrameLimit::Frames(frames)
+            };
+            run_preview_window(plan, frame_limit)
         }
         Command::Serve { host, port } => serve_runtime(&host, port).await,
     }
@@ -173,4 +198,9 @@ fn load_plan(graph: PathBuf, nodes: PathBuf) -> Result<ExecutionPlan, Box<dyn st
     let graph = load_graph_document(&graph)?;
     let registry = NodeRegistry::load_dir(&nodes)?;
     Ok(build_execution_plan(&graph, &registry)?)
+}
+
+fn load_execution_plan(path: PathBuf) -> Result<ExecutionPlan, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
