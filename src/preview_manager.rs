@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ControlState, ExecutionPlan, GraphDocument, PreviewDocument, RuntimeDiagnostic,
     RuntimeSessionSnapshot, RuntimeTelemetrySnapshot,
+    preview_control_state::{
+        PreviewControlStateSnapshot, preview_control_state_path,
+        write_preview_control_state_snapshot,
+    },
     render::{
         cleanup_stale_preview_temp_files, remove_preview_temp_file,
         render_scene_from_preview_document,
@@ -30,13 +34,14 @@ pub(crate) struct PreviewSpawn {
     document_path: Option<PathBuf>,
 }
 
-pub(crate) type PreviewSpawner = fn(&PreviewDocument, &Path) -> Result<PreviewSpawn, String>;
+pub(crate) type PreviewSpawner = fn(&PreviewDocument, &Path, &Path) -> Result<PreviewSpawn, String>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewContext {
     pub graph_id: String,
     pub graph_revision: String,
     pub session_revision: u64,
+    pub control_revision: u64,
     pub graph: GraphDocument,
     pub plan: ExecutionPlan,
     pub control_state: ControlState,
@@ -69,6 +74,10 @@ pub struct RuntimePreviewStatusResponse {
     pub graph_revision: Option<String>,
     pub session_revision: Option<u64>,
     pub preview_session_revision: Option<u64>,
+    pub control_revision: Option<u64>,
+    pub preview_control_revision: Option<u64>,
+    pub control_live: bool,
+    pub last_control_update_at: Option<String>,
     pub stale: bool,
     pub started_at: Option<String>,
     pub exited_at: Option<String>,
@@ -84,11 +93,14 @@ struct PreviewStatus {
     graph_id: Option<String>,
     graph_revision: Option<String>,
     preview_session_revision: Option<u64>,
+    preview_control_revision: Option<u64>,
+    last_control_update_at: Option<String>,
     started_at: Option<String>,
     exited_at: Option<String>,
     exit_code: Option<i32>,
     message: Option<String>,
     telemetry_path: Option<PathBuf>,
+    control_state_path: Option<PathBuf>,
     document_path: Option<PathBuf>,
 }
 
@@ -97,6 +109,7 @@ pub struct PreviewManager {
     handle: Option<Box<dyn PreviewHandle>>,
     dry_run: bool,
     spawner: PreviewSpawner,
+    control_state_path_override: Option<PathBuf>,
 }
 
 impl Default for PreviewManager {
@@ -172,19 +185,38 @@ impl PreviewManager {
             Err(diagnostics) => return self.to_response(false, &snapshot, diagnostics),
         };
 
+        let control_state_path = self
+            .control_state_path_override
+            .take()
+            .unwrap_or_else(|| preview_control_state_path(context.session_revision));
+
         self.status = PreviewStatus {
             state: PreviewState::Starting,
             pid: None,
             graph_id: Some(context.graph_id.clone()),
             graph_revision: Some(context.graph_revision.clone()),
             preview_session_revision: Some(context.session_revision),
+            preview_control_revision: Some(context.control_revision),
+            last_control_update_at: None,
             started_at: Some(now_string()),
             exited_at: None,
             exit_code: None,
             message: None,
             telemetry_path: Some(preview_telemetry_path(context.session_revision)),
+            control_state_path: Some(control_state_path),
             document_path: None,
         };
+
+        let control_snapshot = PreviewControlStateSnapshot::new(
+            context.session_revision,
+            context.control_revision,
+            &context.control_state,
+        );
+        if let Err(error) = self.write_control_snapshot(&control_snapshot) {
+            self.status.state = PreviewState::Error;
+            self.status.message = Some(error.clone());
+            return self.to_response(false, &snapshot, vec![RuntimeDiagnostic::error(error)]);
+        }
 
         let document = PreviewDocument::with_control_state(
             context.graph.clone(),
@@ -193,7 +225,7 @@ impl PreviewManager {
             context.session_revision,
         );
         let handle = if self.dry_run {
-            record_dry_run_heartbeat(&mut self.status, &document);
+            record_dry_run_heartbeat(&mut self.status, &document, Some(&control_snapshot));
             Ok(PreviewSpawn::new(Box::new(DryRunPreviewHandle), None))
         } else {
             let telemetry_path = self
@@ -201,7 +233,12 @@ impl PreviewManager {
                 .telemetry_path
                 .as_deref()
                 .expect("preview telemetry path should be prepared before spawning");
-            (self.spawner)(&document, telemetry_path)
+            let control_state_path = self
+                .status
+                .control_state_path
+                .as_deref()
+                .expect("preview control state path should be prepared before spawning");
+            (self.spawner)(&document, telemetry_path, control_state_path)
         };
 
         match handle {
@@ -234,6 +271,30 @@ impl PreviewManager {
             Ok(()) => self.to_response(true, &snapshot, Vec::new()),
             Err(error) => self.to_response(false, &snapshot, vec![RuntimeDiagnostic::error(error)]),
         }
+    }
+
+    pub fn update_control_state(
+        &mut self,
+        snapshot: PreviewControlStateSnapshot,
+    ) -> Result<(), String> {
+        self.poll();
+        if !self.is_active() {
+            return Ok(());
+        }
+        self.write_control_snapshot(&snapshot)?;
+        self.status.preview_control_revision = Some(snapshot.control_revision);
+        self.status.last_control_update_at = Some(snapshot.written_at.clone());
+        if self.dry_run
+            && let Some(telemetry_path) = self.status.telemetry_path.as_deref()
+            && let Ok(Some(mut heartbeat)) = read_preview_telemetry(telemetry_path)
+        {
+            heartbeat.control_revision = Some(snapshot.control_revision);
+            heartbeat.preview_control_revision = Some(snapshot.control_revision);
+            heartbeat.control_live = true;
+            heartbeat.last_control_update_at = Some(snapshot.written_at);
+            let _ = write_preview_telemetry_heartbeat(telemetry_path, &heartbeat);
+        }
+        Ok(())
     }
 
     pub fn request_error(
@@ -307,6 +368,22 @@ impl PreviewManager {
         if let Some(path) = self.status.telemetry_path.as_deref() {
             let _ = remove_preview_temp_file(path);
         }
+        if let Some(path) = self.status.control_state_path.as_deref() {
+            let _ = remove_preview_temp_file(path);
+        }
+    }
+
+    fn write_control_snapshot(
+        &mut self,
+        snapshot: &PreviewControlStateSnapshot,
+    ) -> Result<(), String> {
+        let Some(path) = self.status.control_state_path.as_deref() else {
+            return Ok(());
+        };
+        write_preview_control_state_snapshot(path, snapshot)?;
+        self.status.preview_control_revision = Some(snapshot.control_revision);
+        self.status.last_control_update_at = Some(snapshot.written_at.clone());
+        Ok(())
     }
 
     fn to_response(
@@ -316,11 +393,18 @@ impl PreviewManager {
         diagnostics: Vec<RuntimeDiagnostic>,
     ) -> RuntimePreviewStatusResponse {
         let session_revision = snapshot.loaded.then_some(snapshot.session_revision);
+        let control_revision = snapshot.loaded.then_some(snapshot.control_revision);
         let stale = self.status.state != PreviewState::Stopped
             && session_revision
                 .zip(self.status.preview_session_revision)
                 .is_some_and(|(session_revision, preview_revision)| {
                     session_revision != preview_revision
+                });
+        let control_live = self.status.state != PreviewState::Stopped
+            && control_revision
+                .zip(self.status.preview_control_revision)
+                .is_some_and(|(control_revision, preview_revision)| {
+                    control_revision == preview_revision
                 });
 
         RuntimePreviewStatusResponse {
@@ -331,6 +415,10 @@ impl PreviewManager {
             graph_revision: self.status.graph_revision.clone(),
             session_revision,
             preview_session_revision: self.status.preview_session_revision,
+            control_revision,
+            preview_control_revision: self.status.preview_control_revision,
+            control_live,
+            last_control_update_at: self.status.last_control_update_at.clone(),
             stale,
             started_at: self.status.started_at.clone(),
             exited_at: self.status.exited_at.clone(),
@@ -351,7 +439,19 @@ impl PreviewManager {
             handle: None,
             dry_run,
             spawner,
+            control_state_path_override: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_control_state_path_override(mut self, path: PathBuf) -> Self {
+        self.control_state_path_override = Some(path);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_control_state_path_for_test(&mut self, path: PathBuf) {
+        self.status.control_state_path = Some(path);
     }
 }
 
@@ -363,11 +463,14 @@ impl PreviewStatus {
             graph_id: None,
             graph_revision: None,
             preview_session_revision: None,
+            preview_control_revision: None,
+            last_control_update_at: None,
             started_at: None,
             exited_at: None,
             exit_code: None,
             message: None,
             telemetry_path: None,
+            control_state_path: None,
             document_path: None,
         }
     }
@@ -414,7 +517,10 @@ fn cleanup_stale_preview_files() {
     let _ = cleanup_stale_preview_temp_files(Duration::from_secs(24 * 60 * 60));
 }
 
-fn dry_run_heartbeat(document: &PreviewDocument) -> PreviewTelemetryHeartbeat {
+fn dry_run_heartbeat(
+    document: &PreviewDocument,
+    control_snapshot: Option<&PreviewControlStateSnapshot>,
+) -> PreviewTelemetryHeartbeat {
     let scene = render_scene_from_preview_document(document);
     let (renderer, source_node_id, last_error, diagnostics, generated_source_available) =
         match scene {
@@ -451,15 +557,23 @@ fn dry_run_heartbeat(document: &PreviewDocument) -> PreviewTelemetryHeartbeat {
         source_node_id,
         diagnostics,
         generated_source_available,
+        control_revision: control_snapshot.map(|snapshot| snapshot.control_revision),
+        preview_control_revision: control_snapshot.map(|snapshot| snapshot.control_revision),
+        control_live: control_snapshot.is_some(),
+        last_control_update_at: control_snapshot.map(|snapshot| snapshot.written_at.clone()),
     }
 }
 
-fn record_dry_run_heartbeat(status: &mut PreviewStatus, document: &PreviewDocument) {
+fn record_dry_run_heartbeat(
+    status: &mut PreviewStatus,
+    document: &PreviewDocument,
+    control_snapshot: Option<&PreviewControlStateSnapshot>,
+) {
     let telemetry_path = status
         .telemetry_path
         .as_deref()
         .expect("preview telemetry path should be prepared before dry-run start");
-    let heartbeat = dry_run_heartbeat(document);
+    let heartbeat = dry_run_heartbeat(document, control_snapshot);
     if let Err(error) = write_preview_telemetry_heartbeat(telemetry_path, &heartbeat) {
         status.message = Some(format!(
             "failed to write dry-run preview telemetry: {error}"
@@ -476,7 +590,7 @@ mod tests {
         ExecutionGroup, ExecutionModel, GraphDocument, GraphNode, PREVIEW_TELEMETRY_SCHEMA,
         PREVIEW_TELEMETRY_SCHEMA_VERSION, PlanEdge, PlanNode, Port, PreviewTelemetryHeartbeat,
         RuntimeSessionSnapshot, preview_manager::PreviewHandle,
-        telemetry::write_preview_telemetry_heartbeat,
+        read_preview_control_state_snapshot, telemetry::write_preview_telemetry_heartbeat,
     };
 
     #[test]
@@ -523,8 +637,21 @@ mod tests {
         assert_eq!(response.graph_revision.as_deref(), Some("1"));
         assert_eq!(response.session_revision, Some(1));
         assert_eq!(response.preview_session_revision, Some(1));
+        assert_eq!(response.control_revision, Some(0));
+        assert_eq!(response.preview_control_revision, Some(0));
+        assert!(response.control_live);
         assert!(response.started_at.unwrap().starts_with("unix-ms:"));
         assert!(!response.stale);
+        let control_path = manager
+            .status
+            .control_state_path
+            .clone()
+            .expect("control snapshot path should be stored");
+        let snapshot = read_preview_control_state_snapshot(&control_path)
+            .expect("control snapshot should read")
+            .expect("control snapshot should exist");
+        assert_eq!(snapshot.session_revision, 1);
+        assert_eq!(snapshot.control_revision, 0);
     }
 
     #[test]
@@ -539,7 +666,75 @@ mod tests {
         assert!(telemetry.render.active);
         assert_eq!(telemetry.render.backend.as_deref(), Some("dry-run"));
         assert_eq!(telemetry.render.renderer.as_deref(), Some("clear-color"));
+        assert_eq!(telemetry.render.control_revision, Some(0));
+        assert_eq!(telemetry.render.preview_control_revision, Some(0));
+        assert!(telemetry.render.control_live);
         assert_eq!(telemetry.process.uptime_ms, 120);
+    }
+
+    #[test]
+    fn control_snapshot_update_refreshes_running_dry_run_preview() {
+        let mut manager = PreviewManager::dry_run();
+        manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
+        let mut control_state = ControlState::default();
+        control_state
+            .channels
+            .insert("number.f32:speed".to_owned(), crate::ControlValue::F32(0.8));
+        let snapshot = PreviewControlStateSnapshot::new(1, 3, &control_state);
+
+        manager
+            .update_control_state(snapshot.clone())
+            .expect("control snapshot should update");
+        let control_path = manager
+            .status
+            .control_state_path
+            .clone()
+            .expect("control snapshot path should exist");
+        let decoded = read_preview_control_state_snapshot(&control_path)
+            .expect("control snapshot should read")
+            .expect("control snapshot should exist");
+        let telemetry = manager.telemetry(loaded_snapshot(1, "1"), 0);
+
+        assert_eq!(decoded.control_revision, 3);
+        assert_eq!(decoded.channels, snapshot.channels);
+        assert_eq!(telemetry.render.preview_control_revision, Some(3));
+        assert!(telemetry.render.control_live);
+    }
+
+    #[test]
+    fn control_snapshot_update_noops_without_snapshot_path() {
+        let mut manager = PreviewManager::dry_run();
+        let snapshot = PreviewControlStateSnapshot::new(1, 3, &ControlState::default());
+
+        manager
+            .write_control_snapshot(&snapshot)
+            .expect("missing snapshot path should be accepted");
+    }
+
+    #[test]
+    fn start_reports_initial_control_snapshot_write_failure() {
+        let blocker = std::env::temp_dir().join(format!(
+            "skenion-control-snapshot-blocker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&blocker, b"blocker").expect("blocker should write");
+        let mut manager = PreviewManager::dry_run()
+            .with_control_state_path_override(blocker.join("control-state.json"));
+
+        let response = manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
+
+        assert!(!response.ok);
+        assert_eq!(response.state, PreviewState::Error);
+        assert!(response.diagnostics[0].severity == crate::DiagnosticSeverity::Error);
+        assert_eq!(
+            response.message,
+            Some(response.diagnostics[0].message.clone())
+        );
+        std::fs::remove_file(blocker).expect("blocker should remove");
     }
 
     #[test]
@@ -559,16 +754,19 @@ mod tests {
             graph_id: Some("minimal-value".to_owned()),
             graph_revision: Some("1".to_owned()),
             preview_session_revision: Some(1),
+            preview_control_revision: Some(0),
+            last_control_update_at: None,
             started_at: None,
             exited_at: None,
             exit_code: None,
             message: None,
             telemetry_path: Some(blocker.join("telemetry.json")),
+            control_state_path: None,
             document_path: None,
         };
         let document = PreviewDocument::new(graph("1"), plan("1"), 1);
 
-        record_dry_run_heartbeat(&mut status, &document);
+        record_dry_run_heartbeat(&mut status, &document, None);
 
         assert!(
             status
@@ -584,7 +782,7 @@ mod tests {
     fn dry_run_heartbeat_reports_fullscreen_shader_renderer() {
         let document = PreviewDocument::new(shader_graph("7"), shader_plan("7"), 7);
 
-        let heartbeat = dry_run_heartbeat(&document);
+        let heartbeat = dry_run_heartbeat(&document, None);
 
         assert_eq!(heartbeat.backend, "dry-run");
         assert_eq!(heartbeat.renderer, "fullscreen-shader");
@@ -602,7 +800,7 @@ mod tests {
             .insert("language".to_owned(), json!("glsl"));
         let document = PreviewDocument::new(graph, shader_plan("8"), 8);
 
-        let heartbeat = dry_run_heartbeat(&document);
+        let heartbeat = dry_run_heartbeat(&document, None);
 
         assert_eq!(heartbeat.renderer, "clear-color");
         assert_eq!(heartbeat.backend, "dry-run");
@@ -809,14 +1007,21 @@ mod tests {
             .telemetry_path
             .clone()
             .expect("telemetry path should be stored");
+        let control_state_path = manager
+            .status
+            .control_state_path
+            .clone()
+            .expect("control state path should be stored");
         assert!(document_path.exists());
         assert!(telemetry_path.exists());
+        assert!(control_state_path.exists());
 
         let response = manager.stop(loaded_snapshot(1, "1"));
 
         assert!(response.ok);
         assert!(!document_path.exists());
         assert!(!telemetry_path.exists());
+        assert!(!control_state_path.exists());
     }
 
     #[test]
@@ -830,6 +1035,7 @@ mod tests {
     fn spawn_exiting_handle(
         document: &PreviewDocument,
         telemetry_path: &Path,
+        control_state_path: &Path,
     ) -> Result<PreviewSpawn, String> {
         assert_eq!(document.plan.graph_id, "minimal-value");
         assert_eq!(document.graph.id, "minimal-value");
@@ -841,12 +1047,20 @@ mod tests {
                 .to_string_lossy()
                 .contains("telemetry")
         );
+        assert!(
+            control_state_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("control-state")
+        );
         Ok(spawn(FakePreviewHandle::new(Some(0), None, None)))
     }
 
     fn spawn_running_handle(
         _document: &PreviewDocument,
         _telemetry_path: &Path,
+        _control_state_path: &Path,
     ) -> Result<PreviewSpawn, String> {
         Ok(spawn(FakePreviewHandle::new(None, None, None)))
     }
@@ -854,6 +1068,7 @@ mod tests {
     fn spawn_erroring_handle(
         _document: &PreviewDocument,
         _telemetry_path: &Path,
+        _control_state_path: &Path,
     ) -> Result<PreviewSpawn, String> {
         Ok(spawn(FakePreviewHandle::new(
             None,
@@ -865,6 +1080,7 @@ mod tests {
     fn spawn_unstoppable_handle(
         _document: &PreviewDocument,
         _telemetry_path: &Path,
+        _control_state_path: &Path,
     ) -> Result<PreviewSpawn, String> {
         Ok(spawn(FakePreviewHandle::new(
             None,
@@ -876,6 +1092,7 @@ mod tests {
     fn spawn_failure(
         _document: &PreviewDocument,
         _telemetry_path: &Path,
+        _control_state_path: &Path,
     ) -> Result<PreviewSpawn, String> {
         Err("spawn failed".to_owned())
     }
@@ -883,6 +1100,7 @@ mod tests {
     fn spawn_heartbeat_handle(
         document: &PreviewDocument,
         telemetry_path: &Path,
+        _control_state_path: &Path,
     ) -> Result<PreviewSpawn, String> {
         write_preview_telemetry_heartbeat(
             telemetry_path,
@@ -903,6 +1121,10 @@ mod tests {
                 source_node_id: Some("clear_1".to_owned()),
                 diagnostics: Vec::new(),
                 generated_source_available: false,
+                control_revision: Some(0),
+                preview_control_revision: Some(0),
+                control_live: true,
+                last_control_update_at: Some("unix-ms:1".to_owned()),
             },
         )
         .expect("test heartbeat should write");
@@ -912,6 +1134,7 @@ mod tests {
     fn spawn_invalid_heartbeat_handle(
         _document: &PreviewDocument,
         telemetry_path: &Path,
+        _control_state_path: &Path,
     ) -> Result<PreviewSpawn, String> {
         if let Some(parent) = telemetry_path.parent() {
             std::fs::create_dir_all(parent).expect("invalid heartbeat parent should create");
@@ -923,11 +1146,13 @@ mod tests {
     fn spawn_temp_file_handle(
         document: &PreviewDocument,
         telemetry_path: &Path,
+        control_state_path: &Path,
     ) -> Result<PreviewSpawn, String> {
         if let Some(parent) = telemetry_path.parent() {
             std::fs::create_dir_all(parent).expect("preview temp parent should create");
         }
         std::fs::write(telemetry_path, b"{}").expect("telemetry temp file should write");
+        std::fs::write(control_state_path, b"{}").expect("control state temp file should write");
         let document_path = telemetry_path
             .parent()
             .expect("telemetry path should have parent")
@@ -993,6 +1218,7 @@ mod tests {
             graph_id: "minimal-value".to_owned(),
             graph_revision: session_revision.to_string(),
             session_revision,
+            control_revision: 0,
             graph,
             plan: plan(&session_revision.to_string()),
             control_state,
@@ -1099,6 +1325,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             graph_id: Some("minimal-value".to_owned()),
             graph_revision: Some(graph_revision.to_owned()),
             session_revision,
+            control_revision: 0,
             diagnostics: Vec::new(),
             plan: Some(plan(graph_revision)),
         }
@@ -1110,6 +1337,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             graph_id: None,
             graph_revision: None,
             session_revision: 0,
+            control_revision: 0,
             diagnostics: Vec::new(),
             plan: None,
         }

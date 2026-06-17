@@ -3,6 +3,7 @@ mod control_state;
 mod control_value;
 mod loader;
 mod planner;
+mod preview_control_state;
 mod preview_manager;
 mod project;
 mod project_v02;
@@ -36,6 +37,11 @@ pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
     ExecutionGroup, ExecutionPlan, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode,
     build_execution_plan, format_plan_text,
+};
+pub use preview_control_state::{
+    PREVIEW_CONTROL_STATE_SCHEMA, PREVIEW_CONTROL_STATE_SCHEMA_VERSION,
+    PreviewControlStateSnapshot, preview_control_state_path, read_preview_control_state_snapshot,
+    write_preview_control_state_snapshot,
 };
 pub use preview_manager::{
     PreviewContext, PreviewManager, PreviewState, RuntimePreviewStartRequest,
