@@ -117,6 +117,7 @@ fn is_preview_temp_file(path: &Path) -> bool {
 
     (name.starts_with("preview-document-") && name.ends_with(".json"))
         || (name.starts_with("preview-") && name.contains("-telemetry.json"))
+        || (name.starts_with("preview-") && name.contains("-control-state.json"))
 }
 
 #[cfg(test)]
@@ -171,10 +172,14 @@ mod tests {
         let document_path = directory.join("preview-document-1-2.json");
         let telemetry_path = directory.join("preview-1-2-3-telemetry.json");
         let temp_telemetry_path = directory.join("preview-1-2-3-telemetry.json.tmp");
+        let control_path = directory.join("preview-1-2-3-control-state.json");
+        let temp_control_path = directory.join("preview-1-2-3-control-state.json.tmp");
         let unrelated_path = directory.join("keep.json");
         std::fs::write(&document_path, b"{}").expect("document should write");
         std::fs::write(&telemetry_path, b"{}").expect("telemetry should write");
         std::fs::write(&temp_telemetry_path, b"{}").expect("temp telemetry should write");
+        std::fs::write(&control_path, b"{}").expect("control state should write");
+        std::fs::write(&temp_control_path, b"{}").expect("temp control state should write");
         std::fs::write(&unrelated_path, b"{}").expect("unrelated file should write");
 
         let removed = cleanup_stale_preview_temp_files_in(
@@ -184,10 +189,12 @@ mod tests {
         )
         .expect("cleanup should succeed");
 
-        assert_eq!(removed, 3);
+        assert_eq!(removed, 5);
         assert!(!document_path.exists());
         assert!(!telemetry_path.exists());
         assert!(!temp_telemetry_path.exists());
+        assert!(!control_path.exists());
+        assert!(!temp_control_path.exists());
         assert!(unrelated_path.exists());
         std::fs::remove_dir_all(directory).expect("test directory should remove");
     }

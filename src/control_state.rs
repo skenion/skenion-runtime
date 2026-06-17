@@ -40,6 +40,8 @@ pub struct RuntimeControlEmission {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeControlEventResponse {
     pub ok: bool,
+    pub changed: bool,
+    pub control_revision: Option<u64>,
     pub emitted: Vec<RuntimeControlEmission>,
     pub diagnostics: Vec<RuntimeDiagnostic>,
 }
@@ -48,6 +50,7 @@ pub struct RuntimeControlEventResponse {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeControlStateResponse {
     pub ok: bool,
+    pub control_revision: u64,
     pub values: BTreeMap<String, ControlValue>,
     pub channels: BTreeMap<String, ControlValue>,
     pub diagnostics: Vec<RuntimeDiagnostic>,
@@ -108,6 +111,19 @@ impl ControlState {
     }
 
     pub fn apply_event(
+        &mut self,
+        request: RuntimeControlEventRequest,
+        graph: &GraphDocument,
+    ) -> RuntimeControlEventResponse {
+        let response = self.apply_event_direct(request, graph);
+        if !response.ok {
+            return response;
+        }
+
+        self.propagate_emissions(response, graph)
+    }
+
+    fn apply_event_direct(
         &mut self,
         request: RuntimeControlEventRequest,
         graph: &GraphDocument,
@@ -205,6 +221,53 @@ impl ControlState {
                 node.id, port
             )),
         }
+    }
+
+    fn propagate_emissions(
+        &mut self,
+        mut response: RuntimeControlEventResponse,
+        graph: &GraphDocument,
+    ) -> RuntimeControlEventResponse {
+        let mut queue = response.emitted.clone();
+        let mut visited_edges = 0usize;
+        while let Some(emission) = queue.pop() {
+            visited_edges += 1;
+            if visited_edges > graph.edges.len().saturating_mul(2).max(32) {
+                return RuntimeControlEventResponse::error(
+                    "control event propagation exceeded the v0 runtime safety limit",
+                );
+            }
+
+            for edge in graph.edges.iter().filter(|edge| {
+                edge.from.node == emission.node_id && edge.from.port == emission.port_id
+            }) {
+                let Some(target_node) = graph.nodes.iter().find(|node| node.id == edge.to.node)
+                else {
+                    continue;
+                };
+                let Some(data_kind) = send_data_kind(&target_node.kind) else {
+                    continue;
+                };
+                let send_response = self.apply_send_event(
+                    target_node,
+                    data_kind,
+                    RuntimeControlEventRequest {
+                        node_id: target_node.id.clone(),
+                        port_id: edge.to.port.clone(),
+                        value: emission.value.clone(),
+                    },
+                );
+                if !send_response.ok {
+                    return send_response;
+                }
+                for send_emission in send_response.emitted {
+                    queue.push(send_emission.clone());
+                    response.emitted.push(send_emission);
+                }
+            }
+        }
+
+        response
     }
 
     fn apply_send_event(
@@ -328,6 +391,8 @@ impl RuntimeControlEventResponse {
     fn ok(emitted: Vec<RuntimeControlEmission>) -> Self {
         Self {
             ok: true,
+            changed: false,
+            control_revision: None,
             emitted,
             diagnostics: Vec::new(),
         }
@@ -336,9 +401,17 @@ impl RuntimeControlEventResponse {
     fn error(message: impl Into<String>) -> Self {
         Self {
             ok: false,
+            changed: false,
+            control_revision: None,
             emitted: Vec::new(),
             diagnostics: vec![RuntimeDiagnostic::error(message)],
         }
+    }
+
+    pub(crate) fn with_runtime_metadata(mut self, changed: bool, control_revision: u64) -> Self {
+        self.changed = changed;
+        self.control_revision = Some(control_revision);
+        self
     }
 }
 
@@ -759,6 +832,127 @@ mod tests {
     }
 
     #[test]
+    fn ui_panel_emissions_route_to_connected_send_channels() {
+        let mut graph = graph(vec![
+            value_node("slider_1", UI_SLIDER_F32_KIND, json!(0.25)),
+            send_node("send_speed", SEND_F32_KIND, "number.f32", "speed"),
+            value_node("toggle_1", UI_TOGGLE_KIND, json!(true)),
+            send_node("send_enabled", SEND_BOOL_KIND, "boolean", "enabled"),
+        ]);
+        graph.edges = vec![
+            edge("slider_1", "value", "send_speed", "in"),
+            edge("toggle_1", "value", "send_enabled", "in"),
+        ];
+        let mut state = ControlState::from_graph(&graph);
+
+        let slider = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::F32(1.5),
+            },
+            &graph,
+        );
+        assert!(slider.ok);
+        assert_eq!(slider.emitted.len(), 2);
+        assert_eq!(
+            state.channels.get("number.f32:speed"),
+            Some(&ControlValue::F32(1.5))
+        );
+
+        let toggle = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "toggle_1".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::Bang,
+            },
+            &graph,
+        );
+        assert!(toggle.ok);
+        assert_eq!(toggle.emitted.len(), 2);
+        assert_eq!(
+            state.channels.get("boolean:enabled"),
+            Some(&ControlValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn ui_panel_propagation_ignores_edges_to_missing_targets() {
+        let mut graph = graph(vec![value_node(
+            "slider_1",
+            UI_SLIDER_F32_KIND,
+            json!(0.25),
+        )]);
+        graph.edges = vec![edge("slider_1", "value", "missing_send", "in")];
+        let mut state = ControlState::from_graph(&graph);
+
+        let response = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::F32(1.5),
+            },
+            &graph,
+        );
+
+        assert!(response.ok);
+        assert_eq!(response.emitted.len(), 1);
+        assert!(state.channels.is_empty());
+    }
+
+    #[test]
+    fn ui_panel_propagation_rejects_invalid_send_target_port() {
+        let mut graph = graph(vec![
+            value_node("slider_1", UI_SLIDER_F32_KIND, json!(0.25)),
+            send_node("send_speed", SEND_F32_KIND, "number.f32", "speed"),
+        ]);
+        graph.edges = vec![edge("slider_1", "value", "send_speed", "set")];
+        let mut state = ControlState::from_graph(&graph);
+
+        let response = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::F32(1.5),
+            },
+            &graph,
+        );
+
+        assert!(!response.ok);
+        assert!(response.diagnostics[0].message.contains("port set"));
+        assert!(state.channels.is_empty());
+    }
+
+    #[test]
+    fn ui_panel_propagation_stops_at_runtime_safety_limit() {
+        let mut graph = graph(vec![
+            value_node("slider_1", UI_SLIDER_F32_KIND, json!(0.25)),
+            send_node("send_speed", SEND_F32_KIND, "number.f32", "speed"),
+        ]);
+        graph.edges = vec![
+            edge("slider_1", "value", "send_speed", "in"),
+            edge("send_speed", "in", "send_speed", "in"),
+        ];
+        let mut state = ControlState::from_graph(&graph);
+
+        let response = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::F32(1.5),
+            },
+            &graph,
+        );
+
+        assert!(!response.ok);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("runtime safety limit")
+        );
+    }
+
+    #[test]
     fn send_rejects_missing_name_wrong_port_and_routes_all_typed_channels() {
         let mut missing_name = send_node("send_missing", SEND_F32_KIND, "number.f32", " ");
         missing_name.params.insert("name".to_owned(), json!(" "));
@@ -1067,6 +1261,7 @@ mod tests {
 
         let response = RuntimeControlStateResponse {
             ok: true,
+            control_revision: 7,
             values,
             channels,
             diagnostics: Vec::new(),
@@ -1076,6 +1271,7 @@ mod tests {
             serde_json::to_value(response).unwrap(),
             json!({
                 "ok": true,
+                "controlRevision": 7,
                 "values": {
                     "slider_1": { "type": "f32", "value": 0.5 }
                 },
@@ -1275,6 +1471,19 @@ mod tests {
             revision: "1".to_owned(),
             nodes,
             edges: Vec::new(),
+        }
+    }
+
+    fn edge(from_node: &str, from_port: &str, to_node: &str, to_port: &str) -> crate::Edge {
+        crate::Edge {
+            from: crate::PortRef {
+                node: from_node.to_owned(),
+                port: from_port.to_owned(),
+            },
+            to: crate::PortRef {
+                node: to_node.to_owned(),
+                port: to_port.to_owned(),
+            },
         }
     }
 

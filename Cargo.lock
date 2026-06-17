@@ -1852,8 +1852,8 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "skenion-contracts"
-version = "0.17.0"
-source = "git+https://github.com/echovisionlab/skenion-contracts?tag=skenion-contracts-v0.17.0#d8c82a8524290e77b43a33e5c9160f0e801e7427"
+version = "0.18.0"
+source = "git+https://github.com/echovisionlab/skenion-contracts?tag=skenion-contracts-v0.18.0#7c7c34e9cf046a18c8cf4a79469af2becb9fae5b"
 dependencies = [
  "serde",
  "serde_json",

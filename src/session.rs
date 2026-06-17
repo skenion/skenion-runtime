@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ControlState, DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, GraphPatchEvent,
-    GraphPatchEventKind, GraphPatchHistory, NodeRegistry, PreviewContext, ProjectRequest,
-    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
-    RuntimeControlReadResponse, RuntimeControlReadTarget, RuntimeControlStateResponse,
-    RuntimeDiagnostic, apply_graph_patch, build_execution_plan, invert_graph_patch,
-    read_graph_param, read_graph_port, run_dummy_execution,
+    GraphPatchEventKind, GraphPatchHistory, NodeRegistry, PreviewContext,
+    PreviewControlStateSnapshot, ProjectRequest, RuntimeControlEventRequest,
+    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
+    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic, apply_graph_patch,
+    build_execution_plan, invert_graph_patch, read_graph_param, read_graph_port,
+    run_dummy_execution,
     server::{registry_from_nodes, validate_graph_with_registry},
 };
 
@@ -19,6 +20,7 @@ pub struct RuntimeSessionSnapshot {
     pub graph_id: Option<String>,
     pub graph_revision: Option<String>,
     pub session_revision: u64,
+    pub control_revision: u64,
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
 }
@@ -31,6 +33,7 @@ pub struct RuntimeSessionResponse {
     pub graph_id: Option<String>,
     pub graph_revision: Option<String>,
     pub session_revision: u64,
+    pub control_revision: u64,
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
     pub report: Option<DummyExecutionReport>,
@@ -63,6 +66,7 @@ pub struct RuntimeSession {
     control_state: ControlState,
     diagnostics: Vec<RuntimeDiagnostic>,
     revision: u64,
+    control_revision: u64,
     event_log: Vec<GraphPatchEvent>,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
@@ -78,6 +82,7 @@ impl Default for RuntimeSession {
             control_state: ControlState::default(),
             diagnostics: Vec::new(),
             revision: 0,
+            control_revision: 0,
             event_log: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -121,6 +126,7 @@ impl RuntimeSession {
             graph_id: self.graph.as_ref().map(|graph| graph.id.clone()),
             graph_revision: self.graph.as_ref().map(|graph| graph.revision.clone()),
             session_revision: self.revision,
+            control_revision: self.control_revision,
             diagnostics: self.diagnostics.clone(),
             plan: self.plan.clone(),
         }
@@ -142,6 +148,7 @@ impl RuntimeSession {
             graph_id: graph.id.clone(),
             graph_revision: graph.revision.clone(),
             session_revision: self.revision,
+            control_revision: self.control_revision,
             graph: graph.clone(),
             plan: plan.clone(),
             control_state: self.control_state.clone(),
@@ -165,6 +172,7 @@ impl RuntimeSession {
         self.registry = Some(registry);
         self.plan = Some(plan);
         self.control_state = control_state;
+        self.control_revision = 0;
         self.diagnostics = Vec::new();
         self.clear_history();
         self.revision += 1;
@@ -313,6 +321,7 @@ impl RuntimeSession {
         self.registry = Some(registry);
         self.plan = Some(plan);
         self.control_state = control_state;
+        self.control_revision = 0;
         self.diagnostics = Vec::new();
         self.revision += 1;
         self.event_log.push(event.clone());
@@ -435,6 +444,7 @@ impl RuntimeSession {
         self.registry = None;
         self.plan = None;
         self.control_state = ControlState::default();
+        self.control_revision = 0;
         self.diagnostics = Vec::new();
         self.clear_history();
         self.revision += 1;
@@ -448,6 +458,8 @@ impl RuntimeSession {
         let Some(graph) = self.graph.as_ref() else {
             return RuntimeControlEventResponse {
                 ok: false,
+                changed: false,
+                control_revision: Some(self.control_revision),
                 emitted: Vec::new(),
                 diagnostics: vec![RuntimeDiagnostic::error(
                     "no project loaded in runtime session",
@@ -455,19 +467,25 @@ impl RuntimeSession {
             };
         };
 
+        let before = self.control_state.clone();
         let response = self.control_state.apply_event(request, graph);
         if response.ok {
-            self.revision += 1;
+            let changed = self.control_state != before;
+            if changed {
+                self.control_revision += 1;
+            }
             self.diagnostics = Vec::new();
+            return response.with_runtime_metadata(changed, self.control_revision);
         } else {
             self.diagnostics = response.diagnostics.clone();
         }
-        response
+        response.with_runtime_metadata(false, self.control_revision)
     }
 
     pub fn control_state_response(&self) -> RuntimeControlStateResponse {
         RuntimeControlStateResponse {
             ok: self.graph.is_some(),
+            control_revision: self.control_revision,
             values: self.control_state.values.clone(),
             channels: self.control_state.channels.clone(),
             diagnostics: if self.graph.is_some() {
@@ -478,6 +496,19 @@ impl RuntimeSession {
                 )]
             },
         }
+    }
+
+    pub fn control_revision(&self) -> u64 {
+        self.control_revision
+    }
+
+    pub fn preview_control_state_snapshot(&self) -> Option<PreviewControlStateSnapshot> {
+        self.graph.as_ref()?;
+        Some(PreviewControlStateSnapshot::new(
+            self.revision,
+            self.control_revision,
+            &self.control_state,
+        ))
     }
 
     pub fn read_control(&self, request: RuntimeControlReadRequest) -> RuntimeControlReadResponse {
@@ -554,6 +585,7 @@ impl RuntimeSession {
             graph_id: snapshot.graph_id,
             graph_revision: snapshot.graph_revision,
             session_revision: snapshot.session_revision,
+            control_revision: snapshot.control_revision,
             diagnostics,
             plan: snapshot.plan,
             report,
@@ -667,6 +699,7 @@ impl RuntimeSession {
         self.registry = Some(registry);
         self.plan = Some(plan);
         self.control_state = control_state;
+        self.control_revision = 0;
         self.diagnostics = Vec::new();
         self.revision += 1;
         self.event_log.push(event.clone());
@@ -875,8 +908,12 @@ mod tests {
 
         let set = session.apply_control_event(control_request("value_1", "set", f32_value(32.0)));
         assert!(set.ok);
+        assert!(set.changed);
         assert!(set.emitted.is_empty());
-        assert_eq!(session.snapshot().session_revision, 2);
+        assert_eq!(session.snapshot().session_revision, 1);
+        assert_eq!(session.snapshot().control_revision, 1);
+        assert_eq!(session.control_revision(), 1);
+        assert_eq!(set.control_revision, Some(1));
         assert_eq!(
             session.control_state_response().values.get("value_1"),
             Some(&ControlValue::F32(32.0))
@@ -889,16 +926,23 @@ mod tests {
         assert_eq!(bang.emitted[0].node_id, "value_1");
         assert_eq!(bang.emitted[0].port_id, "value");
         assert_eq!(bang.emitted[0].value, ControlValue::F32(32.0));
-        assert_eq!(session.snapshot().session_revision, 3);
+        assert!(!bang.changed);
+        assert_eq!(session.snapshot().session_revision, 1);
+        assert_eq!(session.snapshot().control_revision, 1);
+        assert_eq!(bang.control_revision, Some(1));
 
         let input = session.apply_control_event(control_request("value_1", "in", f32_value(12.0)));
         assert!(input.ok);
+        assert!(input.changed);
         assert_eq!(input.emitted[0].value, ControlValue::F32(12.0));
         assert_eq!(
             session.control_state_response().values.get("value_1"),
             Some(&ControlValue::F32(12.0))
         );
-        assert_eq!(session.snapshot().session_revision, 4);
+        assert_eq!(session.snapshot().session_revision, 1);
+        assert_eq!(session.snapshot().control_revision, 2);
+        assert_eq!(session.control_revision(), 2);
+        assert_eq!(input.control_revision, Some(2));
     }
 
     #[test]

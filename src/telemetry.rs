@@ -38,6 +38,7 @@ pub struct RuntimeTelemetrySession {
     pub graph_id: Option<String>,
     pub graph_revision: Option<String>,
     pub session_revision: u64,
+    pub control_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +51,10 @@ pub struct RuntimeTelemetryPreview {
     pub graph_revision: Option<String>,
     pub session_revision: Option<u64>,
     pub preview_session_revision: Option<u64>,
+    pub control_revision: Option<u64>,
+    pub preview_control_revision: Option<u64>,
+    pub control_live: bool,
+    pub last_control_update_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +70,10 @@ pub struct RuntimeTelemetryRender {
     pub source_node_id: Option<String>,
     pub diagnostics: Vec<ShaderDiagnostic>,
     pub generated_source_available: bool,
+    pub control_revision: Option<u64>,
+    pub preview_control_revision: Option<u64>,
+    pub control_live: bool,
+    pub last_control_update_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,6 +102,10 @@ pub struct PreviewTelemetryHeartbeat {
     pub source_node_id: Option<String>,
     pub diagnostics: Vec<ShaderDiagnostic>,
     pub generated_source_available: bool,
+    pub control_revision: Option<u64>,
+    pub preview_control_revision: Option<u64>,
+    pub control_live: bool,
+    pub last_control_update_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +220,10 @@ pub struct PreviewTelemetryWriter {
     last_error: Option<String>,
     diagnostics: Vec<ShaderDiagnostic>,
     generated_source_available: bool,
+    control_revision: Option<u64>,
+    preview_control_revision: Option<u64>,
+    control_live: bool,
+    last_control_update_at: Option<String>,
 }
 
 impl RuntimeTelemetrySnapshot {
@@ -230,6 +247,7 @@ impl RuntimeTelemetrySnapshot {
                 graph_id: session.graph_id,
                 graph_revision: session.graph_revision,
                 session_revision: session.session_revision,
+                control_revision: session.control_revision,
             },
             preview: RuntimeTelemetryPreview {
                 state: preview.state,
@@ -239,6 +257,10 @@ impl RuntimeTelemetrySnapshot {
                 graph_revision: preview.graph_revision,
                 session_revision: preview.session_revision,
                 preview_session_revision: preview.preview_session_revision,
+                control_revision: preview.control_revision,
+                preview_control_revision: preview.preview_control_revision,
+                control_live: preview.control_live,
+                last_control_update_at: preview.last_control_update_at,
             },
             render,
             process: RuntimeTelemetryProcess {
@@ -277,6 +299,10 @@ impl PreviewTelemetryWriter {
             last_error: None,
             diagnostics: Vec::new(),
             generated_source_available,
+            control_revision: None,
+            preview_control_revision: None,
+            control_live: false,
+            last_control_update_at: None,
         }
     }
 
@@ -305,6 +331,18 @@ impl PreviewTelemetryWriter {
             self.last_error = Some(diagnostic.message.clone());
         }
         self.diagnostics.push(diagnostic);
+        self.write_if_due(Instant::now(), true);
+    }
+
+    pub fn record_control_revision(
+        &mut self,
+        control_revision: u64,
+        last_control_update_at: String,
+    ) {
+        self.control_revision = Some(control_revision);
+        self.preview_control_revision = Some(control_revision);
+        self.control_live = true;
+        self.last_control_update_at = Some(last_control_update_at);
         self.write_if_due(Instant::now(), true);
     }
 
@@ -352,6 +390,10 @@ impl PreviewTelemetryWriter {
             source_node_id: self.source_node_id.clone(),
             diagnostics: self.diagnostics.clone(),
             generated_source_available: self.generated_source_available,
+            control_revision: self.control_revision,
+            preview_control_revision: self.preview_control_revision,
+            control_live: self.control_live,
+            last_control_update_at: self.last_control_update_at.clone(),
         }
     }
 }
@@ -454,10 +496,34 @@ fn render_from_preview(
             generated_source_available: heartbeat
                 .as_ref()
                 .is_some_and(|heartbeat| heartbeat.generated_source_available),
+            control_revision: heartbeat
+                .as_ref()
+                .and_then(|heartbeat| heartbeat.control_revision)
+                .or(preview.control_revision),
+            preview_control_revision: heartbeat
+                .as_ref()
+                .and_then(|heartbeat| heartbeat.preview_control_revision)
+                .or(preview.preview_control_revision),
+            control_live: heartbeat
+                .as_ref()
+                .map(|heartbeat| heartbeat.control_live)
+                .unwrap_or(preview.control_live),
+            last_control_update_at: heartbeat
+                .as_ref()
+                .and_then(|heartbeat| heartbeat.last_control_update_at.clone())
+                .or_else(|| preview.last_control_update_at.clone()),
         };
     }
 
     if let Some(heartbeat) = heartbeat {
+        let control_revision = heartbeat.control_revision.or(preview.control_revision);
+        let preview_control_revision = heartbeat
+            .preview_control_revision
+            .or(preview.preview_control_revision);
+        let control_live = heartbeat.control_live || preview.control_live;
+        let last_control_update_at = heartbeat
+            .last_control_update_at
+            .or_else(|| preview.last_control_update_at.clone());
         return RuntimeTelemetryRender {
             active,
             backend: Some(heartbeat.backend),
@@ -469,6 +535,10 @@ fn render_from_preview(
             source_node_id: heartbeat.source_node_id,
             diagnostics: heartbeat.diagnostics,
             generated_source_available: heartbeat.generated_source_available,
+            control_revision,
+            preview_control_revision,
+            control_live,
+            last_control_update_at,
         };
     }
 
@@ -486,6 +556,10 @@ fn render_from_preview(
         source_node_id: None,
         diagnostics: Vec::new(),
         generated_source_available: false,
+        control_revision: preview.control_revision,
+        preview_control_revision: preview.preview_control_revision,
+        control_live: preview.control_live,
+        last_control_update_at: preview.last_control_update_at.clone(),
     }
 }
 
@@ -615,6 +689,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_snapshot_falls_back_to_preview_control_metadata_for_native_heartbeat() {
+        let mut heartbeat = heartbeat();
+        heartbeat.control_live = false;
+        heartbeat.last_control_update_at = None;
+
+        let snapshot = RuntimeTelemetrySnapshot::from_parts(
+            session_snapshot(true),
+            preview_status(PreviewState::Running),
+            Some(heartbeat),
+            false,
+            12,
+            Vec::new(),
+        );
+
+        assert!(snapshot.render.control_live);
+        assert_eq!(
+            snapshot.render.last_control_update_at.as_deref(),
+            Some("unix-ms:2")
+        );
+    }
+
+    #[test]
     fn runtime_snapshot_keeps_invalid_heartbeat_diagnostic_nonfatal() {
         let diagnostic = RuntimeDiagnostic {
             severity: DiagnosticSeverity::Warning,
@@ -655,7 +751,6 @@ mod tests {
             "wgpu",
             Some("clear_1".to_owned()),
         );
-
         writer.record_frame(16.67);
         let decoded = read_preview_telemetry(&path)
             .expect("heartbeat should read")
@@ -664,6 +759,26 @@ mod tests {
         assert_eq!(decoded.frames_rendered, 1);
         assert_eq!(decoded.last_frame_ms, Some(16.7));
         assert_eq!(decoded.source_node_id.as_deref(), Some("clear_1"));
+        std::fs::remove_file(path).expect("heartbeat should be removable");
+    }
+
+    #[test]
+    fn preview_telemetry_writer_records_control_revision() {
+        let path = std::env::temp_dir().join(format!(
+            "skenion-preview-telemetry-control-revision-{}.json",
+            std::process::id()
+        ));
+        let mut writer = test_writer(path.clone());
+
+        writer.record_control_revision(2, "unix-ms:2".to_owned());
+        let decoded = read_preview_telemetry(&path)
+            .expect("heartbeat should read")
+            .expect("heartbeat should exist");
+
+        assert_eq!(decoded.control_revision, Some(2));
+        assert_eq!(decoded.preview_control_revision, Some(2));
+        assert!(decoded.control_live);
+        assert_eq!(decoded.last_control_update_at.as_deref(), Some("unix-ms:2"));
         std::fs::remove_file(path).expect("heartbeat should be removable");
     }
 
@@ -810,6 +925,10 @@ mod tests {
                 ShaderDiagnosticSource::Runtime,
             )],
             generated_source_available: false,
+            control_revision: Some(7),
+            preview_control_revision: Some(7),
+            control_live: true,
+            last_control_update_at: Some("unix-ms:2".to_owned()),
         }
     }
 
@@ -831,6 +950,7 @@ mod tests {
             graph_id: loaded.then(|| "clear-color-render".to_owned()),
             graph_revision: loaded.then(|| "2".to_owned()),
             session_revision: if loaded { 5 } else { 0 },
+            control_revision: if loaded { 7 } else { 0 },
             diagnostics: Vec::new(),
             plan: None,
         }
@@ -846,6 +966,10 @@ mod tests {
             graph_revision: active.then(|| "2".to_owned()),
             session_revision: active.then_some(5),
             preview_session_revision: active.then_some(5),
+            control_revision: active.then_some(7),
+            preview_control_revision: active.then_some(7),
+            control_live: active,
+            last_control_update_at: active.then(|| "unix-ms:2".to_owned()),
             stale: false,
             started_at: active.then(|| "unix-ms:1".to_owned()),
             exited_at: None,

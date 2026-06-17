@@ -173,6 +173,7 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.control.state",
             "session.control.read",
             "session.control.channels",
+            "session.preview.controlState",
             "session.preview.status",
             "session.preview.start",
             "session.preview.stop",
@@ -394,11 +395,39 @@ async fn control_event(
     State(state): State<RuntimeServerState>,
     Json(request): Json<RuntimeControlEventRequest>,
 ) -> Json<RuntimeControlEventResponse> {
-    let mut session = state
-        .session
-        .write()
-        .expect("runtime session lock should not be poisoned");
-    Json(session.apply_control_event(request))
+    let (mut response, control_snapshot) = {
+        let mut session = state
+            .session
+            .write()
+            .expect("runtime session lock should not be poisoned");
+        let response = session.apply_control_event(request);
+        let control_snapshot = if response.ok && response.changed {
+            session.preview_control_state_snapshot()
+        } else {
+            None
+        };
+        (response, control_snapshot)
+    };
+
+    if let Some(control_snapshot) = control_snapshot {
+        let mut preview = state
+            .preview
+            .lock()
+            .expect("runtime preview lock should not be poisoned");
+        if let Err(error) = preview.update_control_state(control_snapshot) {
+            add_preview_control_update_warning(&mut response, error);
+        }
+    }
+
+    Json(response)
+}
+
+fn add_preview_control_update_warning(response: &mut RuntimeControlEventResponse, error: String) {
+    response
+        .diagnostics
+        .push(RuntimeDiagnostic::warning(format!(
+            "failed to update running preview control state: {error}"
+        )));
 }
 
 async fn control_state(
@@ -835,6 +864,30 @@ mod tests {
                 "missing capability {expected}"
             );
         }
+    }
+
+    #[test]
+    fn preview_control_update_warning_is_attached_to_control_response() {
+        let mut response = RuntimeControlEventResponse {
+            ok: true,
+            changed: true,
+            control_revision: Some(1),
+            emitted: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        add_preview_control_update_warning(&mut response, "snapshot write failed".to_owned());
+
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(
+            response.diagnostics[0].severity,
+            crate::DiagnosticSeverity::Warning
+        );
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("snapshot write failed")
+        );
     }
 
     #[tokio::test]
@@ -1482,6 +1535,49 @@ mod tests {
                 .unwrap()
                 .contains("expects f32")
         );
+    }
+
+    #[tokio::test]
+    async fn session_control_event_reports_running_preview_snapshot_update_warnings() {
+        let state = RuntimeServerState {
+            session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
+            preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
+            started_at: std::time::Instant::now(),
+        };
+        let app = runtime_router_with_state(state.clone());
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_empty_with(app.clone(), "/v0/session/preview/start").await;
+        let blocker = std::env::temp_dir().join(format!(
+            "skenion-preview-control-update-blocker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&blocker, b"blocker").expect("blocker should write");
+        state
+            .preview
+            .lock()
+            .expect("preview lock should not be poisoned")
+            .set_control_state_path_for_test(blocker.join("control-state.json"));
+
+        let response = post_json_with(
+            app,
+            "/v0/session/control/event",
+            json!({ "nodeId": "value_1", "portId": "set", "value": { "type": "f32", "value": 2.0 } }),
+        )
+        .await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["changed"], true);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("failed to update running preview control state")
+        );
+        std::fs::remove_file(blocker).expect("blocker should remove");
     }
 
     #[tokio::test]

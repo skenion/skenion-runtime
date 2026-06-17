@@ -10,14 +10,14 @@ use winit::{
 };
 
 use crate::{
-    PreviewFrameLimit,
+    PreviewFrameLimit, read_preview_control_state_snapshot,
     render::{
         FullscreenShaderScene, PreviewDocument, RenderScene, ShaderUniformBinding,
         ShaderUniformValue, render_scene_from_preview_document,
     },
     telemetry::{
         PreviewTelemetryWriter, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSeverity,
-        ShaderDiagnosticSource,
+        ShaderDiagnosticSource, unix_ms_timestamp,
     },
 };
 
@@ -86,16 +86,36 @@ pub fn generated_shader_response_from_preview_document(
 }
 
 pub fn run_render_preview_window(
-    document: PreviewDocument,
+    mut document: PreviewDocument,
     frame_limit: PreviewFrameLimit,
     telemetry_path: Option<PathBuf>,
+    control_state_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
+    let initial_control_revision = if let Some(path) = control_state_path.as_deref() {
+        match read_preview_control_state_snapshot(path) {
+            Ok(Some(snapshot)) => {
+                document.control_state = snapshot.control_state();
+                Some(snapshot.control_revision)
+            }
+            Ok(None) | Err(_) => None,
+        }
+    } else {
+        None
+    };
     let (scene, scene_error) = match render_scene_from_preview_document(&document) {
         Ok(scene) => (scene, None),
         Err(error) => (RenderScene::default(), Some(error.to_string())),
     };
-    let mut app = NativePreviewApp::new(document, scene, scene_error, frame_limit, telemetry_path);
+    let mut app = NativePreviewApp::new(
+        document,
+        scene,
+        scene_error,
+        frame_limit,
+        telemetry_path,
+        control_state_path,
+        initial_control_revision,
+    );
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -106,6 +126,8 @@ struct NativePreviewApp {
     window: Option<Arc<Window>>,
     renderer: Option<WgpuPreviewRenderer>,
     telemetry: Option<PreviewTelemetryWriter>,
+    control_state_path: Option<PathBuf>,
+    control_revision: Option<u64>,
     frame_index: usize,
     frame_limit: PreviewFrameLimit,
     started_at: Instant,
@@ -119,6 +141,8 @@ impl NativePreviewApp {
         scene_error: Option<String>,
         frame_limit: PreviewFrameLimit,
         telemetry_path: Option<PathBuf>,
+        control_state_path: Option<PathBuf>,
+        control_revision: Option<u64>,
     ) -> Self {
         let mut telemetry = telemetry_path.map(|path| {
             PreviewTelemetryWriter::new(
@@ -131,6 +155,9 @@ impl NativePreviewApp {
                 scene.source_node_id(),
             )
         });
+        if let (Some(control_revision), Some(telemetry)) = (control_revision, telemetry.as_mut()) {
+            telemetry.record_control_revision(control_revision, unix_ms_timestamp());
+        }
         if let (Some(error), Some(telemetry)) = (scene_error, telemetry.as_mut()) {
             telemetry.record_error(error);
         }
@@ -140,6 +167,8 @@ impl NativePreviewApp {
             window: None,
             renderer: None,
             telemetry,
+            control_state_path,
+            control_revision,
             frame_index: 0,
             frame_limit,
             started_at: Instant::now(),
@@ -169,6 +198,47 @@ impl NativePreviewApp {
         match self.frame_limit {
             PreviewFrameLimit::Frames(frame_count) => self.frame_index >= frame_count.max(1),
             PreviewFrameLimit::UntilClose => false,
+        }
+    }
+
+    fn reload_control_state_if_needed(&mut self) {
+        let Some(path) = self.control_state_path.as_deref() else {
+            return;
+        };
+        let snapshot = match read_preview_control_state_snapshot(path) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return,
+            Err(error) => {
+                if let Some(telemetry) = &mut self.telemetry {
+                    telemetry
+                        .record_error(format!("failed to read preview control state: {error}"));
+                }
+                return;
+            }
+        };
+        if self
+            .control_revision
+            .is_some_and(|revision| revision >= snapshot.control_revision)
+        {
+            return;
+        }
+
+        self.document.control_state = snapshot.control_state();
+        match render_scene_from_preview_document(&self.document) {
+            Ok(scene) => {
+                self.scene = scene;
+                self.control_revision = Some(snapshot.control_revision);
+                if let Some(telemetry) = &mut self.telemetry {
+                    telemetry
+                        .record_control_revision(snapshot.control_revision, snapshot.written_at);
+                }
+            }
+            Err(error) => {
+                if let Some(telemetry) = &mut self.telemetry {
+                    telemetry
+                        .record_error(format!("failed to apply preview control state: {error}"));
+                }
+            }
         }
     }
 }
@@ -253,7 +323,7 @@ impl ApplicationHandler for NativePreviewApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = &self.window else {
+        let Some(window) = self.window.as_ref().map(Arc::clone) else {
             return;
         };
         if window.id() != window_id {
@@ -269,6 +339,7 @@ impl ApplicationHandler for NativePreviewApp {
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                self.reload_control_state_if_needed();
                 window.set_title(&self.title());
                 let frame_started = Instant::now();
                 if let Some(renderer) = &mut self.renderer
