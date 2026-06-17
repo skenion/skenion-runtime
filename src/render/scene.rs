@@ -831,7 +831,7 @@ mod tests {
                     "label": "Value",
                     "type": {
                         "flow": "value",
-                        "dataKind": "f32"
+                        "dataKind": "number.f32"
                     }
                 }))
                 .expect("valid value port"),

@@ -5,7 +5,10 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use skenion_runtime::{LoadError, load_graph_document, load_node_definition};
+use skenion_runtime::{
+    LoadError, NodeRegistry, ProjectRequest, build_execution_plan, load_graph_document,
+    load_node_definition, validate_project,
+};
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -45,7 +48,7 @@ fn valid_definition() -> Value {
       "displayName": "Loader",
       "category": "Core",
       "ports": [
-        { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+        { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
       ],
       "execution": { "model": "value" },
       "state": { "persistent": false },
@@ -67,7 +70,7 @@ fn valid_graph() -> Value {
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
           ]
         }
       ],
@@ -142,4 +145,64 @@ fn reports_read_parse_and_invalid_errors_for_graphs() {
         error_kind(load_graph_document(&invalid_path).unwrap_err()),
         "invalid"
     );
+}
+
+#[test]
+fn canonical_shader_uniform_example_uses_number_f32_and_plans() {
+    let project_path = PathBuf::from(
+        ".deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-uniform.project.json",
+    );
+    let project_json = fs::read_to_string(&project_path).unwrap_or_else(|error| {
+        panic!(
+            "expected canonical examples fixture at {}: {error}",
+            project_path.display()
+        )
+    });
+    let project: ProjectRequest =
+        serde_json::from_str(&project_json).expect("shader uniform project should parse");
+    let value_node = project
+        .graph
+        .nodes
+        .iter()
+        .find(|node| node.id == "value_1")
+        .expect("fixture should include value node");
+    let shader_node = project
+        .graph
+        .nodes
+        .iter()
+        .find(|node| node.id == "shader_1")
+        .expect("fixture should include shader node");
+    let value_port = value_node
+        .ports
+        .iter()
+        .find(|port| port.id == "value")
+        .expect("value node should expose value output");
+    let uniform_port = shader_node
+        .ports
+        .iter()
+        .find(|port| port.id == "u_value")
+        .expect("shader should expose u_value input");
+
+    assert_eq!(value_port.data_type.data_kind, "number.f32");
+    assert_eq!(uniform_port.data_type.data_kind, "number.f32");
+    assert!(
+        project.graph.edges.iter().any(|edge| {
+            edge.from.node == "value_1"
+                && edge.from.port == "value"
+                && edge.to.node == "shader_1"
+                && edge.to.port == "u_value"
+        }),
+        "shader uniform fixture should wire core.value-f32.value to render.fullscreen-shader.u_value"
+    );
+
+    let mut registry = NodeRegistry::new();
+    for definition in project.nodes {
+        registry
+            .insert(definition)
+            .expect("canonical example definitions should be valid");
+    }
+    validate_project(&project.graph, &registry)
+        .expect("canonical shader uniform project should validate");
+    build_execution_plan(&project.graph, &registry)
+        .expect("canonical shader uniform project should plan");
 }

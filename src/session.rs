@@ -1271,7 +1271,7 @@ mod tests {
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+                  { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
                 ]
               },
               {
@@ -1280,8 +1280,8 @@ mod tests {
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
-                  { "id": "bang", "direction": "input", "type": { "flow": "event", "dataKind": "bang" }, "activation": "trigger" }
+                  { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
+                  { "id": "bang", "direction": "input", "type": { "flow": "event", "dataKind": "event.bang" }, "activation": "trigger" }
                 ]
               }
             ],
@@ -1298,7 +1298,7 @@ mod tests {
               "displayName": "Float Value",
               "category": "Values",
               "ports": [
-                { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "f32" } }
+                { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
               ],
               "execution": { "model": "value" },
               "state": { "persistent": false },
@@ -1313,8 +1313,8 @@ mod tests {
               "displayName": "Target",
               "category": "Values",
               "ports": [
-                { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "f32" }, "activation": "latched" },
-                { "id": "bang", "direction": "input", "type": { "flow": "event", "dataKind": "bang" }, "activation": "trigger" }
+                { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
+                { "id": "bang", "direction": "input", "type": { "flow": "event", "dataKind": "event.bang" }, "activation": "trigger" }
               ],
               "execution": { "model": "value" },
               "state": { "persistent": false },
