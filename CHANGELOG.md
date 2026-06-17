@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.19.0...skenion-runtime-v0.20.0) (2026-06-17)
+
+
+### Features
+
+* **preview:** apply live control updates ([#50](https://github.com/echovisionlab/skenion-runtime/issues/50)) ([9b9a62e](https://github.com/echovisionlab/skenion-runtime/commit/9b9a62ef31033b4cad0bea1e344995560f017fb6))
+
 ## [0.19.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.18.0...skenion-runtime-v0.19.0) (2026-06-17)
 
 
