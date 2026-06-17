@@ -92,6 +92,13 @@ jobs:
           post_expect_ok true /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-multi-uniform.project.json
           post_expect_ok true /v0/plan .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-multi-uniform.project.json
           post_expect_ok true /v0/run .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-multi-uniform.project.json
+          if [[ -f .deps/skenion-examples/compatibility/v0.1/projects/valid/control-layer-demo.project.json ]]; then
+            post_expect_ok true /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/valid/control-layer-demo.project.json
+            post_expect_ok true /v0/plan .deps/skenion-examples/compatibility/v0.1/projects/valid/control-layer-demo.project.json
+            post_expect_ok true /v0/run .deps/skenion-examples/compatibility/v0.1/projects/valid/control-layer-demo.project.json
+          else
+            echo "control layer demo fixture is not available on examples main yet"
+          fi
           post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/invalid/missing-definition.project.json
           post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/invalid/incompatible-edge.project.json
           post_expect_ok true /v0/validate .deps/skenion-examples/compatibility/v0.2/projects/valid/render-output.project.json
@@ -109,6 +116,11 @@ jobs:
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-shader-uniform.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-shader-multi-uniform.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-value-semantics.sh
+            if [[ -x scripts/smoke-runtime-control-layer.sh ]]; then
+              SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-control-layer.sh
+            else
+              echo "control layer smoke script is not available on examples main yet"
+            fi
             if [[ -x scripts/smoke-runtime-fullscreen-shader.sh ]]; then
               SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-fullscreen-shader.sh
             else

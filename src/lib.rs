@@ -26,7 +26,8 @@ pub use contract::{
 };
 pub use control_state::{
     ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,
-    RuntimeControlStateResponse,
+    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlReadTarget,
+    RuntimeControlStateResponse, read_graph_param, read_graph_port,
 };
 pub use control_value::ControlValue;
 pub use loader::{LoadError, load_graph_document, load_node_definition};

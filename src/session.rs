@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ControlState, DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, GraphPatchEvent,
     GraphPatchEventKind, GraphPatchHistory, NodeRegistry, PreviewContext, ProjectRequest,
-    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlStateResponse,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
+    RuntimeControlReadResponse, RuntimeControlReadTarget, RuntimeControlStateResponse,
     RuntimeDiagnostic, apply_graph_patch, build_execution_plan, invert_graph_patch,
-    run_dummy_execution,
+    read_graph_param, read_graph_port, run_dummy_execution,
     server::{registry_from_nodes, validate_graph_with_registry},
 };
 
@@ -478,6 +479,67 @@ impl RuntimeSession {
         }
     }
 
+    pub fn read_control(&self, request: RuntimeControlReadRequest) -> RuntimeControlReadResponse {
+        let Some(graph) = self.graph.as_ref() else {
+            return RuntimeControlReadResponse::error(
+                request,
+                "no project loaded in runtime session",
+            );
+        };
+        let Some(node) = graph.nodes.iter().find(|node| node.id == request.node_id) else {
+            let node_id = request.node_id.clone();
+            return RuntimeControlReadResponse::error(
+                request,
+                format!("control read node {node_id} does not exist"),
+            );
+        };
+
+        match request.target.clone() {
+            RuntimeControlReadTarget::Param => {
+                let Some(value) = read_graph_param(node, &request.id) else {
+                    let node_id = node.id.clone();
+                    let id = request.id.clone();
+                    return RuntimeControlReadResponse::error(
+                        request,
+                        format!("node {node_id} param {id} does not exist"),
+                    );
+                };
+                RuntimeControlReadResponse::ok(request, value)
+            }
+            RuntimeControlReadTarget::Port => {
+                let Some(value) = read_graph_port(node, &request.id) else {
+                    let node_id = node.id.clone();
+                    let id = request.id.clone();
+                    return RuntimeControlReadResponse::error(
+                        request,
+                        format!("node {node_id} port {id} does not exist"),
+                    );
+                };
+                RuntimeControlReadResponse::ok(request, value)
+            }
+            RuntimeControlReadTarget::State => {
+                if request.id != "value" {
+                    let node_id = node.id.clone();
+                    let id = request.id.clone();
+                    return RuntimeControlReadResponse::error(
+                        request,
+                        format!("node {node_id} state {id} does not exist"),
+                    );
+                }
+                let Some(value) = self.control_state.values.get(&node.id) else {
+                    let node_id = node.id.clone();
+                    return RuntimeControlReadResponse::error(
+                        request,
+                        format!("node {node_id} has no runtime control state"),
+                    );
+                };
+                let value = serde_json::to_value(value)
+                    .expect("runtime control values should serialize to JSON");
+                RuntimeControlReadResponse::ok(request, value)
+            }
+        }
+    }
+
     pub fn response(
         &self,
         ok: bool,
@@ -690,7 +752,8 @@ mod tests {
 
     use crate::{
         ControlValue, GraphPatch, GraphPatchEventKind, NodeRegistry, ProjectRequest,
-        RuntimeControlEventRequest, RuntimeDiagnostic,
+        RuntimeControlEventRequest, RuntimeControlReadRequest, RuntimeControlReadTarget,
+        RuntimeDiagnostic,
     };
 
     use super::{HistoryEntry, RuntimeSession};
@@ -835,6 +898,128 @@ mod tests {
             Some(&ControlValue::F32(12.0))
         );
         assert_eq!(session.snapshot().session_revision, 4);
+    }
+
+    #[test]
+    fn control_read_addresses_params_ports_and_state() {
+        let mut session = RuntimeSession::default();
+        let mut project = sample_project();
+        project.graph.nodes[0]
+            .params
+            .insert("value".to_owned(), json!(0.0));
+        assert!(session.load_project(project).ok);
+        assert!(
+            session
+                .apply_control_event(control_request("value_1", "set", f32_value(32.0)))
+                .ok
+        );
+
+        let param = session.read_control(control_read(
+            "value_1",
+            RuntimeControlReadTarget::Param,
+            "value",
+        ));
+        assert!(param.ok);
+        assert_eq!(
+            param.value.unwrap(),
+            json!({ "type": "json", "value": 0.0 })
+        );
+
+        let port = session.read_control(control_read(
+            "value_1",
+            RuntimeControlReadTarget::Port,
+            "value",
+        ));
+        assert!(port.ok);
+        assert_eq!(port.value.unwrap()["value"]["id"], json!("value"));
+
+        let state = session.read_control(control_read(
+            "value_1",
+            RuntimeControlReadTarget::State,
+            "value",
+        ));
+        assert!(state.ok);
+        assert_eq!(
+            state.value.unwrap(),
+            json!({ "type": "f32", "value": 32.0 })
+        );
+    }
+
+    #[test]
+    fn invalid_control_read_reports_diagnostics() {
+        let mut session = RuntimeSession::default();
+        let missing_session = session.read_control(control_read(
+            "value_1",
+            RuntimeControlReadTarget::State,
+            "value",
+        ));
+        assert!(!missing_session.ok);
+        assert!(
+            missing_session.diagnostics[0]
+                .message
+                .contains("no project loaded")
+        );
+
+        assert!(session.load_project(sample_project()).ok);
+        let missing_port = session.read_control(control_read(
+            "value_1",
+            RuntimeControlReadTarget::Port,
+            "missing",
+        ));
+        assert!(!missing_port.ok);
+        assert!(
+            missing_port.diagnostics[0]
+                .message
+                .contains("port missing does not exist")
+        );
+
+        let missing_node = session.read_control(control_read(
+            "missing",
+            RuntimeControlReadTarget::State,
+            "value",
+        ));
+        assert!(!missing_node.ok);
+        assert!(
+            missing_node.diagnostics[0]
+                .message
+                .contains("node missing does not exist")
+        );
+
+        let missing_param = session.read_control(control_read(
+            "value_1",
+            RuntimeControlReadTarget::Param,
+            "missing",
+        ));
+        assert!(!missing_param.ok);
+        assert!(
+            missing_param.diagnostics[0]
+                .message
+                .contains("param missing does not exist")
+        );
+
+        let missing_state_id = session.read_control(control_read(
+            "value_1",
+            RuntimeControlReadTarget::State,
+            "other",
+        ));
+        assert!(!missing_state_id.ok);
+        assert!(
+            missing_state_id.diagnostics[0]
+                .message
+                .contains("state other does not exist")
+        );
+
+        let missing_control_state = session.read_control(control_read(
+            "target_1",
+            RuntimeControlReadTarget::State,
+            "value",
+        ));
+        assert!(!missing_control_state.ok);
+        assert!(
+            missing_control_state.diagnostics[0]
+                .message
+                .contains("has no runtime control state")
+        );
     }
 
     #[test]
@@ -1349,6 +1534,18 @@ mod tests {
             node_id: node_id.to_owned(),
             port_id: port_id.to_owned(),
             value,
+        }
+    }
+
+    fn control_read(
+        node_id: &str,
+        target: RuntimeControlReadTarget,
+        id: &str,
+    ) -> RuntimeControlReadRequest {
+        RuntimeControlReadRequest {
+            node_id: node_id.to_owned(),
+            target,
+            id: id.to_owned(),
         }
     }
 

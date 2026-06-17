@@ -19,9 +19,10 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::{
     DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, NodeDefinition, NodeRegistry,
     PreviewManager, ProjectRequestV02, RunProjectRequestV02, RuntimeControlEventRequest,
-    RuntimeControlEventResponse, RuntimeControlStateResponse, RuntimePreviewStartRequest,
-    RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest, build_execution_plan,
-    build_execution_plan_v02, run_dummy_execution, validate_project, validate_project_v02,
+    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
+    RuntimeControlStateResponse, RuntimePreviewStartRequest, RuntimeSession,
+    RuntimeTelemetrySnapshot, SessionRunRequest, build_execution_plan, build_execution_plan_v02,
+    run_dummy_execution, validate_project, validate_project_v02,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -123,6 +124,7 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/redo", post(redo_session))
         .route("/v0/session/control/event", post(control_event))
         .route("/v0/session/control/state", get(control_state))
+        .route("/v0/session/control/read", post(control_read))
         .route("/v0/session/preview", get(preview_status))
         .route("/v0/session/preview/start", post(start_preview))
         .route("/v0/session/preview/stop", post(stop_preview))
@@ -166,6 +168,7 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.clear",
             "session.control.event",
             "session.control.state",
+            "session.control.read",
             "session.preview.status",
             "session.preview.start",
             "session.preview.stop",
@@ -401,6 +404,17 @@ async fn control_state(
         .read()
         .expect("runtime session lock should not be poisoned");
     Json(session.control_state_response())
+}
+
+async fn control_read(
+    State(state): State<RuntimeServerState>,
+    Json(request): Json<RuntimeControlReadRequest>,
+) -> Json<RuntimeControlReadResponse> {
+    let session = state
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.read_control(request))
 }
 
 async fn clear_session(
@@ -1385,6 +1399,24 @@ mod tests {
             json!({ "type": "f32", "value": 12.0 })
         );
 
+        let state_read = post_json_with(
+            app.clone(),
+            "/v0/session/control/read",
+            json!({ "nodeId": "value_1", "target": "state", "id": "value" }),
+        )
+        .await;
+        assert_eq!(state_read["ok"], true);
+        assert_eq!(state_read["value"], json!({ "type": "f32", "value": 12.0 }));
+
+        let port_read = post_json_with(
+            app.clone(),
+            "/v0/session/control/read",
+            json!({ "nodeId": "value_1", "target": "port", "id": "value" }),
+        )
+        .await;
+        assert_eq!(port_read["ok"], true);
+        assert_eq!(port_read["value"]["value"]["id"], json!("value"));
+
         let wrong_type = post_json_with(
             app,
             "/v0/session/control/event",
@@ -1412,6 +1444,12 @@ mod tests {
         )
         .await;
         let state = get_json_with(app, "/v0/session/control/state").await;
+        let read = post_json_with(
+            runtime_router(),
+            "/v0/session/control/read",
+            json!({ "nodeId": "value_1", "target": "state", "id": "value" }),
+        )
+        .await;
 
         assert_eq!(event["ok"], false);
         assert_eq!(event["emitted"], json!([]));
@@ -1423,6 +1461,13 @@ mod tests {
         );
         assert_eq!(state["ok"], false);
         assert_eq!(state["values"], json!({}));
+        assert_eq!(read["ok"], false);
+        assert!(
+            read["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no project loaded")
+        );
     }
 
     #[tokio::test]

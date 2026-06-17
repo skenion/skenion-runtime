@@ -7,6 +7,9 @@ pub const VALUE_F32_KIND: &str = "core.value-f32";
 pub const VALUE_I32_KIND: &str = "core.value-i32";
 pub const VALUE_BOOL_KIND: &str = "core.value-bool";
 pub const COLOR_RGBA_KIND: &str = "core.color-rgba";
+pub const STRING_KIND: &str = "core.string";
+pub const TOGGLE_KIND: &str = "core.toggle";
+pub const MESSAGE_KIND: &str = "core.message";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
@@ -14,6 +17,7 @@ pub enum ControlValue {
     F32(f64),
     I32(i64),
     Bool(bool),
+    String(String),
     Rgba([f64; 4]),
     Bang,
 }
@@ -27,6 +31,10 @@ impl ControlValue {
             COLOR_RGBA_KIND => Some(Self::Rgba(
                 read_rgba_param(node).unwrap_or([1.0, 1.0, 1.0, 1.0]),
             )),
+            STRING_KIND | MESSAGE_KIND => Some(Self::String(
+                read_string_param(node).unwrap_or_default().to_owned(),
+            )),
+            TOGGLE_KIND => Some(Self::Bool(read_bool_param(node).unwrap_or(false))),
             _ => None,
         }
     }
@@ -36,6 +44,7 @@ impl ControlValue {
             Self::F32(_) => "f32",
             Self::I32(_) => "i32",
             Self::Bool(_) => "bool",
+            Self::String(_) => "string",
             Self::Rgba(_) => "rgba",
             Self::Bang => "bang",
         }
@@ -47,6 +56,7 @@ impl ControlValue {
             (Self::F32(_), Self::F32(_))
                 | (Self::I32(_), Self::I32(_))
                 | (Self::Bool(_), Self::Bool(_))
+                | (Self::String(_), Self::String(_))
                 | (Self::Rgba(_), Self::Rgba(_))
         )
     }
@@ -78,6 +88,10 @@ fn read_bool_param(node: &GraphNode) -> Option<bool> {
     node.params.get("value").and_then(Value::as_bool)
 }
 
+fn read_string_param(node: &GraphNode) -> Option<&str> {
+    node.params.get("value").and_then(Value::as_str)
+}
+
 fn read_rgba_param(node: &GraphNode) -> Option<[f64; 4]> {
     let values = node.params.get("value")?.as_array()?;
     let [r, g, b, a] = values.as_slice() else {
@@ -107,6 +121,10 @@ mod tests {
             json!({ "type": "bool", "value": true })
         );
         assert_eq!(
+            serde_json::to_value(ControlValue::String("ready".to_owned())).unwrap(),
+            json!({ "type": "string", "value": "ready" })
+        );
+        assert_eq!(
             serde_json::to_value(ControlValue::Rgba([0.1, 0.2, 0.3, 1.0])).unwrap(),
             json!({ "type": "rgba", "value": [0.1, 0.2, 0.3, 1.0] })
         );
@@ -134,6 +152,18 @@ mod tests {
             ControlValue::for_node_default(&node(COLOR_RGBA_KIND, json!([0.1, 0.2, 0.3, 1.0]))),
             Some(ControlValue::Rgba([0.1, 0.2, 0.3, 1.0]))
         );
+        assert_eq!(
+            ControlValue::for_node_default(&node(STRING_KIND, json!("ready"))),
+            Some(ControlValue::String("ready".to_owned()))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(TOGGLE_KIND, json!(true))),
+            Some(ControlValue::Bool(true))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(MESSAGE_KIND, json!("perform"))),
+            Some(ControlValue::String("perform".to_owned()))
+        );
     }
 
     #[test]
@@ -154,6 +184,10 @@ mod tests {
             ControlValue::for_node_default(&node(COLOR_RGBA_KIND, json!([0.1, 0.2]))),
             Some(ControlValue::Rgba([1.0, 1.0, 1.0, 1.0]))
         );
+        assert_eq!(
+            ControlValue::for_node_default(&node(STRING_KIND, json!(false))),
+            Some(ControlValue::String(String::new()))
+        );
     }
 
     #[test]
@@ -161,6 +195,10 @@ mod tests {
         assert!(ControlValue::F32(1.0).matches_stored_type(&ControlValue::F32(0.0)));
         assert!(ControlValue::I32(1).matches_stored_type(&ControlValue::I32(0)));
         assert!(ControlValue::Bool(true).matches_stored_type(&ControlValue::Bool(false)));
+        assert!(
+            ControlValue::String("a".to_owned())
+                .matches_stored_type(&ControlValue::String("b".to_owned()))
+        );
         assert!(
             ControlValue::Rgba([1.0, 0.0, 0.0, 1.0])
                 .matches_stored_type(&ControlValue::Rgba([0.0, 0.0, 0.0, 1.0]))
@@ -174,6 +212,7 @@ mod tests {
         assert_eq!(ControlValue::F32(1.0).kind_label(), "f32");
         assert_eq!(ControlValue::I32(1).kind_label(), "i32");
         assert_eq!(ControlValue::Bool(true).kind_label(), "bool");
+        assert_eq!(ControlValue::String("x".to_owned()).kind_label(), "string");
         assert_eq!(
             ControlValue::Rgba([0.0, 0.0, 0.0, 1.0]).kind_label(),
             "rgba"
