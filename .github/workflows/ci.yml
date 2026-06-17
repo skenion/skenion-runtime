@@ -22,6 +22,11 @@ jobs:
           repository: echovisionlab/skenion-examples
           path: .deps/skenion-examples
       - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: skenion-runtime-rust
+          cache-all-crates: "true"
+          cache-on-failure: "true"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
