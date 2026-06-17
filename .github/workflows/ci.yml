@@ -89,6 +89,9 @@ jobs:
           post_expect_ok true /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-uniform.project.json
           post_expect_ok true /v0/plan .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-uniform.project.json
           post_expect_ok true /v0/run .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-uniform.project.json
+          post_expect_ok true /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-multi-uniform.project.json
+          post_expect_ok true /v0/plan .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-multi-uniform.project.json
+          post_expect_ok true /v0/run .deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-multi-uniform.project.json
           post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/invalid/missing-definition.project.json
           post_expect_ok false /v0/validate .deps/skenion-examples/compatibility/v0.1/projects/invalid/incompatible-edge.project.json
           post_expect_ok true /v0/validate .deps/skenion-examples/compatibility/v0.2/projects/valid/render-output.project.json
@@ -104,6 +107,7 @@ jobs:
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-render-clear-color.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-telemetry.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-shader-uniform.sh
+            SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-shader-multi-uniform.sh
             if [[ -x scripts/smoke-runtime-fullscreen-shader.sh ]]; then
               SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-fullscreen-shader.sh
             else
