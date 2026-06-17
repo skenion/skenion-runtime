@@ -439,11 +439,15 @@ fn shader_uniform_value(
 ) -> ShaderUniformValue {
     let connected = resolve_control_value_at_input(document, &node.id, &uniform.id);
     match uniform.data_type.data_kind.as_str() {
-        "number.f32" => connected.and_then(ControlValue::as_f32).map_or_else(
-            || ShaderUniformValue::F32(default_f32(&uniform.default)),
-            ShaderUniformValue::F32,
-        ),
+        "number.f32" => connected
+            .as_ref()
+            .and_then(ControlValue::as_f32)
+            .map_or_else(
+                || ShaderUniformValue::F32(default_f32(&uniform.default)),
+                ShaderUniformValue::F32,
+            ),
         "number.i32" => connected
+            .as_ref()
             .and_then(|value| match value {
                 ControlValue::I32(value) => Some(*value as i32),
                 _ => None,
@@ -453,6 +457,7 @@ fn shader_uniform_value(
                 ShaderUniformValue::I32,
             ),
         "boolean" => connected
+            .as_ref()
             .and_then(|value| match value {
                 ControlValue::Bool(value) => Some(*value),
                 _ => None,
@@ -461,10 +466,13 @@ fn shader_uniform_value(
                 || ShaderUniformValue::Bool(default_bool(&uniform.default)),
                 ShaderUniformValue::Bool,
             ),
-        "color.rgba" => connected.and_then(ControlValue::as_rgba_f32).map_or_else(
-            || ShaderUniformValue::ColorRgba(default_color(&uniform.default)),
-            ShaderUniformValue::ColorRgba,
-        ),
+        "color.rgba" => connected
+            .as_ref()
+            .and_then(ControlValue::as_rgba_f32)
+            .map_or_else(
+                || ShaderUniformValue::ColorRgba(default_color(&uniform.default)),
+                ShaderUniformValue::ColorRgba,
+            ),
         _ => ShaderUniformValue::F32(0.0),
     }
 }
@@ -501,11 +509,11 @@ fn read_color_f32(value: &Value) -> Option<[f32; 4]> {
     read_color(value).map(|color| color.map(|component| component.clamp(0.0, 1.0) as f32))
 }
 
-pub(crate) fn resolve_control_value_at_input<'a>(
-    document: &'a PreviewDocument,
+pub(crate) fn resolve_control_value_at_input(
+    document: &PreviewDocument,
     target_node_id: &str,
     target_port_id: &str,
-) -> Option<&'a ControlValue> {
+) -> Option<ControlValue> {
     let edge = document
         .graph
         .edges
@@ -522,7 +530,9 @@ pub(crate) fn resolve_control_value_at_input<'a>(
         .iter()
         .find(|candidate| candidate.id == edge.from.node)?;
 
-    document.control_state.value_for_node(&source_node.id)
+    document
+        .control_state
+        .output_value_for_node(source_node, &edge.from.port)
 }
 
 fn source_has_output_port(node: &GraphNode, port_id: &str) -> bool {
@@ -954,6 +964,31 @@ mod tests {
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
 
         assert_eq!(shader_u_value(&scene), 2.5);
+    }
+
+    #[test]
+    fn fullscreen_shader_reads_receive_channel_value() {
+        let mut document = document_with_edges(
+            vec![
+                receive_node(
+                    "receive_1",
+                    "core.receive-f32",
+                    "number.f32",
+                    "speed",
+                    json!(0.25),
+                ),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("receive_1", "value", "shader_1", "speed")],
+        );
+        document
+            .control_state
+            .channels
+            .insert("number.f32:speed".to_owned(), ControlValue::F32(1.8));
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value(&scene), 1.8);
     }
 
     #[test]
@@ -1644,6 +1679,48 @@ mod tests {
                     }
                 }))
                 .expect("valid color port"),
+            ],
+        }
+    }
+
+    fn receive_node(
+        id: &str,
+        kind: &str,
+        data_kind: &str,
+        name: &str,
+        default: Value,
+    ) -> GraphNode {
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_owned(), json!(name));
+        params.insert("default".to_owned(), default);
+        GraphNode {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: vec![
+                serde_json::from_value(json!({
+                    "id": "bang",
+                    "direction": "input",
+                    "label": "Bang",
+                    "type": {
+                        "flow": "event",
+                        "dataKind": "event.bang"
+                    },
+                    "required": false,
+                    "activation": "trigger"
+                }))
+                .expect("valid receive bang port"),
+                serde_json::from_value(json!({
+                    "id": "value",
+                    "direction": "output",
+                    "label": "Value",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": data_kind
+                    }
+                }))
+                .expect("valid receive value port"),
             ],
         }
     }

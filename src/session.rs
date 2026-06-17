@@ -469,6 +469,7 @@ impl RuntimeSession {
         RuntimeControlStateResponse {
             ok: self.graph.is_some(),
             values: self.control_state.values.clone(),
+            channels: self.control_state.channels.clone(),
             diagnostics: if self.graph.is_some() {
                 Vec::new()
             } else {
@@ -898,6 +899,26 @@ mod tests {
             Some(&ControlValue::F32(12.0))
         );
         assert_eq!(session.snapshot().session_revision, 4);
+    }
+
+    #[test]
+    fn control_send_updates_typed_channel_state() {
+        let mut session = RuntimeSession::default();
+        assert!(session.load_project(send_f32_project()).ok);
+
+        let response = session.apply_control_event(control_request("send_1", "in", f32_value(1.5)));
+
+        assert!(response.ok);
+        assert_eq!(response.emitted[0].node_id, "send_1");
+        assert_eq!(response.emitted[0].port_id, "in");
+        assert_eq!(response.emitted[0].value, ControlValue::F32(1.5));
+        assert_eq!(
+            session
+                .control_state_response()
+                .channels
+                .get("number.f32:speed"),
+            Some(&ControlValue::F32(1.5))
+        );
     }
 
     #[test]
@@ -1622,6 +1643,43 @@ mod tests {
         serde_json::from_value(sample_project_json()).expect("sample project should parse")
     }
 
+    fn send_f32_project() -> ProjectRequest {
+        serde_json::from_value(json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "send-f32",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "send_1",
+                "kind": "core.send-f32",
+                "kindVersion": "0.1.0",
+                "params": { "name": "speed" },
+                "ports": send_f32_ports_json()
+              }
+            ],
+            "edges": []
+          },
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.1.0",
+              "id": "core.send-f32",
+              "version": "0.1.0",
+              "displayName": "Send F32",
+              "category": "Routing",
+              "ports": send_f32_ports_json(),
+              "execution": { "model": "value" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": []
+            }
+          ]
+        }))
+        .expect("send f32 project should parse")
+    }
+
     fn sample_project_json() -> Value {
         json!({
           "graph": {
@@ -1711,6 +1769,19 @@ mod tests {
             "direction": "output",
             "label": "Value",
             "type": { "flow": "value", "dataKind": "number.f32" }
+          }
+        ])
+    }
+
+    fn send_f32_ports_json() -> Value {
+        json!([
+          {
+            "id": "in",
+            "direction": "input",
+            "label": "In",
+            "type": { "flow": "value", "dataKind": "number.f32" },
+            "required": true,
+            "activation": "trigger"
           }
         ])
     }

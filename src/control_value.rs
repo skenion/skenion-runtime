@@ -10,6 +10,17 @@ pub const COLOR_RGBA_KIND: &str = "core.color-rgba";
 pub const STRING_KIND: &str = "core.string";
 pub const TOGGLE_KIND: &str = "core.toggle";
 pub const MESSAGE_KIND: &str = "core.message";
+pub const SEND_F32_KIND: &str = "core.send-f32";
+pub const SEND_I32_KIND: &str = "core.send-i32";
+pub const SEND_BOOL_KIND: &str = "core.send-bool";
+pub const SEND_RGBA_KIND: &str = "core.send-rgba";
+pub const RECEIVE_F32_KIND: &str = "core.receive-f32";
+pub const RECEIVE_I32_KIND: &str = "core.receive-i32";
+pub const RECEIVE_BOOL_KIND: &str = "core.receive-bool";
+pub const RECEIVE_RGBA_KIND: &str = "core.receive-rgba";
+pub const UI_BUTTON_KIND: &str = "ui.button";
+pub const UI_SLIDER_F32_KIND: &str = "ui.slider-f32";
+pub const UI_TOGGLE_KIND: &str = "ui.toggle";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
@@ -35,6 +46,8 @@ impl ControlValue {
                 read_string_param(node).unwrap_or_default().to_owned(),
             )),
             TOGGLE_KIND => Some(Self::Bool(read_bool_param(node).unwrap_or(false))),
+            UI_SLIDER_F32_KIND => Some(Self::F32(read_f64_param(node).unwrap_or(0.0))),
+            UI_TOGGLE_KIND => Some(Self::Bool(read_bool_param(node).unwrap_or(false))),
             _ => None,
         }
     }
@@ -163,6 +176,14 @@ mod tests {
         assert_eq!(
             ControlValue::for_node_default(&node(MESSAGE_KIND, json!("perform"))),
             Some(ControlValue::String("perform".to_owned()))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(UI_SLIDER_F32_KIND, json!(0.75))),
+            Some(ControlValue::F32(0.75))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(UI_TOGGLE_KIND, json!(true))),
+            Some(ControlValue::Bool(true))
         );
     }
 
