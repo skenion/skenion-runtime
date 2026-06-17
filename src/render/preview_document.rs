@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +34,7 @@ impl PreviewDocument {
 }
 
 pub fn write_preview_document(document: &PreviewDocument) -> Result<PathBuf, String> {
-    let directory = std::env::temp_dir().join("skenion-runtime-preview");
+    let directory = preview_temp_dir();
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let path = directory.join(format!(
         "preview-document-{}-{}.json",
@@ -40,6 +44,67 @@ pub fn write_preview_document(document: &PreviewDocument) -> Result<PathBuf, Str
     let bytes = serde_json::to_vec_pretty(document).map_err(|error| error.to_string())?;
     fs::write(&path, bytes).map_err(|error| error.to_string())?;
     Ok(path)
+}
+
+pub(crate) fn preview_temp_dir() -> PathBuf {
+    std::env::temp_dir().join("skenion-runtime-preview")
+}
+
+pub(crate) fn cleanup_stale_preview_temp_files(max_age: Duration) -> Result<usize, String> {
+    cleanup_stale_preview_temp_files_in(&preview_temp_dir(), max_age, SystemTime::now())
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn remove_preview_temp_file(path: &Path) -> Result<(), String> {
+    if !is_preview_temp_file(path) || !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(|error| error.to_string())
+}
+
+fn cleanup_stale_preview_temp_files_in(
+    directory: &Path,
+    max_age: Duration,
+    now: SystemTime,
+) -> io::Result<usize> {
+    if !directory.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !is_preview_temp_file(&path) {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if now
+            .duration_since(modified)
+            .map(|age| age >= max_age)
+            .unwrap_or(false)
+        {
+            fs::remove_file(path)?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+fn is_preview_temp_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    (name.starts_with("preview-document-") && name.ends_with(".json"))
+        || (name.starts_with("preview-") && name.contains("-telemetry.json"))
 }
 
 #[cfg(test)]
@@ -81,6 +146,37 @@ mod tests {
 
         assert_eq!(decoded, document);
         std::fs::remove_file(path).expect("test document should be removable");
+    }
+
+    #[test]
+    fn stale_preview_cleanup_removes_only_preview_temp_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "skenion-preview-cleanup-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("test directory should create");
+        let document_path = directory.join("preview-document-1-2.json");
+        let telemetry_path = directory.join("preview-1-2-3-telemetry.json");
+        let temp_telemetry_path = directory.join("preview-1-2-3-telemetry.json.tmp");
+        let unrelated_path = directory.join("keep.json");
+        std::fs::write(&document_path, b"{}").expect("document should write");
+        std::fs::write(&telemetry_path, b"{}").expect("telemetry should write");
+        std::fs::write(&temp_telemetry_path, b"{}").expect("temp telemetry should write");
+        std::fs::write(&unrelated_path, b"{}").expect("unrelated file should write");
+
+        let removed = cleanup_stale_preview_temp_files_in(
+            &directory,
+            Duration::ZERO,
+            SystemTime::now() + Duration::from_secs(1),
+        )
+        .expect("cleanup should succeed");
+
+        assert_eq!(removed, 3);
+        assert!(!document_path.exists());
+        assert!(!telemetry_path.exists());
+        assert!(!temp_telemetry_path.exists());
+        assert!(unrelated_path.exists());
+        std::fs::remove_dir_all(directory).expect("test directory should remove");
     }
 
     fn graph() -> GraphDocument {

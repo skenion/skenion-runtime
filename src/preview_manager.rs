@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ExecutionPlan, GraphDocument, PreviewDocument, RuntimeDiagnostic, RuntimeSessionSnapshot,
     RuntimeTelemetrySnapshot,
-    render::render_scene_from_preview_document,
+    render::{
+        cleanup_stale_preview_temp_files, remove_preview_temp_file,
+        render_scene_from_preview_document,
+    },
     telemetry::{
         PREVIEW_TELEMETRY_SCHEMA, PREVIEW_TELEMETRY_SCHEMA_VERSION, PreviewTelemetryHeartbeat,
         preview_telemetry_path, read_preview_telemetry, unix_ms_timestamp,
@@ -22,8 +25,12 @@ pub(crate) trait PreviewHandle: Send {
     fn stop(&mut self) -> Result<Option<i32>, String>;
 }
 
-pub(crate) type PreviewSpawner =
-    fn(&PreviewDocument, &Path) -> Result<Box<dyn PreviewHandle>, String>;
+pub(crate) struct PreviewSpawn {
+    handle: Box<dyn PreviewHandle>,
+    document_path: Option<PathBuf>,
+}
+
+pub(crate) type PreviewSpawner = fn(&PreviewDocument, &Path) -> Result<PreviewSpawn, String>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewContext {
@@ -81,6 +88,7 @@ struct PreviewStatus {
     exit_code: Option<i32>,
     message: Option<String>,
     telemetry_path: Option<PathBuf>,
+    document_path: Option<PathBuf>,
 }
 
 pub struct PreviewManager {
@@ -153,6 +161,7 @@ impl PreviewManager {
         if self.is_active() && !restart {
             return self.to_response(true, &snapshot, Vec::new());
         }
+        cleanup_stale_preview_files();
         if restart {
             let _ = self.stop_current();
         }
@@ -173,6 +182,7 @@ impl PreviewManager {
             exit_code: None,
             message: None,
             telemetry_path: Some(preview_telemetry_path(context.session_revision)),
+            document_path: None,
         };
 
         let document = PreviewDocument::new(
@@ -182,7 +192,7 @@ impl PreviewManager {
         );
         let handle = if self.dry_run {
             record_dry_run_heartbeat(&mut self.status, &document);
-            Ok(Box::new(DryRunPreviewHandle) as Box<dyn PreviewHandle>)
+            Ok(PreviewSpawn::new(Box::new(DryRunPreviewHandle), None))
         } else {
             let telemetry_path = self
                 .status
@@ -193,10 +203,11 @@ impl PreviewManager {
         };
 
         match handle {
-            Ok(handle) => {
-                self.status.pid = handle.pid();
+            Ok(spawn) => {
+                self.status.pid = spawn.handle.pid();
+                self.status.document_path = spawn.document_path;
                 self.status.state = PreviewState::Running;
-                self.handle = Some(handle);
+                self.handle = Some(spawn.handle);
                 self.to_response(true, &snapshot, Vec::new())
             }
             Err(error) => {
@@ -282,8 +293,18 @@ impl PreviewManager {
             self.status.exit_code = exit_code;
             self.status.exited_at = Some(now_string());
         }
+        self.remove_current_temp_files();
         self.status = PreviewStatus::stopped();
         Ok(())
+    }
+
+    fn remove_current_temp_files(&mut self) {
+        if let Some(path) = self.status.document_path.as_deref() {
+            let _ = remove_preview_temp_file(path);
+        }
+        if let Some(path) = self.status.telemetry_path.as_deref() {
+            let _ = remove_preview_temp_file(path);
+        }
     }
 
     fn to_response(
@@ -345,6 +366,16 @@ impl PreviewStatus {
             exit_code: None,
             message: None,
             telemetry_path: None,
+            document_path: None,
+        }
+    }
+}
+
+impl PreviewSpawn {
+    pub(crate) fn new(handle: Box<dyn PreviewHandle>, document_path: Option<PathBuf>) -> Self {
+        Self {
+            handle,
+            document_path,
         }
     }
 }
@@ -375,6 +406,10 @@ fn now_string() -> String {
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     format!("unix-ms:{millis}")
+}
+
+fn cleanup_stale_preview_files() {
+    let _ = cleanup_stale_preview_temp_files(Duration::from_secs(24 * 60 * 60));
 }
 
 fn dry_run_heartbeat(document: &PreviewDocument) -> PreviewTelemetryHeartbeat {
@@ -516,6 +551,7 @@ mod tests {
             exit_code: None,
             message: None,
             telemetry_path: Some(blocker.join("telemetry.json")),
+            document_path: None,
         };
         let document = PreviewDocument::new(graph("1"), plan("1"), 1);
 
@@ -740,6 +776,30 @@ mod tests {
     }
 
     #[test]
+    fn stop_removes_current_preview_document_and_telemetry_files() {
+        let mut manager = PreviewManager::with_test_spawner(false, spawn_temp_file_handle);
+        manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
+        let document_path = manager
+            .status
+            .document_path
+            .clone()
+            .expect("document path should be stored");
+        let telemetry_path = manager
+            .status
+            .telemetry_path
+            .clone()
+            .expect("telemetry path should be stored");
+        assert!(document_path.exists());
+        assert!(telemetry_path.exists());
+
+        let response = manager.stop(loaded_snapshot(1, "1"));
+
+        assert!(response.ok);
+        assert!(!document_path.exists());
+        assert!(!telemetry_path.exists());
+    }
+
+    #[test]
     fn start_request_defaults_restart_to_false() {
         let request: RuntimePreviewStartRequest =
             serde_json::from_value(json!({})).expect("request should deserialize");
@@ -750,7 +810,7 @@ mod tests {
     fn spawn_exiting_handle(
         document: &PreviewDocument,
         telemetry_path: &Path,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
+    ) -> Result<PreviewSpawn, String> {
         assert_eq!(document.plan.graph_id, "minimal-value");
         assert_eq!(document.graph.id, "minimal-value");
         assert_eq!(document.session_revision, 1);
@@ -761,21 +821,21 @@ mod tests {
                 .to_string_lossy()
                 .contains("telemetry")
         );
-        Ok(Box::new(FakePreviewHandle::new(Some(0), None, None)))
+        Ok(spawn(FakePreviewHandle::new(Some(0), None, None)))
     }
 
     fn spawn_running_handle(
         _document: &PreviewDocument,
         _telemetry_path: &Path,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
-        Ok(Box::new(FakePreviewHandle::new(None, None, None)))
+    ) -> Result<PreviewSpawn, String> {
+        Ok(spawn(FakePreviewHandle::new(None, None, None)))
     }
 
     fn spawn_erroring_handle(
         _document: &PreviewDocument,
         _telemetry_path: &Path,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
-        Ok(Box::new(FakePreviewHandle::new(
+    ) -> Result<PreviewSpawn, String> {
+        Ok(spawn(FakePreviewHandle::new(
             None,
             Some("poll failed"),
             None,
@@ -785,8 +845,8 @@ mod tests {
     fn spawn_unstoppable_handle(
         _document: &PreviewDocument,
         _telemetry_path: &Path,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
-        Ok(Box::new(FakePreviewHandle::new(
+    ) -> Result<PreviewSpawn, String> {
+        Ok(spawn(FakePreviewHandle::new(
             None,
             None,
             Some("stop failed"),
@@ -796,14 +856,14 @@ mod tests {
     fn spawn_failure(
         _document: &PreviewDocument,
         _telemetry_path: &Path,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
+    ) -> Result<PreviewSpawn, String> {
         Err("spawn failed".to_owned())
     }
 
     fn spawn_heartbeat_handle(
         document: &PreviewDocument,
         telemetry_path: &Path,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
+    ) -> Result<PreviewSpawn, String> {
         write_preview_telemetry_heartbeat(
             telemetry_path,
             &PreviewTelemetryHeartbeat {
@@ -824,18 +884,44 @@ mod tests {
             },
         )
         .expect("test heartbeat should write");
-        Ok(Box::new(FakePreviewHandle::new(None, None, None)))
+        Ok(spawn(FakePreviewHandle::new(None, None, None)))
     }
 
     fn spawn_invalid_heartbeat_handle(
         _document: &PreviewDocument,
         telemetry_path: &Path,
-    ) -> Result<Box<dyn PreviewHandle>, String> {
+    ) -> Result<PreviewSpawn, String> {
         if let Some(parent) = telemetry_path.parent() {
             std::fs::create_dir_all(parent).expect("invalid heartbeat parent should create");
         }
         std::fs::write(telemetry_path, b"{").expect("invalid heartbeat should write");
-        Ok(Box::new(FakePreviewHandle::new(None, None, None)))
+        Ok(spawn(FakePreviewHandle::new(None, None, None)))
+    }
+
+    fn spawn_temp_file_handle(
+        document: &PreviewDocument,
+        telemetry_path: &Path,
+    ) -> Result<PreviewSpawn, String> {
+        if let Some(parent) = telemetry_path.parent() {
+            std::fs::create_dir_all(parent).expect("preview temp parent should create");
+        }
+        std::fs::write(telemetry_path, b"{}").expect("telemetry temp file should write");
+        let document_path = telemetry_path
+            .parent()
+            .expect("telemetry path should have parent")
+            .join(format!(
+                "preview-document-test-{}.json",
+                document.session_revision
+            ));
+        std::fs::write(&document_path, b"{}").expect("document temp file should write");
+        Ok(PreviewSpawn::new(
+            Box::new(FakePreviewHandle::new(None, None, None)),
+            Some(document_path),
+        ))
+    }
+
+    fn spawn(handle: FakePreviewHandle) -> PreviewSpawn {
+        PreviewSpawn::new(Box::new(handle), None)
     }
 
     struct FakePreviewHandle {

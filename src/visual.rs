@@ -14,7 +14,7 @@ use winit::{
 
 use crate::{
     ExecutionPlan,
-    preview_manager::PreviewHandle,
+    preview_manager::{PreviewHandle, PreviewSpawn},
     render::{PreviewDocument, write_preview_document},
 };
 
@@ -37,18 +37,21 @@ pub fn run_preview_window(
 pub(crate) fn spawn_preview_document_handle(
     document: &PreviewDocument,
     telemetry_path: &Path,
-) -> Result<Box<dyn PreviewHandle>, String> {
+) -> Result<PreviewSpawn, String> {
     let document_path = write_preview_document(document)?;
     let child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
         .arg("preview-document")
         .arg("--document")
-        .arg(document_path)
+        .arg(&document_path)
         .arg("--until-close")
         .arg("--telemetry")
         .arg(telemetry_path)
         .spawn()
         .map_err(|error| error.to_string())?;
-    Ok(Box::new(ChildPreviewHandle { child }))
+    Ok(PreviewSpawn::new(
+        Box::new(ChildPreviewHandle { child }),
+        Some(document_path),
+    ))
 }
 
 struct PreviewApp {
