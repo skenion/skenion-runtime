@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.15.0...skenion-runtime-v0.16.0) (2026-06-17)
+
+
+### Features
+
+* **runtime:** add typed value control events ([#41](https://github.com/echovisionlab/skenion-runtime/issues/41)) ([dea5b75](https://github.com/echovisionlab/skenion-runtime/commit/dea5b7599eff25d949e969e26b8e0784ec1d1683))
+
 ## [0.15.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.14.1...skenion-runtime-v0.15.0) (2026-06-17)
 
 
