@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.17.0...skenion-runtime-v0.18.0) (2026-06-17)
+
+
+### Features
+
+* **runtime:** expose shader diagnostics and generated wgsl ([#46](https://github.com/echovisionlab/skenion-runtime/issues/46)) ([b1e63ba](https://github.com/echovisionlab/skenion-runtime/commit/b1e63ba6b39ec160d806e5094c2b9653cda63e44))
+
 ## [0.17.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.16.0...skenion-runtime-v0.17.0) (2026-06-17)
 
 
