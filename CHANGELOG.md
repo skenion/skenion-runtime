@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.18.0...skenion-runtime-v0.19.0) (2026-06-17)
+
+
+### Features
+
+* **runtime:** route typed send receive control channels ([bcd06bc](https://github.com/echovisionlab/skenion-runtime/commit/bcd06bc499e4d080910d0b1c0233e2b6beb4b741))
+
 ## [0.18.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.17.0...skenion-runtime-v0.18.0) (2026-06-17)
 
 
