@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.14.0...skenion-runtime-v0.14.1) (2026-06-17)
+
+
+### Bug Fixes
+
+* **runtime:** clean preview temp files ([1ad391c](https://github.com/echovisionlab/skenion-runtime/commit/1ad391cce5be8d9fd12c8fe2b0a150b31d3a3203))
+
 ## [0.14.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.13.0...skenion-runtime-v0.14.0) (2026-06-16)
 
 
