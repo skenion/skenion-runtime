@@ -18,7 +18,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, NodeDefinition, NodeRegistry,
-    PreviewManager, ProjectRequestV02, RunProjectRequestV02, RuntimePreviewStartRequest,
+    PreviewManager, ProjectRequestV02, RunProjectRequestV02, RuntimeControlEventRequest,
+    RuntimeControlEventResponse, RuntimeControlStateResponse, RuntimePreviewStartRequest,
     RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest, build_execution_plan,
     build_execution_plan_v02, run_dummy_execution, validate_project, validate_project_v02,
 };
@@ -120,6 +121,8 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/history", get(session_history))
         .route("/v0/session/undo", post(undo_session))
         .route("/v0/session/redo", post(redo_session))
+        .route("/v0/session/control/event", post(control_event))
+        .route("/v0/session/control/state", get(control_state))
         .route("/v0/session/preview", get(preview_status))
         .route("/v0/session/preview/start", post(start_preview))
         .route("/v0/session/preview/stop", post(stop_preview))
@@ -161,6 +164,8 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.undo",
             "session.redo",
             "session.clear",
+            "session.control.event",
+            "session.control.state",
             "session.preview.status",
             "session.preview.start",
             "session.preview.stop",
@@ -375,6 +380,27 @@ async fn redo_session(
         .write()
         .expect("runtime session lock should not be poisoned");
     Json(session.redo())
+}
+
+async fn control_event(
+    State(state): State<RuntimeServerState>,
+    Json(request): Json<RuntimeControlEventRequest>,
+) -> Json<RuntimeControlEventResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.apply_control_event(request))
+}
+
+async fn control_state(
+    State(state): State<RuntimeServerState>,
+) -> Json<RuntimeControlStateResponse> {
+    let session = state
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.control_state_response())
 }
 
 async fn clear_session(
@@ -731,6 +757,8 @@ mod tests {
             "session.history",
             "session.undo",
             "session.redo",
+            "session.control.event",
+            "session.control.state",
             "session.preview.start",
             "session.telemetry",
             "session.telemetry.stream",
@@ -1313,6 +1341,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_control_event_and_state_endpoints_follow_value_semantics() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let set = post_json_with(
+            app.clone(),
+            "/v0/session/control/event",
+            json!({ "nodeId": "value_1", "portId": "set", "value": { "type": "f32", "value": 32.0 } }),
+        )
+        .await;
+        assert_eq!(set["ok"], true);
+        assert_eq!(set["emitted"], json!([]));
+
+        let bang = post_json_with(
+            app.clone(),
+            "/v0/session/control/event",
+            json!({ "nodeId": "value_1", "portId": "bang", "value": { "type": "bang" } }),
+        )
+        .await;
+        assert_eq!(bang["ok"], true);
+        assert_eq!(
+            bang["emitted"],
+            json!([{ "nodeId": "value_1", "portId": "value", "value": { "type": "f32", "value": 32.0 } }])
+        );
+
+        let input = post_json_with(
+            app.clone(),
+            "/v0/session/control/event",
+            json!({ "nodeId": "value_1", "portId": "in", "value": { "type": "f32", "value": 12.0 } }),
+        )
+        .await;
+        assert_eq!(input["ok"], true);
+        assert_eq!(
+            input["emitted"],
+            json!([{ "nodeId": "value_1", "portId": "value", "value": { "type": "f32", "value": 12.0 } }])
+        );
+
+        let state = get_json_with(app.clone(), "/v0/session/control/state").await;
+        assert_eq!(state["ok"], true);
+        assert_eq!(
+            state["values"]["value_1"],
+            json!({ "type": "f32", "value": 12.0 })
+        );
+
+        let wrong_type = post_json_with(
+            app,
+            "/v0/session/control/event",
+            json!({ "nodeId": "value_1", "portId": "in", "value": { "type": "bool", "value": true } }),
+        )
+        .await;
+        assert_eq!(wrong_type["ok"], false);
+        assert_eq!(wrong_type["emitted"], json!([]));
+        assert!(
+            wrong_type["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("expects f32")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_control_endpoints_report_missing_session() {
+        let app = runtime_router();
+
+        let event = post_json_with(
+            app.clone(),
+            "/v0/session/control/event",
+            json!({ "nodeId": "value_1", "portId": "set", "value": { "type": "f32", "value": 1.0 } }),
+        )
+        .await;
+        let state = get_json_with(app, "/v0/session/control/state").await;
+
+        assert_eq!(event["ok"], false);
+        assert_eq!(event["emitted"], json!([]));
+        assert!(
+            event["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no project loaded")
+        );
+        assert_eq!(state["ok"], false);
+        assert_eq!(state["values"], json!({}));
+    }
+
+    #[tokio::test]
     async fn session_run_fails_without_loaded_project() {
         let response = post_json("/v0/session/run", json!({ "frames": 2 })).await;
 
@@ -1658,18 +1771,14 @@ mod tests {
                 "kind": "core.value-f32",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": [
-                  { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
-                ]
+                "ports": value_f32_ports_json()
               },
               {
                 "id": "target_1",
                 "kind": "core.target",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": [
-                  { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" }
-                ]
+                "ports": target_ports_json()
               }
             ],
             "edges": [
@@ -1684,9 +1793,7 @@ mod tests {
               "version": "0.1.0",
               "displayName": "Float Value",
               "category": "Values",
-              "ports": [
-                { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
-              ],
+              "ports": value_f32_ports_json(),
               "execution": { "model": "value" },
               "state": { "persistent": false },
               "permissions": [],
@@ -1699,9 +1806,7 @@ mod tests {
               "version": "0.1.0",
               "displayName": "Target",
               "category": "Values",
-              "ports": [
-                { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" }
-              ],
+              "ports": target_ports_json(),
               "execution": { "model": "value" },
               "state": { "persistent": false },
               "permissions": [],
@@ -1709,6 +1814,53 @@ mod tests {
             }
           ]
         })
+    }
+
+    fn value_f32_ports_json() -> Value {
+        json!([
+          {
+            "id": "in",
+            "direction": "input",
+            "label": "In",
+            "type": { "flow": "value", "dataKind": "number.f32" },
+            "required": false,
+            "activation": "trigger"
+          },
+          {
+            "id": "set",
+            "direction": "input",
+            "label": "Set",
+            "type": { "flow": "value", "dataKind": "number.f32" },
+            "required": false,
+            "activation": "latched"
+          },
+          {
+            "id": "bang",
+            "direction": "input",
+            "label": "Bang",
+            "type": { "flow": "event", "dataKind": "event.bang" },
+            "required": false,
+            "activation": "trigger"
+          },
+          {
+            "id": "value",
+            "direction": "output",
+            "label": "Value",
+            "type": { "flow": "value", "dataKind": "number.f32" }
+          }
+        ])
+    }
+
+    fn target_ports_json() -> Value {
+        json!([
+          {
+            "id": "value",
+            "direction": "input",
+            "label": "Value",
+            "type": { "flow": "value", "dataKind": "number.f32" },
+            "activation": "latched"
+          }
+        ])
     }
 
     fn sample_project_v02() -> Value {

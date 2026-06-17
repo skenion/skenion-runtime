@@ -3,8 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, GraphPatchEvent,
+    ControlState, DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, GraphPatchEvent,
     GraphPatchEventKind, GraphPatchHistory, NodeRegistry, PreviewContext, ProjectRequest,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlStateResponse,
     RuntimeDiagnostic, apply_graph_patch, build_execution_plan, invert_graph_patch,
     run_dummy_execution,
     server::{registry_from_nodes, validate_graph_with_registry},
@@ -58,6 +59,7 @@ pub struct RuntimeSession {
     graph: Option<GraphDocument>,
     registry: Option<NodeRegistry>,
     plan: Option<ExecutionPlan>,
+    control_state: ControlState,
     diagnostics: Vec<RuntimeDiagnostic>,
     revision: u64,
     event_log: Vec<GraphPatchEvent>,
@@ -72,6 +74,7 @@ impl Default for RuntimeSession {
             graph: None,
             registry: None,
             plan: None,
+            control_state: ControlState::default(),
             diagnostics: Vec::new(),
             revision: 0,
             event_log: Vec::new(),
@@ -140,6 +143,7 @@ impl RuntimeSession {
             session_revision: self.revision,
             graph: graph.clone(),
             plan: plan.clone(),
+            control_state: self.control_state.clone(),
         })
     }
 
@@ -155,9 +159,11 @@ impl RuntimeSession {
         }
 
         let plan = build_execution_plan(&graph, &registry).expect("validated project should plan");
+        let control_state = ControlState::from_graph(&graph);
         self.graph = Some(graph);
         self.registry = Some(registry);
         self.plan = Some(plan);
+        self.control_state = control_state;
         self.diagnostics = Vec::new();
         self.clear_history();
         self.revision += 1;
@@ -287,6 +293,7 @@ impl RuntimeSession {
 
         let plan =
             build_execution_plan(&patched_graph, &registry).expect("validated project should plan");
+        let control_state = ControlState::from_graph(&patched_graph);
         inverse_patch.base_revision = next_revision.clone();
         let event = self.create_patch_event(
             GraphPatchEventKind::Apply,
@@ -304,6 +311,7 @@ impl RuntimeSession {
         self.graph = Some(patched_graph.clone());
         self.registry = Some(registry);
         self.plan = Some(plan);
+        self.control_state = control_state;
         self.diagnostics = Vec::new();
         self.revision += 1;
         self.event_log.push(event.clone());
@@ -425,10 +433,49 @@ impl RuntimeSession {
         self.graph = None;
         self.registry = None;
         self.plan = None;
+        self.control_state = ControlState::default();
         self.diagnostics = Vec::new();
         self.clear_history();
         self.revision += 1;
         self.response(true, Vec::new(), None)
+    }
+
+    pub fn apply_control_event(
+        &mut self,
+        request: RuntimeControlEventRequest,
+    ) -> RuntimeControlEventResponse {
+        let Some(graph) = self.graph.as_ref() else {
+            return RuntimeControlEventResponse {
+                ok: false,
+                emitted: Vec::new(),
+                diagnostics: vec![RuntimeDiagnostic::error(
+                    "no project loaded in runtime session",
+                )],
+            };
+        };
+
+        let response = self.control_state.apply_event(request, graph);
+        if response.ok {
+            self.revision += 1;
+            self.diagnostics = Vec::new();
+        } else {
+            self.diagnostics = response.diagnostics.clone();
+        }
+        response
+    }
+
+    pub fn control_state_response(&self) -> RuntimeControlStateResponse {
+        RuntimeControlStateResponse {
+            ok: self.graph.is_some(),
+            values: self.control_state.values.clone(),
+            diagnostics: if self.graph.is_some() {
+                Vec::new()
+            } else {
+                vec![RuntimeDiagnostic::error(
+                    "no project loaded in runtime session",
+                )]
+            },
+        }
     }
 
     pub fn response(
@@ -534,6 +581,7 @@ impl RuntimeSession {
 
         let plan =
             build_execution_plan(&patched_graph, &registry).expect("validated project should plan");
+        let control_state = ControlState::from_graph(&patched_graph);
         let mut inverse_patch = match direction {
             HistoryDirection::Undo => entry.patch.clone(),
             HistoryDirection::Redo => entry.inverse_patch.clone(),
@@ -555,6 +603,7 @@ impl RuntimeSession {
         self.graph = Some(patched_graph.clone());
         self.registry = Some(registry);
         self.plan = Some(plan);
+        self.control_state = control_state;
         self.diagnostics = Vec::new();
         self.revision += 1;
         self.event_log.push(event.clone());
@@ -639,7 +688,10 @@ fn created_at_now() -> String {
 mod tests {
     use serde_json::{Value, json};
 
-    use crate::{GraphPatch, GraphPatchEventKind, NodeRegistry, ProjectRequest, RuntimeDiagnostic};
+    use crate::{
+        ControlValue, GraphPatch, GraphPatchEventKind, NodeRegistry, ProjectRequest,
+        RuntimeControlEventRequest, RuntimeDiagnostic,
+    };
 
     use super::{HistoryEntry, RuntimeSession};
 
@@ -736,6 +788,98 @@ mod tests {
     }
 
     #[test]
+    fn control_event_fails_without_loaded_project() {
+        let mut session = RuntimeSession::default();
+
+        let response =
+            session.apply_control_event(control_request("value_1", "set", f32_value(32.0)));
+
+        assert!(!response.ok);
+        assert!(response.emitted.is_empty());
+        assert_eq!(session.snapshot().session_revision, 0);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("no project loaded")
+        );
+    }
+
+    #[test]
+    fn control_set_bang_and_in_follow_typed_value_semantics() {
+        let mut session = RuntimeSession::default();
+        assert!(session.load_project(sample_project()).ok);
+
+        let set = session.apply_control_event(control_request("value_1", "set", f32_value(32.0)));
+        assert!(set.ok);
+        assert!(set.emitted.is_empty());
+        assert_eq!(session.snapshot().session_revision, 2);
+        assert_eq!(
+            session.control_state_response().values.get("value_1"),
+            Some(&ControlValue::F32(32.0))
+        );
+
+        let bang =
+            session.apply_control_event(control_request("value_1", "bang", ControlValue::Bang));
+        assert!(bang.ok);
+        assert_eq!(bang.emitted.len(), 1);
+        assert_eq!(bang.emitted[0].node_id, "value_1");
+        assert_eq!(bang.emitted[0].port_id, "value");
+        assert_eq!(bang.emitted[0].value, ControlValue::F32(32.0));
+        assert_eq!(session.snapshot().session_revision, 3);
+
+        let input = session.apply_control_event(control_request("value_1", "in", f32_value(12.0)));
+        assert!(input.ok);
+        assert_eq!(input.emitted[0].value, ControlValue::F32(12.0));
+        assert_eq!(
+            session.control_state_response().values.get("value_1"),
+            Some(&ControlValue::F32(12.0))
+        );
+        assert_eq!(session.snapshot().session_revision, 4);
+    }
+
+    #[test]
+    fn invalid_control_event_does_not_mutate_state_or_revision() {
+        let mut session = RuntimeSession::default();
+        assert!(session.load_project(sample_project()).ok);
+        assert!(
+            session
+                .apply_control_event(control_request("value_1", "set", f32_value(32.0)))
+                .ok
+        );
+        let before = session.snapshot();
+
+        let response =
+            session.apply_control_event(control_request("value_1", "in", ControlValue::Bool(true)));
+
+        assert!(!response.ok);
+        assert!(response.emitted.is_empty());
+        assert_eq!(session.snapshot().session_revision, before.session_revision);
+        assert_eq!(
+            session.control_state_response().values.get("value_1"),
+            Some(&ControlValue::F32(32.0))
+        );
+    }
+
+    #[test]
+    fn graph_patch_rebuilds_control_state_from_graph_params() {
+        let mut session = RuntimeSession::default();
+        assert!(session.load_project(sample_project()).ok);
+        assert!(
+            session
+                .apply_control_event(control_request("value_1", "set", f32_value(32.0)))
+                .ok
+        );
+
+        let response = session.apply_patch(set_value_patch("1", 0.75));
+
+        assert!(response.ok);
+        assert_eq!(
+            session.control_state_response().values.get("value_1"),
+            Some(&ControlValue::F32(0.75))
+        );
+    }
+
+    #[test]
     fn preview_context_requires_loaded_project_and_plan() {
         let mut session = RuntimeSession::default();
 
@@ -755,6 +899,10 @@ mod tests {
         assert_eq!(context.graph_revision, "1");
         assert_eq!(context.session_revision, 1);
         assert_eq!(context.plan.graph_id, "minimal-value");
+        assert_eq!(
+            context.control_state.value_for_node("value_1"),
+            Some(&ControlValue::F32(0.0))
+        );
 
         session.plan = None;
         let missing_plan = session.preview_context();
@@ -818,6 +966,10 @@ mod tests {
         assert_eq!(
             response.graph.as_ref().unwrap().nodes[0].params["value"],
             Value::from(0.75)
+        );
+        assert_eq!(
+            session.control_state.value_for_node("value_1"),
+            Some(&ControlValue::F32(0.75))
         );
     }
 
@@ -1184,6 +1336,22 @@ mod tests {
         }))
     }
 
+    fn f32_value(value: f64) -> ControlValue {
+        ControlValue::F32(value)
+    }
+
+    fn control_request(
+        node_id: &str,
+        port_id: &str,
+        value: ControlValue,
+    ) -> RuntimeControlEventRequest {
+        RuntimeControlEventRequest {
+            node_id: node_id.to_owned(),
+            port_id: port_id.to_owned(),
+            value,
+        }
+    }
+
     fn duplicate_edge_patch() -> GraphPatch {
         graph_patch(json!({
           "schema": "skenion.graph.patch",
@@ -1270,19 +1438,14 @@ mod tests {
                 "kind": "core.value-f32",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": [
-                  { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
-                ]
+                "ports": value_f32_ports_json()
               },
               {
                 "id": "target_1",
                 "kind": "core.target",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": [
-                  { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                  { "id": "bang", "direction": "input", "type": { "flow": "event", "dataKind": "event.bang" }, "activation": "trigger" }
-                ]
+                "ports": target_ports_json()
               }
             ],
             "edges": [
@@ -1297,9 +1460,7 @@ mod tests {
               "version": "0.1.0",
               "displayName": "Float Value",
               "category": "Values",
-              "ports": [
-                { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
-              ],
+              "ports": value_f32_ports_json(),
               "execution": { "model": "value" },
               "state": { "persistent": false },
               "permissions": [],
@@ -1312,10 +1473,7 @@ mod tests {
               "version": "0.1.0",
               "displayName": "Target",
               "category": "Values",
-              "ports": [
-                { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                { "id": "bang", "direction": "input", "type": { "flow": "event", "dataKind": "event.bang" }, "activation": "trigger" }
-              ],
+              "ports": target_ports_json(),
               "execution": { "model": "value" },
               "state": { "persistent": false },
               "permissions": [],
@@ -1323,5 +1481,59 @@ mod tests {
             }
           ]
         })
+    }
+
+    fn value_f32_ports_json() -> Value {
+        json!([
+          {
+            "id": "in",
+            "direction": "input",
+            "label": "In",
+            "type": { "flow": "value", "dataKind": "number.f32" },
+            "required": false,
+            "activation": "trigger"
+          },
+          {
+            "id": "set",
+            "direction": "input",
+            "label": "Set",
+            "type": { "flow": "value", "dataKind": "number.f32" },
+            "required": false,
+            "activation": "latched"
+          },
+          {
+            "id": "bang",
+            "direction": "input",
+            "label": "Bang",
+            "type": { "flow": "event", "dataKind": "event.bang" },
+            "required": false,
+            "activation": "trigger"
+          },
+          {
+            "id": "value",
+            "direction": "output",
+            "label": "Value",
+            "type": { "flow": "value", "dataKind": "number.f32" }
+          }
+        ])
+    }
+
+    fn target_ports_json() -> Value {
+        json!([
+          {
+            "id": "value",
+            "direction": "input",
+            "label": "Value",
+            "type": { "flow": "value", "dataKind": "number.f32" },
+            "activation": "latched"
+          },
+          {
+            "id": "bang",
+            "direction": "input",
+            "label": "Bang",
+            "type": { "flow": "event", "dataKind": "event.bang" },
+            "activation": "trigger"
+          }
+        ])
     }
 }

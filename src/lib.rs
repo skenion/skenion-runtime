@@ -1,4 +1,6 @@
 mod contract;
+mod control_state;
+mod control_value;
 mod loader;
 mod planner;
 mod preview_manager;
@@ -22,6 +24,11 @@ pub use contract::{
     MergePolicyV02, NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState, NumberRange, Port,
     PortActivation, PortDirection, PortDirectionV02, PortRef, PortSpecV02, StringOrStrings,
 };
+pub use control_state::{
+    ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,
+    RuntimeControlStateResponse,
+};
+pub use control_value::ControlValue;
 pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
     ExecutionGroup, ExecutionPlan, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode,
