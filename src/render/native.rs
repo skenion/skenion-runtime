@@ -248,19 +248,31 @@ enum WgpuPreviewMode {
 struct SkenionFrameUniform {
     resolution: [f32; 2],
     time: f32,
-    u_value: f32,
     frame: u32,
-    _pad0: [u32; 3],
+    u_value: f32,
+    u_value2: f32,
+    _pad0: [f32; 2],
+    u_color: [f32; 4],
 }
 
 impl SkenionFrameUniform {
-    fn new(width: u32, height: u32, time: f32, u_value: f32, frame: u32) -> Self {
+    fn new(
+        width: u32,
+        height: u32,
+        time: f32,
+        frame: u32,
+        u_value: f32,
+        u_value2: f32,
+        u_color: [f32; 4],
+    ) -> Self {
         Self {
             resolution: [width as f32, height as f32],
             time,
-            u_value,
             frame,
-            _pad0: [0; 3],
+            u_value,
+            u_value2,
+            _pad0: [0.0; 2],
+            u_color,
         }
     }
 }
@@ -370,8 +382,10 @@ impl WgpuPreviewRenderer {
                     self.config.width,
                     self.config.height,
                     time,
-                    shader_u_value(scene),
                     frame_index,
+                    shader_u_value(scene),
+                    shader_u_value2(scene),
+                    shader_u_color(scene),
                 );
                 self.queue
                     .write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -421,7 +435,15 @@ impl WgpuPreviewMode {
         config: &wgpu::SurfaceConfiguration,
         source: &str,
     ) -> Result<Self, String> {
-        let uniform = SkenionFrameUniform::new(config.width, config.height, 0.0, 0.0, 0);
+        let uniform = SkenionFrameUniform::new(
+            config.width,
+            config.height,
+            0.0,
+            0,
+            0.0,
+            0.0,
+            [1.0, 1.0, 1.0, 1.0],
+        );
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("skenion-frame-uniform"),
             contents: bytemuck::bytes_of(&uniform),
@@ -517,6 +539,20 @@ fn shader_u_value(scene: &RenderScene) -> f32 {
     }
 }
 
+fn shader_u_value2(scene: &RenderScene) -> f32 {
+    match scene {
+        RenderScene::FullscreenShader(shader_scene) => shader_scene.u_value2,
+        RenderScene::ClearColor(_) => 0.0,
+    }
+}
+
+fn shader_u_color(scene: &RenderScene) -> [f32; 4] {
+    match scene {
+        RenderScene::FullscreenShader(shader_scene) => shader_scene.u_color,
+        RenderScene::ClearColor(_) => [1.0, 1.0, 1.0, 1.0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,14 +569,17 @@ mod tests {
 
     #[test]
     fn frame_uniform_uses_resolution_time_and_frame() {
-        let uniform = SkenionFrameUniform::new(960, 540, 1.25, 0.75, 12);
+        let uniform =
+            SkenionFrameUniform::new(960, 540, 1.25, 12, 0.75, 0.25, [1.0, 0.5, 0.25, 0.8]);
 
         assert_eq!(uniform.resolution, [960.0, 540.0]);
         assert_eq!(uniform.time, 1.25);
-        assert_eq!(uniform.u_value, 0.75);
         assert_eq!(uniform.frame, 12);
-        assert_eq!(uniform._pad0, [0; 3]);
-        assert_eq!(std::mem::size_of::<SkenionFrameUniform>(), 32);
+        assert_eq!(uniform.u_value, 0.75);
+        assert_eq!(uniform.u_value2, 0.25);
+        assert_eq!(uniform._pad0, [0.0; 2]);
+        assert_eq!(uniform.u_color, [1.0, 0.5, 0.25, 0.8]);
+        assert_eq!(std::mem::size_of::<SkenionFrameUniform>(), 48);
     }
 
     #[test]

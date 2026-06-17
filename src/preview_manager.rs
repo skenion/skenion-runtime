@@ -1056,7 +1056,20 @@ mod tests {
     }
 
     fn shader_source() -> &'static str {
-        r#"struct VertexOut {
+        r#"struct SkenionFrame {
+  resolution: vec2<f32>,
+  time: f32,
+  frame: u32,
+  u_value: f32,
+  u_value2: f32,
+  _pad0: vec2<f32>,
+  u_color: vec4<f32>,
+}
+
+@group(0) @binding(0)
+var<uniform> skenion: SkenionFrame;
+
+struct VertexOut {
   @builtin(position) position: vec4<f32>,
 }
 
@@ -1075,7 +1088,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-  return vec4<f32>(0.2, 0.3, 0.8, 1.0);
+  let mix_value = clamp(skenion.u_value, 0.0, 1.0);
+  let brightness = 0.25 + 0.75 * clamp(skenion.u_value2, 0.0, 1.0);
+  let animated = vec3<f32>(0.2 + mix_value * 0.8, 0.3, 1.0 - mix_value);
+  return vec4<f32>(mix(animated, skenion.u_color.rgb, mix_value) * brightness, skenion.u_color.a);
 }"#
     }
 

@@ -8,6 +8,7 @@ pub const RENDER_CLEAR_COLOR_KIND: &str = "render.clear-color";
 pub const RENDER_FULLSCREEN_SHADER_KIND: &str = "render.fullscreen-shader";
 pub const RENDER_OUTPUT_KIND: &str = "render.output";
 pub const DEFAULT_CLEAR_COLOR: [f64; 4] = [0.02, 0.02, 0.025, 1.0];
+pub const DEFAULT_SHADER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderScene {
@@ -27,6 +28,8 @@ pub struct FullscreenShaderScene {
     pub source: String,
     pub source_node_id: String,
     pub u_value: f32,
+    pub u_value2: f32,
+    pub u_color: [f32; 4],
     pub fallback_clear_color: [f64; 4],
 }
 
@@ -255,27 +258,19 @@ fn fullscreen_shader_scene_from_node(
         language,
         source: source.to_owned(),
         source_node_id: node.id.clone(),
-        u_value: fullscreen_shader_u_value(document, node),
+        u_value: fullscreen_shader_number_input(document, node, "u_value"),
+        u_value2: fullscreen_shader_number_input(document, node, "u_value2"),
+        u_color: fullscreen_shader_color_input(document, node, "u_color"),
         fallback_clear_color: DEFAULT_CLEAR_COLOR,
     }))
 }
 
-fn fullscreen_shader_u_value(document: &PreviewDocument, node: &GraphNode) -> f32 {
-    let Some(edge) = document
-        .graph
-        .edges
-        .iter()
-        .find(|edge| edge.to.node == node.id && edge.to.port == "u_value")
-    else {
-        return 0.0;
-    };
-
-    let Some(source_node) = document
-        .graph
-        .nodes
-        .iter()
-        .find(|candidate| candidate.id == edge.from.node)
-    else {
+fn fullscreen_shader_number_input(
+    document: &PreviewDocument,
+    node: &GraphNode,
+    port_id: &str,
+) -> f32 {
+    let Some(source_node) = fullscreen_shader_input_source(document, node, port_id) else {
         return 0.0;
     };
 
@@ -289,6 +284,44 @@ fn fullscreen_shader_u_value(document: &PreviewDocument, node: &GraphNode) -> f3
         .and_then(Value::as_f64)
         .unwrap_or(0.0)
         .clamp(0.0, 1.0) as f32
+}
+
+fn fullscreen_shader_color_input(
+    document: &PreviewDocument,
+    node: &GraphNode,
+    port_id: &str,
+) -> [f32; 4] {
+    let Some(source_node) = fullscreen_shader_input_source(document, node, port_id) else {
+        return DEFAULT_SHADER_COLOR;
+    };
+
+    if source_node.kind != "core.color-rgba" {
+        return DEFAULT_SHADER_COLOR;
+    }
+
+    let Some(color) = source_node.params.get("value").and_then(read_color) else {
+        return DEFAULT_SHADER_COLOR;
+    };
+
+    color.map(|component| component.clamp(0.0, 1.0) as f32)
+}
+
+fn fullscreen_shader_input_source<'a>(
+    document: &'a PreviewDocument,
+    node: &GraphNode,
+    port_id: &str,
+) -> Option<&'a GraphNode> {
+    let edge = document
+        .graph
+        .edges
+        .iter()
+        .find(|edge| edge.to.node == node.id && edge.to.port == port_id)?;
+
+    document
+        .graph
+        .nodes
+        .iter()
+        .find(|candidate| candidate.id == edge.from.node)
 }
 
 fn source_has_output_port(node: &GraphNode, port_id: &str) -> bool {
@@ -384,6 +417,8 @@ mod tests {
                 source: shader_source().to_owned(),
                 source_node_id: "shader_1".to_owned(),
                 u_value: 0.0,
+                u_value2: 0.0,
+                u_color: DEFAULT_SHADER_COLOR,
                 fallback_clear_color: DEFAULT_CLEAR_COLOR
             })
         );
@@ -543,6 +578,8 @@ mod tests {
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
 
         assert_eq!(shader_u_value(&scene), 0.0);
+        assert_eq!(shader_u_value2(&scene), 0.0);
+        assert_eq!(shader_u_color(&scene), DEFAULT_SHADER_COLOR);
     }
 
     #[test]
@@ -558,6 +595,36 @@ mod tests {
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
 
         assert_eq!(shader_u_value(&scene), 0.42);
+    }
+
+    #[test]
+    fn fullscreen_shader_reads_connected_second_value_node() {
+        let document = document_with_edges(
+            vec![
+                value_node_with_id_and_value("value_2", json!(0.73)),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("value_2", "value", "shader_1", "u_value2")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value2(&scene), 0.73);
+    }
+
+    #[test]
+    fn fullscreen_shader_reads_connected_color_node() {
+        let document = document_with_edges(
+            vec![
+                color_node_with_value(json!([1.2, 0.5, -0.25, 0.8])),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("color_1", "value", "shader_1", "u_color")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_color(&scene), [1.0, 0.5, 0.0, 0.8]);
     }
 
     #[test]
@@ -593,6 +660,21 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_shader_ignores_incompatible_u_color_source() {
+        let document = document_with_edges(
+            vec![
+                value_node_with_value(json!(0.42)),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("value_1", "value", "shader_1", "u_color")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_color(&scene), DEFAULT_SHADER_COLOR);
+    }
+
+    #[test]
     fn fullscreen_shader_defaults_u_value_for_missing_source_node() {
         let document = document_with_edges(
             vec![shader_node(json!("wgsl"), json!(shader_source()))],
@@ -602,6 +684,18 @@ mod tests {
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
 
         assert_eq!(shader_u_value(&scene), 0.0);
+    }
+
+    #[test]
+    fn fullscreen_shader_defaults_u_color_for_missing_source_node() {
+        let document = document_with_edges(
+            vec![shader_node(json!("wgsl"), json!(shader_source()))],
+            vec![edge("missing_color", "value", "shader_1", "u_color")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_color(&scene), DEFAULT_SHADER_COLOR);
     }
 
     #[test]
@@ -617,6 +711,27 @@ mod tests {
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
 
         assert_eq!(shader_u_value(&scene), 0.0);
+    }
+
+    #[test]
+    fn fullscreen_shader_defaults_u_color_for_invalid_value() {
+        for value in [
+            json!("not-a-color"),
+            json!([1.0, 0.5, 0.25]),
+            json!([1.0, false, 0.25, 1.0]),
+        ] {
+            let document = document_with_edges(
+                vec![
+                    color_node_with_value(value),
+                    shader_node(json!("wgsl"), json!(shader_source())),
+                ],
+                vec![edge("color_1", "value", "shader_1", "u_color")],
+            );
+
+            let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+            assert_eq!(shader_u_color(&scene), DEFAULT_SHADER_COLOR);
+        }
     }
 
     #[test]
@@ -643,6 +758,28 @@ mod tests {
         });
 
         let _ = shader_u_value(&scene);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected fullscreen shader scene")]
+    fn shader_u_value2_helper_rejects_non_shader_scene() {
+        let scene = RenderScene::ClearColor(ClearColorScene {
+            clear_color: DEFAULT_CLEAR_COLOR,
+            source_node_id: None,
+        });
+
+        let _ = shader_u_value2(&scene);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected fullscreen shader scene")]
+    fn shader_u_color_helper_rejects_non_shader_scene() {
+        let scene = RenderScene::ClearColor(ClearColorScene {
+            clear_color: DEFAULT_CLEAR_COLOR,
+            source_node_id: None,
+        });
+
+        let _ = shader_u_color(&scene);
     }
 
     #[test]
@@ -813,14 +950,25 @@ mod tests {
     }
 
     fn value_node_with_value(value: Value) -> GraphNode {
+        value_node_with_id_and_value("value_1", value)
+    }
+
+    fn value_node_with_id_and_value(id: &str, value: Value) -> GraphNode {
         let mut params = serde_json::Map::new();
         params.insert("value".to_owned(), value);
-        value_node_with_params(params)
+        value_node_with_id_and_params(id, params)
     }
 
     fn value_node_with_params(params: serde_json::Map<String, Value>) -> GraphNode {
+        value_node_with_id_and_params("value_1", params)
+    }
+
+    fn value_node_with_id_and_params(
+        id: &str,
+        params: serde_json::Map<String, Value>,
+    ) -> GraphNode {
         GraphNode {
-            id: "value_1".to_owned(),
+            id: id.to_owned(),
             kind: "core.value-f32".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
@@ -839,9 +987,46 @@ mod tests {
         }
     }
 
+    fn color_node_with_value(value: Value) -> GraphNode {
+        let mut params = serde_json::Map::new();
+        params.insert("value".to_owned(), value);
+        GraphNode {
+            id: "color_1".to_owned(),
+            kind: "core.color-rgba".to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: vec![
+                serde_json::from_value(json!({
+                    "id": "value",
+                    "direction": "output",
+                    "label": "Color",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "color.rgba"
+                    }
+                }))
+                .expect("valid color port"),
+            ],
+        }
+    }
+
     fn shader_u_value(scene: &RenderScene) -> f32 {
         match scene {
             RenderScene::FullscreenShader(shader) => shader.u_value,
+            _ => panic!("expected fullscreen shader scene"),
+        }
+    }
+
+    fn shader_u_value2(scene: &RenderScene) -> f32 {
+        match scene {
+            RenderScene::FullscreenShader(shader) => shader.u_value2,
+            _ => panic!("expected fullscreen shader scene"),
+        }
+    }
+
+    fn shader_u_color(scene: &RenderScene) -> [f32; 4] {
+        match scene {
+            RenderScene::FullscreenShader(shader) => shader.u_color,
             _ => panic!("expected fullscreen shader scene"),
         }
     }
@@ -890,7 +1075,20 @@ mod tests {
     }
 
     fn shader_source() -> &'static str {
-        r#"struct VertexOut {
+        r#"struct SkenionFrame {
+  resolution: vec2<f32>,
+  time: f32,
+  frame: u32,
+  u_value: f32,
+  u_value2: f32,
+  _pad0: vec2<f32>,
+  u_color: vec4<f32>,
+}
+
+@group(0) @binding(0)
+var<uniform> skenion: SkenionFrame;
+
+struct VertexOut {
   @builtin(position) position: vec4<f32>,
 }
 
@@ -909,7 +1107,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-  return vec4<f32>(0.2, 0.3, 0.8, 1.0);
+  let mix_value = clamp(skenion.u_value, 0.0, 1.0);
+  let brightness = 0.25 + 0.75 * clamp(skenion.u_value2, 0.0, 1.0);
+  let animated = vec3<f32>(0.2 + mix_value * 0.8, 0.3, 1.0 - mix_value);
+  return vec4<f32>(mix(animated, skenion.u_color.rgb, mix_value) * brightness, skenion.u_color.a);
 }"#
     }
 }
