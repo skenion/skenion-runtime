@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ExecutionPlan, GraphDocument};
+use crate::{ControlState, ExecutionPlan, GraphDocument};
 
 pub const PREVIEW_DOCUMENT_SCHEMA: &str = "skenion.preview.document";
 pub const PREVIEW_DOCUMENT_SCHEMA_VERSION: &str = "0.1.0";
@@ -18,16 +18,28 @@ pub struct PreviewDocument {
     pub schema_version: String,
     pub graph: GraphDocument,
     pub plan: ExecutionPlan,
+    pub control_state: ControlState,
     pub session_revision: u64,
 }
 
 impl PreviewDocument {
     pub fn new(graph: GraphDocument, plan: ExecutionPlan, session_revision: u64) -> Self {
+        let control_state = ControlState::from_graph(&graph);
+        Self::with_control_state(graph, plan, control_state, session_revision)
+    }
+
+    pub fn with_control_state(
+        graph: GraphDocument,
+        plan: ExecutionPlan,
+        control_state: ControlState,
+        session_revision: u64,
+    ) -> Self {
         Self {
             schema: PREVIEW_DOCUMENT_SCHEMA.to_owned(),
             schema_version: PREVIEW_DOCUMENT_SCHEMA_VERSION.to_owned(),
             graph,
             plan,
+            control_state,
             session_revision,
         }
     }
@@ -123,6 +135,7 @@ mod tests {
         assert_eq!(document.schema_version, PREVIEW_DOCUMENT_SCHEMA_VERSION);
         assert_eq!(document.graph.id, "render-graph");
         assert_eq!(document.plan.graph_id, "render-graph");
+        assert!(document.control_state.values.is_empty());
         assert_eq!(document.session_revision, 12);
     }
 

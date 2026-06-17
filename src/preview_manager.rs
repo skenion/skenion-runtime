@@ -6,8 +6,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ExecutionPlan, GraphDocument, PreviewDocument, RuntimeDiagnostic, RuntimeSessionSnapshot,
-    RuntimeTelemetrySnapshot,
+    ControlState, ExecutionPlan, GraphDocument, PreviewDocument, RuntimeDiagnostic,
+    RuntimeSessionSnapshot, RuntimeTelemetrySnapshot,
     render::{
         cleanup_stale_preview_temp_files, remove_preview_temp_file,
         render_scene_from_preview_document,
@@ -39,6 +39,7 @@ pub struct PreviewContext {
     pub session_revision: u64,
     pub graph: GraphDocument,
     pub plan: ExecutionPlan,
+    pub control_state: ControlState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,9 +186,10 @@ impl PreviewManager {
             document_path: None,
         };
 
-        let document = PreviewDocument::new(
+        let document = PreviewDocument::with_control_state(
             context.graph.clone(),
             context.plan.clone(),
+            context.control_state.clone(),
             context.session_revision,
         );
         let handle = if self.dry_run {
@@ -965,12 +967,15 @@ mod tests {
     }
 
     fn context(session_revision: u64) -> PreviewContext {
+        let graph = graph(&session_revision.to_string());
+        let control_state = ControlState::from_graph(&graph);
         PreviewContext {
             graph_id: "minimal-value".to_owned(),
             graph_revision: session_revision.to_string(),
             session_revision,
-            graph: graph(&session_revision.to_string()),
+            graph,
             plan: plan(&session_revision.to_string()),
+            control_state,
         }
     }
 

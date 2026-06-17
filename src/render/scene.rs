@@ -2,7 +2,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::render::PreviewDocument;
-use crate::{GraphNode, PortDirection};
+use crate::{ControlValue, GraphNode, PortDirection};
 
 pub const RENDER_CLEAR_COLOR_KIND: &str = "render.clear-color";
 pub const RENDER_FULLSCREEN_SHADER_KIND: &str = "render.fullscreen-shader";
@@ -270,20 +270,9 @@ fn fullscreen_shader_number_input(
     node: &GraphNode,
     port_id: &str,
 ) -> f32 {
-    let Some(source_node) = fullscreen_shader_input_source(document, node, port_id) else {
-        return 0.0;
-    };
-
-    if source_node.kind != "core.value-f32" {
-        return 0.0;
-    }
-
-    source_node
-        .params
-        .get("value")
-        .and_then(Value::as_f64)
+    resolve_control_value_at_input(document, &node.id, port_id)
+        .and_then(ControlValue::as_f32)
         .unwrap_or(0.0)
-        .clamp(0.0, 1.0) as f32
 }
 
 fn fullscreen_shader_color_input(
@@ -291,37 +280,33 @@ fn fullscreen_shader_color_input(
     node: &GraphNode,
     port_id: &str,
 ) -> [f32; 4] {
-    let Some(source_node) = fullscreen_shader_input_source(document, node, port_id) else {
-        return DEFAULT_SHADER_COLOR;
-    };
-
-    if source_node.kind != "core.color-rgba" {
-        return DEFAULT_SHADER_COLOR;
-    }
-
-    let Some(color) = source_node.params.get("value").and_then(read_color) else {
-        return DEFAULT_SHADER_COLOR;
-    };
-
-    color.map(|component| component.clamp(0.0, 1.0) as f32)
+    resolve_control_value_at_input(document, &node.id, port_id)
+        .and_then(ControlValue::as_rgba_f32)
+        .unwrap_or(DEFAULT_SHADER_COLOR)
 }
 
-fn fullscreen_shader_input_source<'a>(
+pub(crate) fn resolve_control_value_at_input<'a>(
     document: &'a PreviewDocument,
-    node: &GraphNode,
-    port_id: &str,
-) -> Option<&'a GraphNode> {
+    target_node_id: &str,
+    target_port_id: &str,
+) -> Option<&'a ControlValue> {
     let edge = document
         .graph
         .edges
         .iter()
-        .find(|edge| edge.to.node == node.id && edge.to.port == port_id)?;
+        .find(|edge| edge.to.node == target_node_id && edge.to.port == target_port_id)?;
 
-    document
+    if edge.from.port != "value" {
+        return None;
+    }
+
+    let source_node = document
         .graph
         .nodes
         .iter()
-        .find(|candidate| candidate.id == edge.from.node)
+        .find(|candidate| candidate.id == edge.from.node)?;
+
+    document.control_state.value_for_node(&source_node.id)
 }
 
 fn source_has_output_port(node: &GraphNode, port_id: &str) -> bool {
@@ -598,6 +583,25 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_shader_reads_runtime_control_state_instead_of_graph_params() {
+        let mut document = document_with_edges(
+            vec![
+                value_node_with_value(json!(0.42)),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("value_1", "value", "shader_1", "u_value")],
+        );
+        document
+            .control_state
+            .values
+            .insert("value_1".to_owned(), ControlValue::F32(2.5));
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(shader_u_value(&scene), 2.5);
+    }
+
+    #[test]
     fn fullscreen_shader_reads_connected_second_value_node() {
         let document = document_with_edges(
             vec![
@@ -628,8 +632,8 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_shader_clamps_connected_value_node() {
-        for (value, expected) in [(json!(-0.25), 0.0), (json!(1.25), 1.0)] {
+    fn fullscreen_shader_preserves_connected_f32_value_without_global_range_clamp() {
+        for (value, expected) in [(json!(-0.25), -0.25), (json!(1.25), 1.25)] {
             let document = document_with_edges(
                 vec![
                     value_node_with_value(value),
@@ -888,17 +892,20 @@ mod tests {
     }
 
     fn document_with_edges(nodes: Vec<GraphNode>, edges: Vec<Edge>) -> PreviewDocument {
+        let graph = GraphDocument {
+            schema: "skenion.graph".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: "render-graph".to_owned(),
+            revision: "1".to_owned(),
+            nodes,
+            edges,
+        };
+        let control_state = crate::ControlState::from_graph(&graph);
+
         PreviewDocument {
             schema: PREVIEW_DOCUMENT_SCHEMA.to_owned(),
             schema_version: PREVIEW_DOCUMENT_SCHEMA_VERSION.to_owned(),
-            graph: GraphDocument {
-                schema: "skenion.graph".to_owned(),
-                schema_version: "0.1.0".to_owned(),
-                id: "render-graph".to_owned(),
-                revision: "1".to_owned(),
-                nodes,
-                edges,
-            },
+            graph,
             plan: ExecutionPlan {
                 graph_id: "render-graph".to_owned(),
                 graph_revision: "1".to_owned(),
@@ -906,6 +913,7 @@ mod tests {
                 edges: Vec::new(),
                 groups: Vec::new(),
             },
+            control_state,
             session_revision: 1,
         }
     }
@@ -974,6 +982,42 @@ mod tests {
             params,
             ports: vec![
                 serde_json::from_value(json!({
+                    "id": "in",
+                    "direction": "input",
+                    "label": "In",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "number.f32"
+                    },
+                    "required": false,
+                    "activation": "trigger"
+                }))
+                .expect("valid value input port"),
+                serde_json::from_value(json!({
+                    "id": "set",
+                    "direction": "input",
+                    "label": "Set",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "number.f32"
+                    },
+                    "required": false,
+                    "activation": "latched"
+                }))
+                .expect("valid value set port"),
+                serde_json::from_value(json!({
+                    "id": "bang",
+                    "direction": "input",
+                    "label": "Bang",
+                    "type": {
+                        "flow": "event",
+                        "dataKind": "event.bang"
+                    },
+                    "required": false,
+                    "activation": "trigger"
+                }))
+                .expect("valid value bang port"),
+                serde_json::from_value(json!({
                     "id": "value",
                     "direction": "output",
                     "label": "Value",
@@ -996,6 +1040,42 @@ mod tests {
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
+                serde_json::from_value(json!({
+                    "id": "in",
+                    "direction": "input",
+                    "label": "In",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "color.rgba"
+                    },
+                    "required": false,
+                    "activation": "trigger"
+                }))
+                .expect("valid color input port"),
+                serde_json::from_value(json!({
+                    "id": "set",
+                    "direction": "input",
+                    "label": "Set",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "color.rgba"
+                    },
+                    "required": false,
+                    "activation": "latched"
+                }))
+                .expect("valid color set port"),
+                serde_json::from_value(json!({
+                    "id": "bang",
+                    "direction": "input",
+                    "label": "Bang",
+                    "type": {
+                        "flow": "event",
+                        "dataKind": "event.bang"
+                    },
+                    "required": false,
+                    "activation": "trigger"
+                }))
+                .expect("valid color bang port"),
                 serde_json::from_value(json!({
                     "id": "value",
                     "direction": "output",

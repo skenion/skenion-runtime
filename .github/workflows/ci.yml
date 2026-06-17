@@ -108,6 +108,7 @@ jobs:
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-telemetry.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-shader-uniform.sh
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-shader-multi-uniform.sh
+            SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-value-semantics.sh
             if [[ -x scripts/smoke-runtime-fullscreen-shader.sh ]]; then
               SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-fullscreen-shader.sh
             else
