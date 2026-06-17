@@ -7,6 +7,7 @@ pub use preview_document::{
     PREVIEW_DOCUMENT_SCHEMA, PREVIEW_DOCUMENT_SCHEMA_VERSION, PreviewDocument,
     write_preview_document,
 };
+pub(crate) use preview_document::{cleanup_stale_preview_temp_files, remove_preview_temp_file};
 pub use scene::{
     ClearColorScene, DEFAULT_CLEAR_COLOR, FullscreenShaderScene, RENDER_CLEAR_COLOR_KIND,
     RENDER_FULLSCREEN_SHADER_KIND, RENDER_OUTPUT_KIND, RenderScene, RenderSceneBuildError,
