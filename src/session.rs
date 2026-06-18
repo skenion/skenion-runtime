@@ -785,9 +785,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::{
-        ControlValue, GraphPatch, GraphPatchEventKind, NodeRegistry, ProjectRequest,
-        RuntimeControlEventRequest, RuntimeControlReadRequest, RuntimeControlReadTarget,
-        RuntimeDiagnostic,
+        ControlMessage, ControlValue, GraphPatch, GraphPatchEventKind, NodeRegistry,
+        ProjectRequest, RuntimeControlEmission, RuntimeControlEventRequest,
+        RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeDiagnostic,
     };
 
     use super::{HistoryEntry, RuntimeSession};
@@ -919,13 +919,15 @@ mod tests {
             Some(&ControlValue::F32(32.0))
         );
 
-        let bang =
-            session.apply_control_event(control_request("value_1", "bang", ControlValue::Bang));
+        let bang = session.apply_control_event(bang_control_request("value_1", "bang"));
         assert!(bang.ok);
         assert_eq!(bang.emitted.len(), 1);
         assert_eq!(bang.emitted[0].node_id, "value_1");
         assert_eq!(bang.emitted[0].port_id, "value");
-        assert_eq!(bang.emitted[0].value, ControlValue::F32(32.0));
+        assert_eq!(
+            emitted_value(&bang.emitted[0]),
+            Some(ControlValue::F32(32.0))
+        );
         assert!(!bang.changed);
         assert_eq!(session.snapshot().session_revision, 1);
         assert_eq!(session.snapshot().control_revision, 1);
@@ -934,7 +936,10 @@ mod tests {
         let input = session.apply_control_event(control_request("value_1", "in", f32_value(12.0)));
         assert!(input.ok);
         assert!(input.changed);
-        assert_eq!(input.emitted[0].value, ControlValue::F32(12.0));
+        assert_eq!(
+            emitted_value(&input.emitted[0]),
+            Some(ControlValue::F32(12.0))
+        );
         assert_eq!(
             session.control_state_response().values.get("value_1"),
             Some(&ControlValue::F32(12.0))
@@ -956,13 +961,16 @@ mod tests {
         assert!(response.ok);
         assert_eq!(response.emitted[0].node_id, "value_1");
         assert_eq!(response.emitted[0].port_id, "value");
-        assert_eq!(response.emitted[0].value, ControlValue::F32(1.5));
+        assert_eq!(
+            emitted_value(&response.emitted[0]),
+            Some(ControlValue::F32(1.5))
+        );
         assert_eq!(
             session
                 .control_state_response()
                 .channels
                 .get("number.f32:speed"),
-            Some(&ControlValue::F32(1.5))
+            Some(&ControlMessage::from_value(ControlValue::F32(1.5)))
         );
     }
 
@@ -1599,8 +1607,20 @@ mod tests {
         RuntimeControlEventRequest {
             node_id: node_id.to_owned(),
             port_id: port_id.to_owned(),
-            value,
+            message: ControlMessage::from_value(value),
         }
+    }
+
+    fn bang_control_request(node_id: &str, port_id: &str) -> RuntimeControlEventRequest {
+        RuntimeControlEventRequest {
+            node_id: node_id.to_owned(),
+            port_id: port_id.to_owned(),
+            message: ControlMessage::bang(),
+        }
+    }
+
+    fn emitted_value(emission: &RuntimeControlEmission) -> Option<ControlValue> {
+        emission.message.first_atom().cloned()
     }
 
     fn control_read(

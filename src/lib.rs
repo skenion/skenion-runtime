@@ -32,7 +32,7 @@ pub use control_state::{
     RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlReadTarget,
     RuntimeControlStateResponse, read_graph_param, read_graph_port,
 };
-pub use control_value::ControlValue;
+pub use control_value::{ControlMessage, ControlValue};
 pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
     ExecutionGroup, ExecutionPlan, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode,

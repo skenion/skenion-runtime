@@ -677,9 +677,10 @@ mod tests {
         let mut manager = PreviewManager::dry_run();
         manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
         let mut control_state = ControlState::default();
-        control_state
-            .channels
-            .insert("number.f32:speed".to_owned(), crate::ControlValue::F32(0.8));
+        control_state.channels.insert(
+            "number.f32:speed".to_owned(),
+            crate::ControlMessage::from_value(crate::ControlValue::F32(0.8)),
+        );
         let snapshot = PreviewControlStateSnapshot::new(1, 3, &control_state);
 
         manager

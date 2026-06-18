@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ControlState, ControlValue, telemetry::unix_ms_timestamp};
+use crate::{ControlMessage, ControlState, ControlValue, telemetry::unix_ms_timestamp};
 
 pub const PREVIEW_CONTROL_STATE_SCHEMA: &str = "skenion.preview.control-state";
 pub const PREVIEW_CONTROL_STATE_SCHEMA_VERSION: &str = "0.1.0";
@@ -20,7 +20,7 @@ pub struct PreviewControlStateSnapshot {
     pub session_revision: u64,
     pub control_revision: u64,
     pub values: std::collections::BTreeMap<String, ControlValue>,
-    pub channels: std::collections::BTreeMap<String, ControlValue>,
+    pub channels: std::collections::BTreeMap<String, ControlMessage>,
     pub written_at: String,
 }
 
@@ -109,9 +109,10 @@ mod tests {
         control_state
             .values
             .insert("slider_1".to_owned(), ControlValue::F32(0.75));
-        control_state
-            .channels
-            .insert("number.f32:speed".to_owned(), ControlValue::F32(0.75));
+        control_state.channels.insert(
+            "number.f32:speed".to_owned(),
+            ControlMessage::from_value(ControlValue::F32(0.75)),
+        );
         let snapshot = PreviewControlStateSnapshot::new(12, 5, &control_state);
         let bytes = serde_json::to_vec(&snapshot).expect("snapshot should serialize");
         let decoded: PreviewControlStateSnapshot =
@@ -131,9 +132,10 @@ mod tests {
             std::process::id()
         ));
         let mut control_state = ControlState::default();
-        control_state
-            .channels
-            .insert("boolean:enabled".to_owned(), ControlValue::Bool(true));
+        control_state.channels.insert(
+            "boolean:enabled".to_owned(),
+            ControlMessage::from_value(ControlValue::Bool(true)),
+        );
         let snapshot = PreviewControlStateSnapshot::new(3, 2, &control_state);
 
         write_preview_control_state_snapshot(&path, &snapshot).expect("snapshot should write");

@@ -222,6 +222,7 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.control.state",
             "session.control.read",
             "session.control.channels",
+            "session.control.messages",
             "session.preview.controlState",
             "session.preview.status",
             "session.preview.start",
@@ -1075,6 +1076,7 @@ mod tests {
             "session.control.event",
             "session.control.state",
             "session.control.channels",
+            "session.control.messages",
             "assets.import",
             "assets.list",
             "assets.get",
@@ -1904,7 +1906,11 @@ mod tests {
         let set = post_json_with(
             app.clone(),
             "/v0/session/control/event",
-            json!({ "nodeId": "value_1", "portId": "set", "value": { "type": "f32", "value": 32.0 } }),
+            json!({
+                "nodeId": "value_1",
+                "portId": "set",
+                "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 32.0 }] }
+            }),
         )
         .await;
         assert_eq!(set["ok"], true);
@@ -1913,25 +1919,29 @@ mod tests {
         let bang = post_json_with(
             app.clone(),
             "/v0/session/control/event",
-            json!({ "nodeId": "value_1", "portId": "bang", "value": { "type": "bang" } }),
+            json!({ "nodeId": "value_1", "portId": "bang", "message": { "selector": "bang", "atoms": [] } }),
         )
         .await;
         assert_eq!(bang["ok"], true);
         assert_eq!(
             bang["emitted"],
-            json!([{ "nodeId": "value_1", "portId": "value", "value": { "type": "f32", "value": 32.0 } }])
+            json!([{ "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 32.0 }] } }])
         );
 
         let input = post_json_with(
             app.clone(),
             "/v0/session/control/event",
-            json!({ "nodeId": "value_1", "portId": "in", "value": { "type": "f32", "value": 12.0 } }),
+            json!({
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 12.0 }] }
+            }),
         )
         .await;
         assert_eq!(input["ok"], true);
         assert_eq!(
             input["emitted"],
-            json!([{ "nodeId": "value_1", "portId": "value", "value": { "type": "f32", "value": 12.0 } }])
+            json!([{ "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 12.0 }] } }])
         );
 
         let state = get_json_with(app.clone(), "/v0/session/control/state").await;
@@ -1962,7 +1972,11 @@ mod tests {
         let wrong_type = post_json_with(
             app,
             "/v0/session/control/event",
-            json!({ "nodeId": "value_1", "portId": "in", "value": { "type": "bool", "value": true } }),
+            json!({
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": { "selector": "bool", "atoms": [{ "type": "bool", "value": true }] }
+            }),
         )
         .await;
         assert_eq!(wrong_type["ok"], false);
@@ -2004,7 +2018,11 @@ mod tests {
         let response = post_json_with(
             app,
             "/v0/session/control/event",
-            json!({ "nodeId": "value_1", "portId": "set", "value": { "type": "f32", "value": 2.0 } }),
+            json!({
+                "nodeId": "value_1",
+                "portId": "set",
+                "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 2.0 }] }
+            }),
         )
         .await;
 
@@ -2026,7 +2044,11 @@ mod tests {
         let event = post_json_with(
             app.clone(),
             "/v0/session/control/event",
-            json!({ "nodeId": "value_1", "portId": "set", "value": { "type": "f32", "value": 1.0 } }),
+            json!({
+                "nodeId": "value_1",
+                "portId": "set",
+                "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 1.0 }] }
+            }),
         )
         .await;
         let state = get_json_with(app, "/v0/session/control/state").await;
