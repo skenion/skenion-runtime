@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.21.0...skenion-runtime-v0.22.0) (2026-06-18)
+
+
+### Features
+
+* **runtime:** route runtime control messages ([4e414a1](https://github.com/echovisionlab/skenion-runtime/commit/4e414a188f1ace3803c4d516a41d075ab9b9e757))
+
 ## [0.21.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.20.0...skenion-runtime-v0.21.0) (2026-06-18)
 
 
