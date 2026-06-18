@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.20.0...skenion-runtime-v0.21.0) (2026-06-18)
+
+
+### Features
+
+* **runtime:** route object-owned control channels ([#52](https://github.com/echovisionlab/skenion-runtime/issues/52)) ([885ba68](https://github.com/echovisionlab/skenion-runtime/commit/885ba682392d31a081aa5aae5f4486c675ec5eef))
+
 ## [0.20.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.19.0...skenion-runtime-v0.20.0) (2026-06-17)
 
 
