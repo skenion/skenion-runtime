@@ -292,6 +292,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_formats_control_message_text() {
+        assert_eq!(
+            ControlMessage::parse_text("   "),
+            ControlMessage {
+                selector: "symbol".to_owned(),
+                atoms: vec![ControlValue::String(String::new())]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("route 1 on label"),
+            ControlMessage {
+                selector: "route".to_owned(),
+                atoms: vec![
+                    ControlValue::I32(1),
+                    ControlValue::Bool(true),
+                    ControlValue::String("label".to_owned())
+                ]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("set"),
+            ControlMessage {
+                selector: "set".to_owned(),
+                atoms: Vec::new()
+            }
+        );
+        assert_eq!(ControlMessage::bang().to_text(), "bang");
+        assert_eq!(
+            ControlMessage::from_value(ControlValue::String("ready".to_owned())).to_text(),
+            "symbol ready"
+        );
+        assert_eq!(
+            ControlMessage::from_value(ControlValue::Rgba([1.0, 0.5, 0.25, 1.0])).to_text(),
+            "rgba rgba 1 0.5 0.25 1"
+        );
+    }
+
+    #[test]
     fn derives_default_value_from_graph_node_params() {
         assert_eq!(
             ControlValue::for_node_default(&node(VALUE_F32_KIND, json!(1.5))),

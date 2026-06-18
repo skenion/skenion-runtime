@@ -1433,7 +1433,80 @@ mod tests {
             ControlMessage::from_value(ControlValue::Rgba([1.0, 0.5, 0.0, 1.0])).to_text(),
             "rgba rgba 1 0.5 0 1"
         );
+        let selector_only = ControlMessage {
+            selector: "clear".to_owned(),
+            atoms: Vec::new(),
+        };
+        assert_eq!(data_kind_for_control_message(&selector_only), "message.any");
+        assert_eq!(set_message_text(&selector_only), "clear");
+        assert_eq!(
+            set_message_text(&ControlMessage {
+                selector: "set".to_owned(),
+                atoms: vec![
+                    ControlValue::F32(1.5),
+                    ControlValue::I32(2),
+                    ControlValue::Bool(true),
+                    ControlValue::Bool(false),
+                    ControlValue::String("label".to_owned()),
+                    ControlValue::Rgba([1.0, 0.5, 0.0, 1.0])
+                ]
+            }),
+            "1.5 2 on off label rgba 1 0.5 0 1"
+        );
         assert_eq!(silent_set_message(&ControlMessage::bang()), None);
+        assert_eq!(
+            value_from_message(
+                &ControlMessage::from_value(ControlValue::I32(3)),
+                &ControlValue::F32(0.0)
+            ),
+            Some(ControlValue::F32(3.0))
+        );
+        assert_eq!(
+            value_from_message(
+                &ControlMessage::from_value(ControlValue::F32(3.0)),
+                &ControlValue::I32(0)
+            ),
+            None
+        );
+        assert_eq!(
+            value_from_message(
+                &ControlMessage::parse_text("on"),
+                &ControlValue::Bool(false)
+            ),
+            Some(ControlValue::Bool(true))
+        );
+        assert_eq!(
+            value_from_message(
+                &ControlMessage::from_value(ControlValue::String("direct".to_owned())),
+                &ControlValue::String(String::new())
+            ),
+            Some(ControlValue::String("direct".to_owned()))
+        );
+        assert_eq!(
+            value_from_message(
+                &ControlMessage::parse_text("route 1"),
+                &ControlValue::String(String::new())
+            ),
+            Some(ControlValue::String("route 1".to_owned()))
+        );
+        assert_eq!(
+            value_from_message(
+                &ControlMessage::from_value(ControlValue::Rgba([0.1, 0.2, 0.3, 1.0])),
+                &ControlValue::Rgba([1.0, 1.0, 1.0, 1.0])
+            ),
+            Some(ControlValue::Rgba([0.1, 0.2, 0.3, 1.0]))
+        );
+        assert_eq!(
+            value_from_message(
+                &ControlMessage::from_value(ControlValue::F32(0.5)),
+                &ControlValue::Rgba([1.0, 1.0, 1.0, 1.0])
+            ),
+            None
+        );
+        assert_eq!(
+            message_from_message_node_state(&ControlValue::F32(2.0)),
+            ControlMessage::from_value(ControlValue::F32(2.0))
+        );
         assert_eq!(
             coerce_toggle_input(&ControlMessage::parse_text("0"), true),
             Some(false)
@@ -1452,6 +1525,36 @@ mod tests {
         );
         assert_eq!(
             coerce_toggle_input(&ControlMessage::parse_text("maybe"), false),
+            None
+        );
+        assert_eq!(
+            coerce_toggle_input(
+                &ControlMessage {
+                    selector: "0".to_owned(),
+                    atoms: Vec::new()
+                },
+                true
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            coerce_toggle_input(
+                &ControlMessage {
+                    selector: "1".to_owned(),
+                    atoms: Vec::new()
+                },
+                false
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            coerce_toggle_input(
+                &ControlMessage {
+                    selector: "pulse".to_owned(),
+                    atoms: Vec::new()
+                },
+                false
+            ),
             None
         );
 
