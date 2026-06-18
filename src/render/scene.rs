@@ -45,6 +45,7 @@ pub struct ShaderUniformBinding {
 pub enum ShaderUniformValue {
     F32(f32),
     I32(i32),
+    U32(u32),
     Bool(bool),
     ColorRgba([f32; 4]),
 }
@@ -439,34 +440,35 @@ fn shader_uniform_value(
 ) -> ShaderUniformValue {
     let connected = resolve_control_value_at_input(document, &node.id, &uniform.id);
     match uniform.data_type.data_kind.as_str() {
-        "number.f32" => connected
+        "number.float" => connected
             .as_ref()
             .and_then(ControlValue::as_f32)
             .map_or_else(
                 || ShaderUniformValue::F32(default_f32(&uniform.default)),
                 ShaderUniformValue::F32,
             ),
-        "number.i32" => connected
+        "number.int" => connected
             .as_ref()
-            .and_then(|value| match value {
-                ControlValue::I32(value) => Some(*value as i32),
-                _ => None,
-            })
+            .and_then(ControlValue::as_i32)
             .map_or_else(
                 || ShaderUniformValue::I32(default_i32(&uniform.default)),
                 ShaderUniformValue::I32,
             ),
+        "number.uint" => connected
+            .as_ref()
+            .and_then(ControlValue::as_u32)
+            .map_or_else(
+                || ShaderUniformValue::U32(default_u32(&uniform.default)),
+                ShaderUniformValue::U32,
+            ),
         "boolean" => connected
             .as_ref()
-            .and_then(|value| match value {
-                ControlValue::Bool(value) => Some(*value),
-                _ => None,
-            })
+            .and_then(ControlValue::as_bool)
             .map_or_else(
                 || ShaderUniformValue::Bool(default_bool(&uniform.default)),
                 ShaderUniformValue::Bool,
             ),
-        "color.rgba" => connected
+        "color" => connected
             .as_ref()
             .and_then(ControlValue::as_rgba_f32)
             .map_or_else(
@@ -489,6 +491,14 @@ fn default_i32(value: &Option<serde_json::Value>) -> i32 {
         .as_ref()
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0) as i32
+}
+
+fn default_u32(value: &Option<serde_json::Value>) -> u32 {
+    value
+        .as_ref()
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32
 }
 
 fn default_bool(value: &Option<serde_json::Value>) -> bool {
@@ -959,7 +969,7 @@ mod tests {
         document
             .control_state
             .values
-            .insert("value_1".to_owned(), ControlValue::F32(2.5));
+            .insert("value_1".to_owned(), ControlValue::float(2.5));
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
 
@@ -1253,7 +1263,7 @@ mod tests {
             RenderSceneBuildError::UnsupportedRenderOutputSource {
                 output_node_id: "output_1".to_owned(),
                 source_node_id: "value_1".to_owned(),
-                source_kind: "core.value-f32".to_owned()
+                source_kind: "core.float".to_owned()
             }
         );
     }
@@ -1343,7 +1353,7 @@ mod tests {
                 RenderSceneBuildError::UnsupportedRenderOutputSource {
                     output_node_id: "output_1".to_owned(),
                     source_node_id: "value_1".to_owned(),
-                    source_kind: "core.value-f32".to_owned(),
+                    source_kind: "core.float".to_owned(),
                 },
                 "unsupported-render-output-source",
                 ShaderDiagnosticPhase::RenderPipeline,
@@ -1499,7 +1509,7 @@ mod tests {
     ) -> GraphNode {
         GraphNode {
             id: id.to_owned(),
-            kind: "core.value-f32".to_owned(),
+            kind: "core.float".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
@@ -1509,7 +1519,7 @@ mod tests {
                     "label": "In",
                     "type": {
                         "flow": "value",
-                        "dataKind": "number.f32"
+                        "dataKind": "number.float"
                     },
                     "required": false,
                     "activation": "trigger"
@@ -1521,7 +1531,7 @@ mod tests {
                     "label": "Set",
                     "type": {
                         "flow": "value",
-                        "dataKind": "number.f32"
+                        "dataKind": "number.float"
                     },
                     "required": false,
                     "activation": "latched"
@@ -1545,7 +1555,7 @@ mod tests {
                     "label": "Value",
                     "type": {
                         "flow": "value",
-                        "dataKind": "number.f32"
+                        "dataKind": "number.float"
                     }
                 }))
                 .expect("valid value port"),
@@ -1558,7 +1568,7 @@ mod tests {
         params.insert("value".to_owned(), json!(value));
         GraphNode {
             id: id.to_owned(),
-            kind: "core.value-i32".to_owned(),
+            kind: "core.int".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
@@ -1568,7 +1578,7 @@ mod tests {
                     "label": "Value",
                     "type": {
                         "flow": "value",
-                        "dataKind": "number.i32"
+                        "dataKind": "number.int"
                     }
                 }))
                 .expect("valid i32 value port"),
@@ -1581,7 +1591,7 @@ mod tests {
         params.insert("value".to_owned(), json!(value));
         GraphNode {
             id: id.to_owned(),
-            kind: "core.value-bool".to_owned(),
+            kind: "core.bool".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
@@ -1604,7 +1614,7 @@ mod tests {
         params.insert("value".to_owned(), value);
         GraphNode {
             id: "color_1".to_owned(),
-            kind: "core.color-rgba".to_owned(),
+            kind: "core.color".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
@@ -1614,7 +1624,7 @@ mod tests {
                     "label": "In",
                     "type": {
                         "flow": "value",
-                        "dataKind": "color.rgba"
+                        "dataKind": "color"
                     },
                     "required": false,
                     "activation": "trigger"
@@ -1626,7 +1636,7 @@ mod tests {
                     "label": "Set",
                     "type": {
                         "flow": "value",
-                        "dataKind": "color.rgba"
+                        "dataKind": "color"
                     },
                     "required": false,
                     "activation": "latched"
@@ -1650,7 +1660,7 @@ mod tests {
                     "label": "Color",
                     "type": {
                         "flow": "value",
-                        "dataKind": "color.rgba"
+                        "dataKind": "color"
                     }
                 }))
                 .expect("valid color port"),
@@ -1750,9 +1760,9 @@ mod tests {
     }
 
     fn shader_source() -> &'static str {
-        r#"// @skenion.uniform speed number.f32 default=0 min=0 max=1 step=0.01
-// @skenion.uniform phase number.f32 default=0 min=0 max=1 step=0.01
-// @skenion.uniform tint color.rgba default=[1,1,1,1]
+        r#"// @skenion.uniform speed number.float default=0 min=0 max=1 step=0.01
+// @skenion.uniform phase number.float default=0 min=0 max=1 step=0.01
+// @skenion.uniform tint color default=[1,1,1,1]
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
   let mix_value = clamp(skenion.speed, 0.0, 1.0);
@@ -1763,7 +1773,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
 
     fn typed_shader_source() -> &'static str {
-        r#"// @skenion.uniform iterations number.i32 default=8
+        r#"// @skenion.uniform iterations number.int default=8
 // @skenion.uniform enabled boolean default=true
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {

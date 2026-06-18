@@ -678,8 +678,8 @@ mod tests {
         manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
         let mut control_state = ControlState::default();
         control_state.channels.insert(
-            "number.f32:speed".to_owned(),
-            crate::ControlMessage::from_value(crate::ControlValue::F32(0.8)),
+            "number.float:speed".to_owned(),
+            crate::ControlMessage::from_value(crate::ControlValue::float(0.8)),
         );
         let snapshot = PreviewControlStateSnapshot::new(1, 3, &control_state);
 
@@ -1234,7 +1234,7 @@ mod tests {
             revision: graph_revision.to_owned(),
             nodes: vec![GraphNode {
                 id: "value_1".to_owned(),
-                kind: "core.value-f32".to_owned(),
+                kind: "core.float".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 params: serde_json::Map::new(),
                 ports: Vec::new(),
@@ -1249,7 +1249,7 @@ mod tests {
             graph_revision: graph_revision.to_owned(),
             nodes: vec![PlanNode {
                 node_id: "value_1".to_owned(),
-                kind: "core.value-f32".to_owned(),
+                kind: "core.float".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 execution_model: ExecutionModel::Value,
                 order: 0,
@@ -1308,7 +1308,7 @@ mod tests {
     }
 
     fn shader_source() -> &'static str {
-        r#"// @skenion.uniform speed number.f32 default=0.5
+        r#"// @skenion.uniform speed number.float default=0.5
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
   return vec4<f32>(skenion.speed, 0.2, 1.0 - skenion.speed, 1.0);

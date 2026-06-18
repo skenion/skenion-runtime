@@ -1909,7 +1909,7 @@ mod tests {
             json!({
                 "nodeId": "value_1",
                 "portId": "set",
-                "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 32.0 }] }
+                "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 32.0 }] }
             }),
         )
         .await;
@@ -1925,7 +1925,7 @@ mod tests {
         assert_eq!(bang["ok"], true);
         assert_eq!(
             bang["emitted"],
-            json!([{ "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 32.0 }] } }])
+            json!([{ "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 32.0 }] } }])
         );
 
         let input = post_json_with(
@@ -1934,21 +1934,21 @@ mod tests {
             json!({
                 "nodeId": "value_1",
                 "portId": "in",
-                "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 12.0 }] }
+                "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 12.0 }] }
             }),
         )
         .await;
         assert_eq!(input["ok"], true);
         assert_eq!(
             input["emitted"],
-            json!([{ "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 12.0 }] } }])
+            json!([{ "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 12.0 }] } }])
         );
 
         let state = get_json_with(app.clone(), "/v0/session/control/state").await;
         assert_eq!(state["ok"], true);
         assert_eq!(
             state["values"]["value_1"],
-            json!({ "type": "f32", "value": 12.0 })
+            json!({ "type": "float", "representation": "f32", "value": 12.0 })
         );
 
         let state_read = post_json_with(
@@ -1958,7 +1958,10 @@ mod tests {
         )
         .await;
         assert_eq!(state_read["ok"], true);
-        assert_eq!(state_read["value"], json!({ "type": "f32", "value": 12.0 }));
+        assert_eq!(
+            state_read["value"],
+            json!({ "type": "float", "representation": "f32", "value": 12.0 })
+        );
 
         let port_read = post_json_with(
             app.clone(),
@@ -1985,7 +1988,7 @@ mod tests {
             wrong_type["diagnostics"][0]["message"]
                 .as_str()
                 .unwrap()
-                .contains("expects f32")
+                .contains("expects number.float")
         );
     }
 
@@ -2021,7 +2024,7 @@ mod tests {
             json!({
                 "nodeId": "value_1",
                 "portId": "set",
-                "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 2.0 }] }
+                "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 2.0 }] }
             }),
         )
         .await;
@@ -2047,7 +2050,7 @@ mod tests {
             json!({
                 "nodeId": "value_1",
                 "portId": "set",
-                "message": { "selector": "float", "atoms": [{ "type": "f32", "value": 1.0 }] }
+                "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 1.0 }] }
             }),
         )
         .await;
@@ -2291,7 +2294,6 @@ mod tests {
         post_json_with(app.clone(), "/v0/session/load", sample_shader_project()).await;
 
         let response = get_json_with(app, "/v0/session/render/generated-shader").await;
-
         assert_eq!(response["ok"], true);
         assert_eq!(response["nodeId"], "shader_1");
         assert_eq!(response["language"], "wgsl");
@@ -2486,7 +2488,7 @@ mod tests {
             "nodes": [
               {
                 "id": "value_1",
-                "kind": "core.value-f32",
+                "kind": "core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_json()
@@ -2507,7 +2509,7 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.value-f32",
+              "id": "core.float",
               "version": "0.1.0",
               "displayName": "Float Value",
               "category": "Values",
@@ -2540,7 +2542,7 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": { "flow": "value", "dataKind": "number.f32" },
+            "type": { "flow": "value", "dataKind": "number.float" },
             "required": false,
             "activation": "trigger"
           },
@@ -2548,7 +2550,7 @@ mod tests {
             "id": "set",
             "direction": "input",
             "label": "Set",
-            "type": { "flow": "value", "dataKind": "number.f32" },
+            "type": { "flow": "value", "dataKind": "number.float" },
             "required": false,
             "activation": "latched"
           },
@@ -2564,7 +2566,7 @@ mod tests {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.f32" }
+            "type": { "flow": "value", "dataKind": "number.float" }
           }
         ])
     }
@@ -2575,7 +2577,7 @@ mod tests {
             "id": "value",
             "direction": "input",
             "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.f32" },
+            "type": { "flow": "value", "dataKind": "number.float" },
             "activation": "latched"
           }
         ])
@@ -2595,14 +2597,14 @@ mod tests {
                 "kindVersion": "0.1.0",
                 "params": {
                   "language": "wgsl",
-                  "source": "// @skenion.uniform speed number.f32 default=0.5\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(skenion.speed, 0.0, 1.0, 1.0); }"
+                  "source": "// @skenion.uniform speed number.float default=0.5\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(skenion.speed, 0.0, 1.0, 1.0); }"
                 },
                 "ports": [
                   {
                     "id": "speed",
                     "direction": "input",
                     "label": "Speed",
-                    "type": { "flow": "value", "dataKind": "number.f32" },
+                    "type": { "flow": "value", "dataKind": "number.float", "format": "f32" },
                     "required": false,
                     "default": 0.5,
                     "activation": "latched"

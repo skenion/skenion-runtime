@@ -241,7 +241,7 @@ fn allows_dynamic_shader_input(node: &GraphNode, definition: &NodeDefinition, po
         && port.data_type.flow == DataFlow::Value
         && matches!(
             port.data_type.data_kind.as_str(),
-            "number.f32" | "number.i32" | "boolean" | "color.rgba"
+            "number.float" | "number.int" | "boolean" | "color"
         )
 }
 
@@ -336,7 +336,7 @@ mod tests {
           "displayName": "Source",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
           ],
           "execution": { "model": "value" },
           "state": { "persistent": false },
@@ -354,7 +354,7 @@ mod tests {
           "displayName": "Target",
           "category": "Core",
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" }
+            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" }
           ],
           "execution": { "model": "value" },
           "state": { "persistent": false },
@@ -376,7 +376,7 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             },
             {
@@ -385,7 +385,7 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" }
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" }
               ]
             }
           ],
@@ -417,7 +417,7 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             },
             {
@@ -426,7 +426,7 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             }
           ],
@@ -452,8 +452,8 @@ mod tests {
           "displayName": "Snapshot",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32", "range": { "min": 0, "max": 1 } } },
-            { "id": "unused", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float", "range": { "min": 0, "max": 1 } } },
+            { "id": "unused", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
           ],
           "execution": { "model": "value" },
           "state": { "persistent": false },
@@ -473,7 +473,7 @@ mod tests {
               "params": {},
               "ports": [
                 { "id": "out", "direction": "input", "type": { "flow": "event", "dataKind": "event.bang" }, "activation": "trigger" },
-                { "id": "ghost", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "ghost", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             }
           ],
@@ -486,9 +486,9 @@ mod tests {
         assert!(display.contains("port snapshot references missing manifest port: node.ghost"));
         assert!(display.contains("direction Input != definition direction Output"));
         assert!(display.contains("flow Event != definition flow Value"));
-        assert!(display.contains("dataKind event.bang != definition dataKind number.f32"));
+        assert!(display.contains("dataKind event.bang != definition dataKind number.float"));
         assert!(display.contains(
-            "event<event.bang> is not compatible with definition type value<number.f32>"
+            "event<event.bang> is not compatible with definition type value<number.float>"
         ));
     }
 
@@ -521,7 +521,7 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "speed", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
+                { "id": "speed", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
                 { "id": "enabled", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
                 { "id": "out", "direction": "output", "type": { "flow": "resource", "dataKind": "gpu.texture2d", "format": "rgba8unorm", "colorSpace": "srgb" } }
               ]
@@ -544,8 +544,8 @@ mod tests {
           "displayName": "Edge Source",
           "category": "Core",
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
           ],
           "execution": { "model": "value" },
           "state": { "persistent": false },
@@ -561,7 +561,7 @@ mod tests {
           "category": "Core",
           "ports": [
             { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
           ],
           "execution": { "model": "value" },
           "state": { "persistent": false },
@@ -580,8 +580,8 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             },
             {
@@ -591,7 +591,7 @@ mod tests {
               "params": {},
               "ports": [
                 { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             }
           ],
@@ -614,7 +614,7 @@ mod tests {
         assert!(display.contains("edge source source:in is not an output port"));
         assert!(display.contains("edge target target:out is not an input port"));
         assert!(display.contains(
-            "incompatible edge source:out value<number.f32> -> target:in value<boolean>"
+            "incompatible edge source:out value<number.float> -> target:in value<boolean>"
         ));
     }
 
@@ -632,8 +632,8 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             },
             {
@@ -642,8 +642,8 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             }
           ],
@@ -660,8 +660,8 @@ mod tests {
           "displayName": "Target",
           "category": "Core",
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
           ],
           "execution": { "model": "value" },
           "state": { "persistent": false },

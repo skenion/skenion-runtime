@@ -1,6 +1,7 @@
 mod contract;
 mod control_state;
 mod control_value;
+mod conversion;
 mod loader;
 mod planner;
 mod preview_control_state;
@@ -33,6 +34,7 @@ pub use control_state::{
     RuntimeControlStateResponse, read_graph_param, read_graph_port,
 };
 pub use control_value::{ControlMessage, ControlValue};
+pub use conversion::{convert_control_value_to_data_kind, convert_control_value_to_stored};
 pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
     ExecutionGroup, ExecutionPlan, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode,

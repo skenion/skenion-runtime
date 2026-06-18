@@ -916,7 +916,7 @@ mod tests {
         assert_eq!(set.control_revision, Some(1));
         assert_eq!(
             session.control_state_response().values.get("value_1"),
-            Some(&ControlValue::F32(32.0))
+            Some(&ControlValue::float(32.0))
         );
 
         let bang = session.apply_control_event(bang_control_request("value_1", "bang"));
@@ -926,7 +926,7 @@ mod tests {
         assert_eq!(bang.emitted[0].port_id, "value");
         assert_eq!(
             emitted_value(&bang.emitted[0]),
-            Some(ControlValue::F32(32.0))
+            Some(ControlValue::float(32.0))
         );
         assert!(!bang.changed);
         assert_eq!(session.snapshot().session_revision, 1);
@@ -938,11 +938,11 @@ mod tests {
         assert!(input.changed);
         assert_eq!(
             emitted_value(&input.emitted[0]),
-            Some(ControlValue::F32(12.0))
+            Some(ControlValue::float(12.0))
         );
         assert_eq!(
             session.control_state_response().values.get("value_1"),
-            Some(&ControlValue::F32(12.0))
+            Some(&ControlValue::float(12.0))
         );
         assert_eq!(session.snapshot().session_revision, 1);
         assert_eq!(session.snapshot().control_revision, 2);
@@ -963,14 +963,14 @@ mod tests {
         assert_eq!(response.emitted[0].port_id, "value");
         assert_eq!(
             emitted_value(&response.emitted[0]),
-            Some(ControlValue::F32(1.5))
+            Some(ControlValue::float(1.5))
         );
         assert_eq!(
             session
                 .control_state_response()
                 .channels
-                .get("number.f32:speed"),
-            Some(&ControlMessage::from_value(ControlValue::F32(1.5)))
+                .get("number.float:speed"),
+            Some(&ControlMessage::from_value(ControlValue::float(1.5)))
         );
     }
 
@@ -1015,7 +1015,7 @@ mod tests {
         assert!(state.ok);
         assert_eq!(
             state.value.unwrap(),
-            json!({ "type": "f32", "value": 32.0 })
+            json!({ "type": "float", "representation": "f32", "value": 32.0 })
         );
     }
 
@@ -1108,14 +1108,14 @@ mod tests {
         let before = session.snapshot();
 
         let response =
-            session.apply_control_event(control_request("value_1", "in", ControlValue::Bool(true)));
+            session.apply_control_event(control_request("value_1", "in", ControlValue::bool(true)));
 
         assert!(!response.ok);
         assert!(response.emitted.is_empty());
         assert_eq!(session.snapshot().session_revision, before.session_revision);
         assert_eq!(
             session.control_state_response().values.get("value_1"),
-            Some(&ControlValue::F32(32.0))
+            Some(&ControlValue::float(32.0))
         );
     }
 
@@ -1134,7 +1134,7 @@ mod tests {
         assert!(response.ok);
         assert_eq!(
             session.control_state_response().values.get("value_1"),
-            Some(&ControlValue::F32(0.75))
+            Some(&ControlValue::float(0.75))
         );
     }
 
@@ -1160,7 +1160,7 @@ mod tests {
         assert_eq!(context.plan.graph_id, "minimal-value");
         assert_eq!(
             context.control_state.value_for_node("value_1"),
-            Some(&ControlValue::F32(0.0))
+            Some(&ControlValue::float(0.0))
         );
 
         session.plan = None;
@@ -1228,7 +1228,7 @@ mod tests {
         );
         assert_eq!(
             session.control_state.value_for_node("value_1"),
-            Some(&ControlValue::F32(0.75))
+            Some(&ControlValue::float(0.75))
         );
     }
 
@@ -1596,7 +1596,7 @@ mod tests {
     }
 
     fn f32_value(value: f64) -> ControlValue {
-        ControlValue::F32(value)
+        ControlValue::float(value)
     }
 
     fn control_request(
@@ -1724,7 +1724,7 @@ mod tests {
             "nodes": [
               {
                 "id": "value_1",
-                "kind": "core.value-f32",
+                "kind": "core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_json()
@@ -1745,7 +1745,7 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.value-f32",
+              "id": "core.float",
               "version": "0.1.0",
               "displayName": "Float Value",
               "category": "Values",
@@ -1778,7 +1778,7 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": { "flow": "value", "dataKind": "number.f32" },
+            "type": { "flow": "value", "dataKind": "number.float" },
             "required": false,
             "activation": "trigger"
           },
@@ -1786,7 +1786,7 @@ mod tests {
             "id": "set",
             "direction": "input",
             "label": "Set",
-            "type": { "flow": "value", "dataKind": "number.f32" },
+            "type": { "flow": "value", "dataKind": "number.float" },
             "required": false,
             "activation": "latched"
           },
@@ -1802,7 +1802,7 @@ mod tests {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.f32" }
+            "type": { "flow": "value", "dataKind": "number.float" }
           }
         ])
     }
@@ -1813,7 +1813,7 @@ mod tests {
             "id": "value",
             "direction": "input",
             "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.f32" },
+            "type": { "flow": "value", "dataKind": "number.float" },
             "activation": "latched"
           },
           {
