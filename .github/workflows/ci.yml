@@ -120,10 +120,12 @@ jobs:
               echo "dynamic shader interface fixtures are not available on examples main yet"
             fi
             SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-value-semantics.sh
-            if [[ -x scripts/smoke-runtime-control-layer.sh ]]; then
-              SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-control-layer.sh
+            if [[ -x scripts/smoke-runtime-object-routing-panel.sh ]]; then
+              SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-object-routing-panel.sh
+            elif [[ -x scripts/smoke-runtime-control-layer.sh ]]; then
+              echo "legacy control-layer smoke script is not compatible with object-owned control routing"
             else
-              echo "control layer smoke script is not available on examples main yet"
+              echo "object routing smoke script is not available on examples main yet"
             fi
             if [[ -x scripts/smoke-runtime-fullscreen-shader.sh ]] && grep -q '@skenion.uniform speed' compatibility/v0.1/projects/valid/fullscreen-shader-uniform.project.json; then
               SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-fullscreen-shader.sh
