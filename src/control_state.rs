@@ -877,6 +877,17 @@ mod tests {
             Some(&ControlValue::bool(true))
         );
 
+        let cold_toggle = state.apply_event(
+            request("core_toggle_1", "cold", ControlMessage::parse_text("off")),
+            &graph,
+        );
+        assert!(cold_toggle.ok);
+        assert!(cold_toggle.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("core_toggle_1"),
+            Some(&ControlValue::bool(false))
+        );
+
         let float_zero = state.apply_event(
             value_request("toggle_1", "in", ControlValue::float(0.0)),
             &graph,
@@ -971,6 +982,32 @@ mod tests {
             Some(&ControlValue::string("queued".to_owned()))
         );
 
+        let cold_message = state.apply_event(
+            request(
+                "message_1",
+                "cold",
+                ControlMessage::parse_text("set ignored"),
+            ),
+            &graph,
+        );
+        assert!(!cold_message.ok);
+        assert!(
+            cold_message.diagnostics[0]
+                .message
+                .contains("does not support runtime control input port cold")
+        );
+
+        let string_set = state.apply_event(
+            request("string_1", "in", ControlMessage::parse_text("set armed")),
+            &graph,
+        );
+        assert!(string_set.ok);
+        assert!(string_set.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("string_1"),
+            Some(&ControlValue::string("armed".to_owned()))
+        );
+
         let emit_in = state.apply_event(bang_request("message_1", "in"), &graph);
         assert!(emit_in.ok);
         assert_eq!(
@@ -1020,6 +1057,24 @@ mod tests {
         assert_eq!(
             state.channels.get("event.bang:go"),
             Some(&ControlMessage::bang())
+        );
+    }
+
+    #[test]
+    fn panel_set_port_updates_runtime_color_text_silently() {
+        let graph = graph(vec![panel_node("panel_1")]);
+        let mut state = ControlState::from_graph(&graph);
+
+        let response = state.apply_event(
+            request("panel_1", "set", ControlMessage::parse_text("set #00ff00")),
+            &graph,
+        );
+
+        assert!(response.ok);
+        assert!(response.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("panel_1"),
+            Some(&ControlValue::string("#00ff00".to_owned()))
         );
     }
 
@@ -1721,13 +1776,31 @@ mod tests {
 
     #[test]
     fn rejects_corrupt_toggle_state_and_existing_unsupported_input_port() {
-        let mut graph = graph(vec![value_node("toggle_1", BOOL_KIND, json!(false))]);
+        let mut graph = graph(vec![
+            value_node("toggle_1", BOOL_KIND, json!(false)),
+            value_node("value_1", FLOAT_KIND, json!(1.0)),
+            value_node("message_1", MESSAGE_KIND, json!("go")),
+        ]);
         graph.nodes[0].ports.push(port(
             "other",
             PortDirection::Input,
             DataFlow::Event,
             "event.bang",
             Some(PortActivation::Trigger),
+        ));
+        graph.nodes[1].ports.push(port(
+            "set",
+            PortDirection::Input,
+            DataFlow::Event,
+            "message.any",
+            Some(PortActivation::Trigger),
+        ));
+        graph.nodes[2].ports.push(port(
+            "cold",
+            PortDirection::Input,
+            DataFlow::Value,
+            "message.any",
+            Some(PortActivation::Latched),
         ));
         let mut state = ControlState::from_graph(&graph);
         state.values.insert(
@@ -1752,6 +1825,32 @@ mod tests {
             unsupported.diagnostics[0]
                 .message
                 .contains("does not support runtime control input port other")
+        );
+
+        let unsupported_set = state.apply_event(
+            request("value_1", "set", ControlMessage::parse_text("set 2")),
+            &graph,
+        );
+        assert!(!unsupported_set.ok);
+        assert!(
+            unsupported_set.diagnostics[0]
+                .message
+                .contains("does not support runtime control input port set")
+        );
+
+        let unsupported_message_cold = state.apply_event(
+            request(
+                "message_1",
+                "cold",
+                ControlMessage::parse_text("set ignored"),
+            ),
+            &graph,
+        );
+        assert!(!unsupported_message_cold.ok);
+        assert!(
+            unsupported_message_cold.diagnostics[0]
+                .message
+                .contains("does not support runtime control input port cold")
         );
     }
 
@@ -1835,6 +1934,24 @@ mod tests {
             kind_version: "0.1.0".to_owned(),
             params,
             ports,
+        }
+    }
+
+    fn panel_node(id: &str) -> GraphNode {
+        let mut params = Map::new();
+        params.insert("color".to_owned(), json!(null));
+        GraphNode {
+            id: id.to_owned(),
+            kind: PANEL_KIND.to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: vec![port(
+                "set",
+                PortDirection::Input,
+                DataFlow::Event,
+                "message.any",
+                Some(PortActivation::Trigger),
+            )],
         }
     }
 
