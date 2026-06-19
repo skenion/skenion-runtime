@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.2](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.25.1...skenion-runtime-v0.25.2) (2026-06-19)
+
+
+### Bug Fixes
+
+* **runtime:** make control propagation atomic ([#65](https://github.com/echovisionlab/skenion-runtime/issues/65)) ([afe8ec2](https://github.com/echovisionlab/skenion-runtime/commit/afe8ec20476b2962103c81cb38c0728f54fcb4c8))
+
 ## [0.25.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.25.0...skenion-runtime-v0.25.1) (2026-06-19)
 
 
