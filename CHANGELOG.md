@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.23.0...skenion-runtime-v0.24.0) (2026-06-19)
+
+
+### Features
+
+* **runtime:** propagate object control sessions ([14ebb8c](https://github.com/echovisionlab/skenion-runtime/commit/14ebb8c667a2cb5b19d17d930494372c0e082224))
+
 ## [0.23.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.22.0...skenion-runtime-v0.23.0) (2026-06-19)
 
 
