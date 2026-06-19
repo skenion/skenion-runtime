@@ -52,6 +52,16 @@ pub struct RuntimePatchResponse {
     pub diagnostics: Vec<RuntimeDiagnostic>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSessionProjectResponse {
+    pub ok: bool,
+    pub loaded: bool,
+    pub project: Option<ProjectRequest>,
+    pub session: RuntimeSessionResponse,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRunRequest {
@@ -178,6 +188,32 @@ impl RuntimeSession {
         self.revision += 1;
 
         self.response(true, Vec::new(), None)
+    }
+
+    pub fn project_response(&self) -> RuntimeSessionProjectResponse {
+        let diagnostics = if self.graph.is_some() && self.registry.is_some() {
+            Vec::new()
+        } else {
+            vec![RuntimeDiagnostic::error(
+                "no project loaded in runtime session",
+            )]
+        };
+        let project = match (self.graph.clone(), self.registry.clone()) {
+            (Some(graph), Some(registry)) => Some(ProjectRequest {
+                graph,
+                nodes: registry.definitions().cloned().collect(),
+            }),
+            _ => None,
+        };
+        let ok = project.is_some();
+
+        RuntimeSessionProjectResponse {
+            ok,
+            loaded: ok,
+            project,
+            session: self.response(ok, diagnostics.clone(), None),
+            diagnostics,
+        }
     }
 
     pub fn validate_current(&mut self) -> RuntimeSessionResponse {
@@ -921,17 +957,22 @@ mod tests {
 
         let bang = session.apply_control_event(bang_control_request("value_1", "bang"));
         assert!(bang.ok);
-        assert_eq!(bang.emitted.len(), 1);
+        assert_eq!(bang.emitted.len(), 2);
         assert_eq!(bang.emitted[0].node_id, "value_1");
         assert_eq!(bang.emitted[0].port_id, "value");
         assert_eq!(
             emitted_value(&bang.emitted[0]),
             Some(ControlValue::float(32.0))
         );
-        assert!(!bang.changed);
+        assert_eq!(bang.emitted[1].node_id, "target_1");
+        assert_eq!(
+            emitted_value(&bang.emitted[1]),
+            Some(ControlValue::float(32.0))
+        );
+        assert!(bang.changed);
         assert_eq!(session.snapshot().session_revision, 1);
-        assert_eq!(session.snapshot().control_revision, 1);
-        assert_eq!(bang.control_revision, Some(1));
+        assert_eq!(session.snapshot().control_revision, 2);
+        assert_eq!(bang.control_revision, Some(2));
 
         let input = session.apply_control_event(control_request("value_1", "in", f32_value(12.0)));
         assert!(input.ok);
@@ -944,10 +985,14 @@ mod tests {
             session.control_state_response().values.get("value_1"),
             Some(&ControlValue::float(12.0))
         );
+        assert_eq!(
+            session.control_state_response().values.get("target_1"),
+            Some(&ControlValue::float(12.0))
+        );
         assert_eq!(session.snapshot().session_revision, 1);
-        assert_eq!(session.snapshot().control_revision, 2);
-        assert_eq!(session.control_revision(), 2);
-        assert_eq!(input.control_revision, Some(2));
+        assert_eq!(session.snapshot().control_revision, 3);
+        assert_eq!(session.control_revision(), 3);
+        assert_eq!(input.control_revision, Some(3));
     }
 
     #[test]
@@ -1083,14 +1128,48 @@ mod tests {
                 .contains("state other does not exist")
         );
 
-        let missing_control_state = session.read_control(control_read(
-            "target_1",
+        let mut project_with_debug = sample_project_json();
+        project_with_debug["graph"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "debug_1",
+                "kind": "debug.sink",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": []
+            }));
+        project_with_debug["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "schema": "skenion.node.definition",
+                "schemaVersion": "0.1.0",
+                "id": "debug.sink",
+                "version": "0.1.0",
+                "displayName": "Debug Sink",
+                "category": "Debug",
+                "ports": [],
+                "execution": { "model": "value" },
+                "state": { "persistent": false },
+                "permissions": [],
+                "capabilities": []
+            }));
+        assert!(
+            session
+                .load_project(
+                    serde_json::from_value(project_with_debug).expect("debug project should parse")
+                )
+                .ok
+        );
+        let missing_runtime_state = session.read_control(control_read(
+            "debug_1",
             RuntimeControlReadTarget::State,
             "value",
         ));
-        assert!(!missing_control_state.ok);
+        assert!(!missing_runtime_state.ok);
         assert!(
-            missing_control_state.diagnostics[0]
+            missing_runtime_state.diagnostics[0]
                 .message
                 .contains("has no runtime control state")
         );
@@ -1646,7 +1725,7 @@ mod tests {
               "op": "addEdge",
               "edge": {
                 "from": { "node": "value_1", "port": "value" },
-                "to": { "node": "target_1", "port": "value" }
+                "to": { "node": "target_1", "port": "in" }
               }
             }
           ]
@@ -1731,14 +1810,14 @@ mod tests {
               },
               {
                 "id": "target_1",
-                "kind": "core.target",
+                "kind": "core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": target_ports_json()
+                "ports": value_f32_ports_json()
               }
             ],
             "edges": [
-              { "from": { "node": "value_1", "port": "value" }, "to": { "node": "target_1", "port": "value" } }
+              { "from": { "node": "value_1", "port": "value" }, "to": { "node": "target_1", "port": "in" } }
             ]
           },
           "nodes": [
@@ -1750,19 +1829,6 @@ mod tests {
               "displayName": "Float Value",
               "category": "Values",
               "ports": value_f32_ports_json(),
-              "execution": { "model": "value" },
-              "state": { "persistent": false },
-              "permissions": [],
-              "capabilities": []
-            },
-            {
-              "schema": "skenion.node.definition",
-              "schemaVersion": "0.1.0",
-              "id": "core.target",
-              "version": "0.1.0",
-              "displayName": "Target",
-              "category": "Values",
-              "ports": target_ports_json(),
               "execution": { "model": "value" },
               "state": { "persistent": false },
               "permissions": [],
@@ -1803,25 +1869,6 @@ mod tests {
             "direction": "output",
             "label": "Value",
             "type": { "flow": "value", "dataKind": "number.float" }
-          }
-        ])
-    }
-
-    fn target_ports_json() -> Value {
-        json!([
-          {
-            "id": "value",
-            "direction": "input",
-            "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.float" },
-            "activation": "latched"
-          },
-          {
-            "id": "bang",
-            "direction": "input",
-            "label": "Bang",
-            "type": { "flow": "event", "dataKind": "event.bang" },
-            "activation": "trigger"
           }
         ])
     }

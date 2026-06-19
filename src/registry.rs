@@ -128,6 +128,10 @@ impl NodeRegistry {
             .get(&NodeDefinitionKey::new(id.to_owned(), version.to_owned()))
     }
 
+    pub fn definitions(&self) -> impl Iterator<Item = &NodeDefinition> {
+        self.definitions.values()
+    }
+
     pub fn len(&self) -> usize {
         self.definitions.len()
     }

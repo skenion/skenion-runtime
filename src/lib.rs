@@ -74,8 +74,8 @@ pub use server::{
     RuntimeInfoResponse, RuntimeServerState, runtime_router, runtime_router_with_state,
 };
 pub use session::{
-    RuntimePatchResponse, RuntimeSession, RuntimeSessionResponse, RuntimeSessionSnapshot,
-    SessionRunRequest,
+    RuntimePatchResponse, RuntimeSession, RuntimeSessionProjectResponse, RuntimeSessionResponse,
+    RuntimeSessionSnapshot, SessionRunRequest,
 };
 pub use telemetry::{
     PREVIEW_TELEMETRY_SCHEMA, PREVIEW_TELEMETRY_SCHEMA_VERSION, PreviewTelemetryHeartbeat,

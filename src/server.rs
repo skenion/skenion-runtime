@@ -35,7 +35,7 @@ pub const RUNTIME_API_VERSION: &str = "0.1.0";
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 3761;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRequest {
     pub graph: GraphDocument,
@@ -162,6 +162,7 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/plan", post(plan_project_endpoint))
         .route("/v0/run", post(run_project_endpoint))
         .route("/v0/session", get(session_snapshot).delete(clear_session))
+        .route("/v0/session/project", get(session_project))
         .route("/v0/session/load", post(load_session))
         .route("/v0/session/validate", post(validate_session))
         .route("/v0/session/plan", post(plan_session))
@@ -210,6 +211,7 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "project.plan.v0.2",
             "dummy.run",
             "session.load",
+            "session.project",
             "session.validate",
             "session.plan",
             "session.run",
@@ -347,6 +349,16 @@ async fn session_snapshot(
         .read()
         .expect("runtime session lock should not be poisoned");
     Json(session.response(true, session.snapshot().diagnostics, None))
+}
+
+async fn session_project(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimeSessionProjectResponse> {
+    let session = state
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.project_response())
 }
 
 async fn load_session(
@@ -1674,6 +1686,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_project_endpoint_returns_loaded_project() {
+        let app = runtime_router();
+
+        let empty = get_json_with(app.clone(), "/v0/session/project").await;
+        assert_eq!(empty["ok"], false);
+        assert_eq!(empty["loaded"], false);
+        assert_eq!(empty["project"], Value::Null);
+        assert!(
+            empty["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no project loaded")
+        );
+
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        let project = get_json_with(app, "/v0/session/project").await;
+
+        assert_eq!(project["ok"], true);
+        assert_eq!(project["loaded"], true);
+        assert_eq!(project["session"]["graphId"], "minimal-value");
+        assert_eq!(project["project"]["graph"]["id"], "minimal-value");
+        assert_eq!(project["project"]["nodes"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn session_load_stores_valid_project() {
         let app = runtime_router();
         let response = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
@@ -1925,7 +1962,10 @@ mod tests {
         assert_eq!(bang["ok"], true);
         assert_eq!(
             bang["emitted"],
-            json!([{ "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 32.0 }] } }])
+            json!([
+                { "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 32.0 }] } },
+                { "nodeId": "target_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 32.0 }] } }
+            ])
         );
 
         let input = post_json_with(
@@ -1941,7 +1981,10 @@ mod tests {
         assert_eq!(input["ok"], true);
         assert_eq!(
             input["emitted"],
-            json!([{ "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 12.0 }] } }])
+            json!([
+                { "nodeId": "value_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 12.0 }] } },
+                { "nodeId": "target_1", "portId": "value", "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 12.0 }] } }
+            ])
         );
 
         let state = get_json_with(app.clone(), "/v0/session/control/state").await;
@@ -2495,14 +2538,14 @@ mod tests {
               },
               {
                 "id": "target_1",
-                "kind": "core.target",
+                "kind": "core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": target_ports_json()
+                "ports": value_f32_ports_json()
               }
             ],
             "edges": [
-              { "from": { "node": "value_1", "port": "value" }, "to": { "node": "target_1", "port": "value" } }
+              { "from": { "node": "value_1", "port": "value" }, "to": { "node": "target_1", "port": "in" } }
             ]
           },
           "nodes": [
@@ -2514,19 +2557,6 @@ mod tests {
               "displayName": "Float Value",
               "category": "Values",
               "ports": value_f32_ports_json(),
-              "execution": { "model": "value" },
-              "state": { "persistent": false },
-              "permissions": [],
-              "capabilities": []
-            },
-            {
-              "schema": "skenion.node.definition",
-              "schemaVersion": "0.1.0",
-              "id": "core.target",
-              "version": "0.1.0",
-              "displayName": "Target",
-              "category": "Values",
-              "ports": target_ports_json(),
               "execution": { "model": "value" },
               "state": { "persistent": false },
               "permissions": [],
@@ -2567,18 +2597,6 @@ mod tests {
             "direction": "output",
             "label": "Value",
             "type": { "flow": "value", "dataKind": "number.float" }
-          }
-        ])
-    }
-
-    fn target_ports_json() -> Value {
-        json!([
-          {
-            "id": "value",
-            "direction": "input",
-            "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.float" },
-            "activation": "latched"
           }
         ])
     }

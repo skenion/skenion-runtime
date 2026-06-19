@@ -349,7 +349,7 @@ mod tests {
         definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.target",
+          "id": "core.float",
           "version": "0.1.0",
           "displayName": "Target",
           "category": "Core",
@@ -381,7 +381,7 @@ mod tests {
             },
             {
               "id": "target",
-              "kind": "core.target",
+              "kind": "core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
@@ -628,7 +628,7 @@ mod tests {
           "nodes": [
             {
               "id": "a",
-              "kind": "core.target",
+              "kind": "core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
@@ -638,7 +638,7 @@ mod tests {
             },
             {
               "id": "b",
-              "kind": "core.target",
+              "kind": "core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
@@ -655,7 +655,7 @@ mod tests {
         let pass_definition = definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.target",
+          "id": "core.float",
           "version": "0.1.0",
           "displayName": "Target",
           "category": "Core",

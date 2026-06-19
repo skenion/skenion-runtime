@@ -97,7 +97,7 @@ mod tests {
                 },
                 PlanNode {
                     node_id: "b".to_owned(),
-                    kind: "core.target".to_owned(),
+                    kind: "core.float".to_owned(),
                     kind_version: "0.1.0".to_owned(),
                     execution_model: ExecutionModel::Value,
                     order: 1,

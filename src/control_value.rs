@@ -9,12 +9,9 @@ pub const UINT_KIND: &str = "core.uint";
 pub const BOOL_KIND: &str = "core.bool";
 pub const COLOR_KIND: &str = "core.color";
 pub const STRING_KIND: &str = "core.string";
-pub const TOGGLE_KIND: &str = "core.toggle";
+pub const BANG_KIND: &str = "core.bang";
 pub const MESSAGE_KIND: &str = "core.message";
 pub const PANEL_KIND: &str = "core.panel";
-pub const UI_BUTTON_KIND: &str = "ui.button";
-pub const UI_SLIDER_FLOAT_KIND: &str = "ui.slider-float";
-pub const UI_TOGGLE_KIND: &str = "ui.toggle";
 
 pub const DEFAULT_FLOAT_REPRESENTATION: &str = "f32";
 pub const DEFAULT_INT_REPRESENTATION: &str = "i32";
@@ -121,12 +118,6 @@ impl ControlValue {
                     .and_then(Value::as_str)
                     .unwrap_or("transparent"),
             )),
-            TOGGLE_KIND => Some(Self::bool(read_bool_param(node).unwrap_or(false))),
-            UI_SLIDER_FLOAT_KIND => Some(Self::Float {
-                representation: read_representation_param(node, DEFAULT_FLOAT_REPRESENTATION),
-                value: read_f64_param(node).unwrap_or(0.0),
-            }),
-            UI_TOGGLE_KIND => Some(Self::bool(read_bool_param(node).unwrap_or(false))),
             _ => None,
         }
     }
@@ -526,7 +517,7 @@ mod tests {
             Some(ControlValue::string("ready".to_owned()))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(TOGGLE_KIND, json!(true))),
+            ControlValue::for_node_default(&node(BOOL_KIND, json!(true))),
             Some(ControlValue::bool(true))
         );
         assert_eq!(
@@ -544,11 +535,11 @@ mod tests {
             Some(ControlValue::string("#00ff00".to_owned()))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(UI_SLIDER_FLOAT_KIND, json!(0.75))),
+            ControlValue::for_node_default(&node(FLOAT_KIND, json!(0.75))),
             Some(ControlValue::float(0.75))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(UI_TOGGLE_KIND, json!(true))),
+            ControlValue::for_node_default(&node(BOOL_KIND, json!(true))),
             Some(ControlValue::bool(true))
         );
     }
