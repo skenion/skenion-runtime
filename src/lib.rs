@@ -37,9 +37,10 @@ pub use control_state::{
 pub use control_value::{ControlMessage, ControlValue};
 pub use conversion::{convert_control_value_to_data_kind, convert_control_value_to_stored};
 pub use dsp::{
-    AudioDspBuffer, AudioDspControlInput, AudioDspPlan, AudioDspPlanEdge, AudioDspPlanError,
-    AudioDspPlanNode, AudioDspPlanOptions, AudioDspSignalInput, AudioDspSignalOutput,
-    build_audio_dsp_plan,
+    AudioDspBlockReport, AudioDspBuffer, AudioDspControlInput, AudioDspPlan, AudioDspPlanEdge,
+    AudioDspPlanError, AudioDspPlanNode, AudioDspPlanOptions, AudioDspRenderedBuffer,
+    AudioDspSignalInput, AudioDspSignalOutput, AudioDspSnapshot, AudioOfflineDspError,
+    AudioOfflineDspOptions, AudioOfflineDspReport, build_audio_dsp_plan, run_offline_audio_dsp,
 };
 pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
