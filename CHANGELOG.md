@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.24.0...skenion-runtime-v0.25.0) (2026-06-19)
+
+
+### Features
+
+* **runtime:** route Pd-style control messages ([#61](https://github.com/echovisionlab/skenion-runtime/issues/61)) ([f0c3e96](https://github.com/echovisionlab/skenion-runtime/commit/f0c3e96326ba435d3626418d37eb468feffcf74b))
+
 ## [0.24.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.23.0...skenion-runtime-v0.24.0) (2026-06-19)
 
 
