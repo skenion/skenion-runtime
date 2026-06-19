@@ -1312,6 +1312,44 @@ mod tests {
     }
 
     #[test]
+    fn comment_and_panel_inlets_reject_non_set_messages() {
+        let graph = graph(vec![
+            comment_node("comment_1", "old text"),
+            panel_node("panel_1"),
+        ]);
+        let mut state = ControlState::from_graph(&graph);
+
+        let comment_response = state.apply_event(
+            request("comment_1", "in", ControlMessage::parse_text("ignored")),
+            &graph,
+        );
+        let panel_response = state.apply_event(bang_request("panel_1", "in"), &graph);
+
+        assert!(!comment_response.ok);
+        assert!(comment_response.emitted.is_empty());
+        assert!(
+            comment_response.diagnostics[0]
+                .message
+                .contains("expects set message")
+        );
+        assert!(!panel_response.ok);
+        assert!(panel_response.emitted.is_empty());
+        assert!(
+            panel_response.diagnostics[0]
+                .message
+                .contains("expects set message")
+        );
+        assert_eq!(
+            state.value_for_node("comment_1"),
+            Some(&ControlValue::string("old text".to_owned()))
+        );
+        assert_eq!(
+            state.value_for_node("panel_1"),
+            Some(&ControlValue::string("transparent".to_owned()))
+        );
+    }
+
+    #[test]
     fn object_receive_name_dispatches_set_messages_to_panel_inlet() {
         let mut sender = value_node("message_1", MESSAGE_KIND, json!("set #00ff00"));
         sender.params.insert("sendName".to_owned(), json!("status"));
@@ -1990,6 +2028,12 @@ mod tests {
         };
         assert_eq!(data_kind_for_control_message(&selector_only), "message.any");
         assert_eq!(set_message_text(&selector_only), "clear");
+        assert_eq!(
+            set_message_text(&ControlMessage::from_value(ControlValue::string(
+                "hello".to_owned()
+            ))),
+            "hello"
+        );
         assert_eq!(
             set_message_text(&ControlMessage {
                 selector: "set".to_owned(),
