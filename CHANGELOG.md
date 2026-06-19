@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.25.0...skenion-runtime-v0.25.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* **control:** dispatch receive-name messages through inlets ([#63](https://github.com/echovisionlab/skenion-runtime/issues/63)) ([bbd8d4c](https://github.com/echovisionlab/skenion-runtime/commit/bbd8d4ce58e86b96302230285baf11e0762d48c1))
+
 ## [0.25.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.24.0...skenion-runtime-v0.25.0) (2026-06-19)
 
 
