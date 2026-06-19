@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.27.0...skenion-runtime-v0.28.0) (2026-06-19)
+
+
+### Features
+
+* **runtime:** add offline dsp execution ([3ab7fcb](https://github.com/echovisionlab/skenion-runtime/commit/3ab7fcb4bbe74b6d02f350c88a1c295503bf7867))
+
 ## [0.27.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.26.0...skenion-runtime-v0.27.0) (2026-06-19)
 
 
