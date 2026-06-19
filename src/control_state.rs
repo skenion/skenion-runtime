@@ -267,9 +267,6 @@ impl ControlState {
         let mut visited_edges = 0usize;
         while let Some(emission) = queue.pop() {
             let channel_response = self.publish_object_channel(&emission, graph);
-            if !channel_response.ok {
-                return channel_response;
-            }
             response.diagnostics.extend(channel_response.diagnostics);
             for channel_emission in channel_response.emitted {
                 queue.push(channel_emission.clone());
@@ -1385,6 +1382,37 @@ mod tests {
         assert_eq!(
             mismatched_state.value_for_node("bool_2"),
             Some(&ControlValue::bool(false))
+        );
+
+        let mut sender = value_node("string_sender", STRING_KIND, json!("ready"));
+        sender.params.insert("sendName".to_owned(), json!("label"));
+        let mut broken_receiver = value_node("string_receiver", STRING_KIND, json!("old"));
+        broken_receiver
+            .params
+            .insert("receiveName".to_owned(), json!("label"));
+        let rejected_receiver_graph = graph(vec![sender, broken_receiver]);
+        let mut rejected_state = ControlState::from_graph(&rejected_receiver_graph);
+        rejected_state
+            .values
+            .insert("string_receiver".to_owned(), ControlValue::float(0.0));
+        let rejected = rejected_state.publish_object_channel(
+            &RuntimeControlEmission {
+                node_id: "string_sender".to_owned(),
+                port_id: "value".to_owned(),
+                message: ControlMessage::from_value(ControlValue::string("new".to_owned())),
+            },
+            &rejected_receiver_graph,
+        );
+        assert!(rejected.ok);
+        assert_eq!(rejected.diagnostics.len(), 1);
+        assert!(
+            rejected.diagnostics[0]
+                .message
+                .contains("rejected routed string")
+        );
+        assert_eq!(
+            rejected_state.value_for_node("string_receiver"),
+            Some(&ControlValue::float(0.0))
         );
 
         let mut sender = value_node("slider_3", FLOAT_KIND, json!(0.25));

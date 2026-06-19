@@ -580,6 +580,10 @@ mod tests {
             "uint 9"
         );
         assert_eq!(
+            ControlMessage::from_value(ControlValue::int(-7)).to_text(),
+            "int -7"
+        );
+        assert_eq!(
             ControlMessage::from_value(ControlValue::bool(true)).to_text(),
             "bool on"
         );
@@ -601,6 +605,83 @@ mod tests {
                 selector: "set".to_owned(),
                 atoms: vec![ControlValue::color([1.0, 0.5, 0.25, 1.0])]
             }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("symbol hello world"),
+            ControlMessage {
+                selector: "symbol".to_owned(),
+                atoms: vec![ControlValue::string("hello world".to_owned())]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("float 1.25"),
+            ControlMessage::from_value(ControlValue::float(1.25))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("int -12"),
+            ControlMessage::from_value(ControlValue::int(-12))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("uint 12"),
+            ControlMessage::from_value(ControlValue::uint(12))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("bool off"),
+            ControlMessage::from_value(ControlValue::bool(false))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("float 1 2"),
+            ControlMessage {
+                selector: "float".to_owned(),
+                atoms: vec![ControlValue::int(1), ControlValue::int(2)]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("int nope"),
+            ControlMessage {
+                selector: "int".to_owned(),
+                atoms: vec![ControlValue::string("nope".to_owned())]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("uint -1"),
+            ControlMessage {
+                selector: "uint".to_owned(),
+                atoms: vec![ControlValue::int(-1)]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("bool maybe"),
+            ControlMessage {
+                selector: "bool".to_owned(),
+                atoms: vec![ControlValue::string("maybe".to_owned())]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("color 1 2 3"),
+            ControlMessage {
+                selector: "color".to_owned(),
+                atoms: vec![
+                    ControlValue::int(1),
+                    ControlValue::int(2),
+                    ControlValue::int(3)
+                ]
+            }
+        );
+        assert_eq!(
+            (ControlMessage {
+                selector: "list".to_owned(),
+                atoms: vec![
+                    ControlValue::float(1.5),
+                    ControlValue::uint(2),
+                    ControlValue::bool(true),
+                    ControlValue::bool(false),
+                    ControlValue::string("label".to_owned()),
+                    ControlValue::color([0.1, 0.2, 0.3, 1.0])
+                ]
+            })
+            .to_text(),
+            "list 1.5 2 on off label color 0.1 0.2 0.3 1"
         );
     }
 
