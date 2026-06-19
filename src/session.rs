@@ -1127,6 +1127,52 @@ mod tests {
                 .message
                 .contains("state other does not exist")
         );
+
+        let mut project_with_debug = sample_project_json();
+        project_with_debug["graph"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "debug_1",
+                "kind": "debug.sink",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": []
+            }));
+        project_with_debug["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "schema": "skenion.node.definition",
+                "schemaVersion": "0.1.0",
+                "id": "debug.sink",
+                "version": "0.1.0",
+                "displayName": "Debug Sink",
+                "category": "Debug",
+                "ports": [],
+                "execution": { "model": "value" },
+                "state": { "persistent": false },
+                "permissions": [],
+                "capabilities": []
+            }));
+        assert!(
+            session
+                .load_project(
+                    serde_json::from_value(project_with_debug).expect("debug project should parse")
+                )
+                .ok
+        );
+        let missing_runtime_state = session.read_control(control_read(
+            "debug_1",
+            RuntimeControlReadTarget::State,
+            "value",
+        ));
+        assert!(!missing_runtime_state.ok);
+        assert!(
+            missing_runtime_state.diagnostics[0]
+                .message
+                .contains("has no runtime control state")
+        );
     }
 
     #[test]

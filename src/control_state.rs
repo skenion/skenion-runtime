@@ -829,6 +829,48 @@ mod tests {
             state.value_for_node("core_toggle_1"),
             Some(&ControlValue::bool(true))
         );
+
+        let float_zero = state.apply_event(
+            value_request("toggle_1", "in", ControlValue::float(0.0)),
+            &graph,
+        );
+        assert!(float_zero.ok);
+        assert_eq!(
+            state.value_for_node("toggle_1"),
+            Some(&ControlValue::bool(false))
+        );
+
+        let float_one = state.apply_event(
+            value_request("toggle_1", "in", ControlValue::float(1.0)),
+            &graph,
+        );
+        assert!(float_one.ok);
+        assert_eq!(
+            state.value_for_node("toggle_1"),
+            Some(&ControlValue::bool(true))
+        );
+
+        let float_mid_rejected = state.apply_event(
+            value_request("toggle_1", "in", ControlValue::float(0.5)),
+            &graph,
+        );
+        assert!(!float_mid_rejected.ok);
+        assert!(
+            float_mid_rejected.diagnostics[0]
+                .message
+                .contains("expects bang, bool, 0/1, or on/off")
+        );
+
+        let color_rejected = state.apply_event(
+            value_request("toggle_1", "in", ControlValue::color([0.0, 0.0, 0.0, 1.0])),
+            &graph,
+        );
+        assert!(!color_rejected.ok);
+        assert!(
+            color_rejected.diagnostics[0]
+                .message
+                .contains("expects bang, bool, 0/1, or on/off")
+        );
     }
 
     #[test]
@@ -1139,8 +1181,14 @@ mod tests {
 
     #[test]
     fn object_edge_propagation_ignores_edges_to_missing_targets() {
-        let mut graph = graph(vec![value_node("slider_1", FLOAT_KIND, json!(0.25))]);
-        graph.edges = vec![edge("slider_1", "value", "missing", "in")];
+        let mut graph = graph(vec![
+            value_node("slider_1", FLOAT_KIND, json!(0.25)),
+            value_node("sink_1", "debug.sink", json!(null)),
+        ]);
+        graph.edges = vec![
+            edge("slider_1", "value", "missing", "in"),
+            edge("slider_1", "value", "sink_1", "in"),
+        ];
         let mut state = ControlState::from_graph(&graph);
 
         let response = state.apply_event(
