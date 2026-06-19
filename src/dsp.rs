@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::f32::consts::TAU;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -101,6 +102,57 @@ pub struct AudioDspBuffer {
     pub channels: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioOfflineDspOptions {
+    pub blocks: u32,
+    pub plan: AudioDspPlanOptions,
+}
+
+impl Default for AudioOfflineDspOptions {
+    fn default() -> Self {
+        Self {
+            blocks: 1,
+            plan: AudioDspPlanOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioOfflineDspReport {
+    pub graph_id: String,
+    pub graph_revision: String,
+    pub block_size: u32,
+    pub sample_rate: u32,
+    pub blocks: Vec<AudioDspBlockReport>,
+    pub snapshots: Vec<AudioDspSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDspBlockReport {
+    pub index: u32,
+    pub buffers: Vec<AudioDspRenderedBuffer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDspRenderedBuffer {
+    pub buffer_id: String,
+    pub producer_node_id: String,
+    pub producer_port_id: String,
+    pub samples: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDspSnapshot {
+    pub block_index: u32,
+    pub node_id: String,
+    pub port_id: String,
+    pub value: f32,
+}
+
 #[derive(Debug, Error)]
 pub enum AudioDspPlanError {
     #[error("{0}")]
@@ -113,6 +165,16 @@ pub enum AudioDspPlanError {
     InvalidSampleRate,
     #[error("audio signal port {node_id}.{port_id} is not an audio_block node")]
     SignalPortOutsideAudioBlock { node_id: String, port_id: String },
+}
+
+#[derive(Debug, Error)]
+pub enum AudioOfflineDspError {
+    #[error("{0}")]
+    Plan(#[from] AudioDspPlanError),
+    #[error("audio offline dsp block count must be greater than zero")]
+    InvalidBlockCount,
+    #[error("offline audio dsp node {node_id} uses unsupported kind {kind}")]
+    UnsupportedNodeKind { node_id: String, kind: String },
 }
 
 pub fn build_audio_dsp_plan(
@@ -209,6 +271,189 @@ pub fn build_audio_dsp_plan(
         edges: signal_edges,
         buffers,
     })
+}
+
+pub fn run_offline_audio_dsp(
+    graph: &GraphDocument,
+    registry: &NodeRegistry,
+    options: AudioOfflineDspOptions,
+) -> Result<AudioOfflineDspReport, AudioOfflineDspError> {
+    if options.blocks == 0 {
+        return Err(AudioOfflineDspError::InvalidBlockCount);
+    }
+
+    let plan = build_audio_dsp_plan(graph, registry, options.plan)?;
+    let block_len = plan.block_size as usize;
+    let nodes_by_id = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let mut oscillator_phase_by_node = BTreeMap::<String, f32>::new();
+    let mut block_reports = Vec::new();
+    let mut snapshots = Vec::new();
+
+    for block_index in 0..options.blocks {
+        let mut buffers = plan
+            .buffers
+            .iter()
+            .map(|buffer| (buffer.id.clone(), vec![0.0; block_len]))
+            .collect::<BTreeMap<_, _>>();
+
+        for node in &plan.nodes {
+            match node.kind.as_str() {
+                "audio.sig" => render_sig(node, &mut buffers, block_len),
+                "audio.osc" => render_osc(
+                    node,
+                    &nodes_by_id,
+                    &mut oscillator_phase_by_node,
+                    &mut buffers,
+                    block_len,
+                    plan.sample_rate,
+                ),
+                "audio.operator.mul" => render_mul(node, &mut buffers, block_len),
+                "audio.snapshot" => {
+                    snapshots.push(snapshot_signal(node, &buffers, block_index));
+                }
+                _ => {
+                    return Err(AudioOfflineDspError::UnsupportedNodeKind {
+                        node_id: node.node_id.clone(),
+                        kind: node.kind.clone(),
+                    });
+                }
+            }
+        }
+
+        let rendered_buffers = plan
+            .buffers
+            .iter()
+            .map(|buffer| AudioDspRenderedBuffer {
+                buffer_id: buffer.id.clone(),
+                producer_node_id: buffer.producer_node_id.clone(),
+                producer_port_id: buffer.producer_port_id.clone(),
+                samples: buffers
+                    .get(&buffer.id)
+                    .expect("allocated dsp buffer should exist for every plan buffer")
+                    .clone(),
+            })
+            .collect();
+        block_reports.push(AudioDspBlockReport {
+            index: block_index,
+            buffers: rendered_buffers,
+        });
+    }
+
+    Ok(AudioOfflineDspReport {
+        graph_id: plan.graph_id,
+        graph_revision: plan.graph_revision,
+        block_size: plan.block_size,
+        sample_rate: plan.sample_rate,
+        blocks: block_reports,
+        snapshots,
+    })
+}
+
+fn render_sig(node: &AudioDspPlanNode, buffers: &mut BTreeMap<String, Vec<f32>>, block_len: usize) {
+    let value = param_f32(&node.params, "value", 0.0);
+    write_signal_output(node, buffers, vec![value; block_len]);
+}
+
+fn render_osc(
+    node: &AudioDspPlanNode,
+    nodes_by_id: &HashMap<&str, &GraphNode>,
+    phase_by_node: &mut BTreeMap<String, f32>,
+    buffers: &mut BTreeMap<String, Vec<f32>>,
+    block_len: usize,
+    sample_rate: u32,
+) {
+    let frequency = control_input_f32(node, "frequency", nodes_by_id)
+        .unwrap_or_else(|| param_f32(&node.params, "frequency", 440.0));
+    let phase = phase_by_node.entry(node.node_id.clone()).or_insert(0.0);
+    let increment = frequency / sample_rate as f32;
+    let mut samples = Vec::with_capacity(block_len);
+    for _ in 0..block_len {
+        samples.push((*phase * TAU).sin());
+        *phase = (*phase + increment).rem_euclid(1.0);
+    }
+    write_signal_output(node, buffers, samples);
+}
+
+fn render_mul(node: &AudioDspPlanNode, buffers: &mut BTreeMap<String, Vec<f32>>, block_len: usize) {
+    let left = signal_input_block(node, "left", buffers, block_len);
+    let right = signal_input_block(node, "right", buffers, block_len);
+    let samples = left
+        .iter()
+        .zip(right.iter())
+        .map(|(left, right)| left * right)
+        .collect();
+    write_signal_output(node, buffers, samples);
+}
+
+fn snapshot_signal(
+    node: &AudioDspPlanNode,
+    buffers: &BTreeMap<String, Vec<f32>>,
+    block_index: u32,
+) -> AudioDspSnapshot {
+    let value = signal_input_block(node, "signal", buffers, 1)
+        .first()
+        .copied()
+        .unwrap_or(0.0);
+    AudioDspSnapshot {
+        block_index,
+        node_id: node.node_id.clone(),
+        port_id: "value".to_owned(),
+        value,
+    }
+}
+
+fn write_signal_output(
+    node: &AudioDspPlanNode,
+    buffers: &mut BTreeMap<String, Vec<f32>>,
+    samples: Vec<f32>,
+) {
+    let output = node
+        .signal_outputs
+        .first()
+        .expect("offline dsp signal node should expose a signal output");
+    let buffer = buffers
+        .get_mut(&output.buffer_id)
+        .expect("offline dsp signal output should have an allocated buffer");
+    *buffer = samples;
+}
+
+fn signal_input_block(
+    node: &AudioDspPlanNode,
+    port_id: &str,
+    buffers: &BTreeMap<String, Vec<f32>>,
+    block_len: usize,
+) -> Vec<f32> {
+    node.signal_inputs
+        .iter()
+        .find(|input| input.port_id == port_id)
+        .and_then(|input| buffers.get(&input.buffer_id))
+        .cloned()
+        .unwrap_or_else(|| vec![0.0; block_len])
+}
+
+fn control_input_f32(
+    node: &AudioDspPlanNode,
+    port_id: &str,
+    nodes_by_id: &HashMap<&str, &GraphNode>,
+) -> Option<f32> {
+    node.control_inputs
+        .iter()
+        .find(|input| input.port_id == port_id)
+        .and_then(|input| input.source_node_id.as_deref())
+        .and_then(|node_id| nodes_by_id.get(node_id))
+        .map(|node| param_f32(&node.params, "value", 0.0))
+}
+
+fn param_f32(params: &Map<String, Value>, key: &str, default: f32) -> f32 {
+    params
+        .get(key)
+        .and_then(Value::as_f64)
+        .map(|value| value as f32)
+        .unwrap_or(default)
 }
 
 fn reject_signal_ports_outside_audio_block(
@@ -329,6 +574,7 @@ mod tests {
         let mut registry = NodeRegistry::new();
         for definition in [
             audio_source_definition("audio.osc", "frequency"),
+            audio_sig_definition(),
             audio_binary_definition("audio.operator.mul"),
             audio_unary_definition("audio.operator.sqrt", "in"),
             audio_snapshot_definition(),
@@ -550,6 +796,185 @@ mod tests {
         assert!(!is_audio_signal_edge(&missing_to, &graph));
     }
 
+    #[test]
+    fn runs_offline_sig_mul_snapshot_blocks() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "offline-mul",
+          "revision": "3",
+          "nodes": [
+            audio_sig_node("left", 2.0),
+            audio_sig_node("right", 0.5),
+            audio_binary_node("mul", "audio.operator.mul"),
+            audio_snapshot_node("snap")
+          ],
+          "edges": [
+            { "from": { "node": "left", "port": "out" }, "to": { "node": "mul", "port": "left" } },
+            { "from": { "node": "right", "port": "out" }, "to": { "node": "mul", "port": "right" } },
+            { "from": { "node": "mul", "port": "out" }, "to": { "node": "snap", "port": "signal" } }
+          ]
+        }));
+
+        let report = run_offline_audio_dsp(
+            &graph,
+            &registry(),
+            AudioOfflineDspOptions {
+                blocks: 2,
+                plan: AudioDspPlanOptions {
+                    block_size: 4,
+                    sample_rate: 48_000,
+                },
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.graph_id, "offline-mul");
+        assert_eq!(report.graph_revision, "3");
+        assert_eq!(report.block_size, 4);
+        assert_eq!(report.sample_rate, 48_000);
+        assert_eq!(report.blocks.len(), 2);
+        assert_eq!(
+            rendered_samples(&report, 0, "mul", "out"),
+            vec![1.0, 1.0, 1.0, 1.0]
+        );
+        assert_eq!(
+            report
+                .snapshots
+                .iter()
+                .map(|snapshot| (
+                    snapshot.block_index,
+                    snapshot.node_id.as_str(),
+                    snapshot.value
+                ))
+                .collect::<Vec<_>>(),
+            vec![(0, "snap", 1.0), (1, "snap", 1.0)]
+        );
+    }
+
+    #[test]
+    fn runs_offline_oscillator_with_control_frequency_and_phase_continuity() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "offline-osc",
+          "revision": "5",
+          "nodes": [
+            float_node("freq", 1.0),
+            audio_osc_node("osc")
+          ],
+          "edges": [
+            { "from": { "node": "freq", "port": "value" }, "to": { "node": "osc", "port": "frequency" } }
+          ]
+        }));
+
+        let report = run_offline_audio_dsp(
+            &graph,
+            &registry(),
+            AudioOfflineDspOptions {
+                blocks: 2,
+                plan: AudioDspPlanOptions {
+                    block_size: 4,
+                    sample_rate: 4,
+                },
+            },
+        )
+        .unwrap();
+
+        assert_samples_close(
+            &rendered_samples(&report, 0, "osc", "out"),
+            &[0.0, 1.0, 0.0, -1.0],
+        );
+        assert_samples_close(
+            &rendered_samples(&report, 1, "osc", "out"),
+            &[0.0, 1.0, 0.0, -1.0],
+        );
+    }
+
+    #[test]
+    fn offline_execution_uses_param_frequency_and_zero_for_missing_signal_input() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "offline-fallbacks",
+          "revision": "2",
+          "nodes": [
+            audio_osc_node("osc"),
+            audio_sig_node("left", 3.0),
+            audio_binary_node("mul", "audio.operator.mul")
+          ],
+          "edges": [
+            { "from": { "node": "left", "port": "out" }, "to": { "node": "mul", "port": "left" } }
+          ]
+        }));
+
+        let report = run_offline_audio_dsp(
+            &graph,
+            &registry(),
+            AudioOfflineDspOptions {
+                blocks: 1,
+                plan: AudioDspPlanOptions {
+                    block_size: 4,
+                    sample_rate: 1_760,
+                },
+            },
+        )
+        .unwrap();
+
+        assert_samples_close(
+            &rendered_samples(&report, 0, "osc", "out"),
+            &[0.0, 1.0, 0.0, -1.0],
+        );
+        assert_eq!(
+            rendered_samples(&report, 0, "mul", "out"),
+            vec![0.0, 0.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_offline_options_and_unsupported_nodes() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "offline-errors",
+          "revision": "1",
+          "nodes": [
+            audio_sig_node("input", -4.0),
+            audio_unary_node("sqrt", "audio.operator.sqrt")
+          ],
+          "edges": [
+            { "from": { "node": "input", "port": "out" }, "to": { "node": "sqrt", "port": "in" } }
+          ]
+        }));
+
+        let block_error = run_offline_audio_dsp(
+            &graph,
+            &registry(),
+            AudioOfflineDspOptions {
+                blocks: 0,
+                plan: AudioDspPlanOptions::default(),
+            },
+        )
+        .unwrap_err();
+        let unsupported_error =
+            run_offline_audio_dsp(&graph, &registry(), AudioOfflineDspOptions::default())
+                .unwrap_err();
+
+        assert!(matches!(
+            block_error,
+            AudioOfflineDspError::InvalidBlockCount
+        ));
+        assert!(matches!(
+            unsupported_error,
+            AudioOfflineDspError::UnsupportedNodeKind { .. }
+        ));
+        assert!(
+            unsupported_error
+                .to_string()
+                .contains("audio.operator.sqrt")
+        );
+    }
+
     fn audio_source_definition(id: &str, input_port: &str) -> NodeDefinition {
         node_definition(json!({
           "schema": "skenion.node.definition",
@@ -560,6 +985,25 @@ mod tests {
           "category": "Audio",
           "ports": [
             { "id": input_port, "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+          ],
+          "execution": { "model": "audio_block" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+    }
+
+    fn audio_sig_definition() -> NodeDefinition {
+        node_definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "audio.sig",
+          "version": "0.1.0",
+          "displayName": "sig~",
+          "category": "Audio",
+          "ports": [
+            { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
             { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ],
           "execution": { "model": "audio_block" },
@@ -693,6 +1137,19 @@ mod tests {
         })
     }
 
+    fn audio_sig_node(id: &str, value: f64) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "audio.sig",
+          "kindVersion": "0.1.0",
+          "params": { "value": value },
+          "ports": [
+            { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+          ]
+        })
+    }
+
     fn audio_binary_node(id: &str, kind: &str) -> serde_json::Value {
         json!({
           "id": id,
@@ -702,6 +1159,19 @@ mod tests {
           "ports": [
             { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
             { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+          ]
+        })
+    }
+
+    fn audio_unary_node(id: &str, kind: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": kind,
+          "kindVersion": "0.1.0",
+          "params": {},
+          "ports": [
+            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
             { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ]
         })
@@ -731,5 +1201,30 @@ mod tests {
             { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ]
         })
+    }
+
+    fn rendered_samples(
+        report: &AudioOfflineDspReport,
+        block_index: usize,
+        node_id: &str,
+        port_id: &str,
+    ) -> Vec<f32> {
+        report.blocks[block_index]
+            .buffers
+            .iter()
+            .find(|buffer| buffer.producer_node_id == node_id && buffer.producer_port_id == port_id)
+            .unwrap()
+            .samples
+            .clone()
+    }
+
+    fn assert_samples_close(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (actual - expected).abs() < 0.000_001,
+                "expected {expected}, got {actual}"
+            );
+        }
     }
 }
