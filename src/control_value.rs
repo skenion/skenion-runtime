@@ -11,6 +11,7 @@ pub const COLOR_KIND: &str = "core.color";
 pub const STRING_KIND: &str = "core.string";
 pub const BANG_KIND: &str = "core.bang";
 pub const MESSAGE_KIND: &str = "core.message";
+pub const COMMENT_KIND: &str = "core.comment";
 pub const PANEL_KIND: &str = "core.panel";
 
 pub const DEFAULT_FLOAT_REPRESENTATION: &str = "f32";
@@ -112,6 +113,12 @@ impl ControlValue {
             STRING_KIND | MESSAGE_KIND => {
                 Some(Self::string(read_string_param(node).unwrap_or_default()))
             }
+            COMMENT_KIND => Some(Self::string(
+                node.params
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )),
             PANEL_KIND => Some(Self::string(
                 node.params
                     .get("color")
@@ -719,9 +726,11 @@ mod tests {
             ControlValue::for_node_default(&node(MESSAGE_KIND, json!("perform"))),
             Some(ControlValue::string("perform".to_owned()))
         );
+        let mut comment = node(COMMENT_KIND, json!(null));
+        comment.params.insert("text".to_owned(), json!("note"));
         assert_eq!(
-            ControlValue::for_node_default(&node("core.comment", json!(null))),
-            None
+            ControlValue::for_node_default(&comment),
+            Some(ControlValue::string("note".to_owned()))
         );
         let mut panel = node(PANEL_KIND, json!(null));
         panel.params.insert("color".to_owned(), json!("#00ff00"));
@@ -766,8 +775,8 @@ mod tests {
             Some(ControlValue::string(String::new()))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node("core.comment", json!(null))),
-            None
+            ControlValue::for_node_default(&node(COMMENT_KIND, json!(null))),
+            Some(ControlValue::string(String::new()))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(PANEL_KIND, json!(null))),

@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use crate::{
     ControlMessage, ControlValue, GraphDocument, GraphNode, PortDirection, RuntimeDiagnostic,
     control_value::{
-        BANG_KIND, BOOL_KIND, COLOR_KIND, FLOAT_KIND, INT_KIND, MESSAGE_KIND, PANEL_KIND,
-        STRING_KIND, UINT_KIND,
+        BANG_KIND, BOOL_KIND, COLOR_KIND, COMMENT_KIND, FLOAT_KIND, INT_KIND, MESSAGE_KIND,
+        PANEL_KIND, STRING_KIND, UINT_KIND,
     },
     convert_control_value_to_stored,
 };
@@ -181,15 +181,6 @@ impl ControlState {
         }
 
         match request.port_id.as_str() {
-            "set" => {
-                if node.kind == PANEL_KIND {
-                    let next = set_message_text(&message);
-                    self.values
-                        .insert(node.id.clone(), ControlValue::string(next));
-                    return RuntimeControlEventResponse::ok(Vec::new());
-                }
-                unsupported_runtime_control_port(node, &request.port_id)
-            }
             "in" => {
                 if node.kind == MESSAGE_KIND {
                     if let Some(next) = silent_set_message(&message) {
@@ -202,6 +193,17 @@ impl ControlState {
                         port_id: "out".to_owned(),
                         message: message_from_message_node_state(&stored),
                     }]);
+                }
+                if node.kind == COMMENT_KIND || node.kind == PANEL_KIND {
+                    let Some(next) = silent_set_message(&message) else {
+                        return RuntimeControlEventResponse::error(format!(
+                            "control input {} expects set message",
+                            node.id
+                        ));
+                    };
+                    self.values
+                        .insert(node.id.clone(), ControlValue::string(next));
+                    return RuntimeControlEventResponse::ok(Vec::new());
                 }
                 if is_toggle_widget(node) {
                     return self.apply_toggle_event(node, false, message, stored);
@@ -354,11 +356,10 @@ impl ControlState {
                 )));
                 continue;
             }
-            let target_port = if node.kind == PANEL_KIND { "set" } else { "in" };
             let response = self.apply_event_direct(
                 RuntimeControlEventRequest {
                     node_id: node.id.clone(),
-                    port_id: target_port.to_owned(),
+                    port_id: "in".to_owned(),
                     message: message.clone(),
                 },
                 graph,
@@ -466,6 +467,7 @@ pub fn is_control_value_kind(kind: &str) -> bool {
             | COLOR_KIND
             | STRING_KIND
             | MESSAGE_KIND
+            | COMMENT_KIND
             | PANEL_KIND
     )
 }
@@ -553,7 +555,8 @@ fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
         FLOAT_KIND | INT_KIND | UINT_KIND => is_numeric_data_kind(data_kind),
         BOOL_KIND => data_kind == "boolean",
         COLOR_KIND => data_kind == "color",
-        STRING_KIND | PANEL_KIND => data_kind == "string",
+        STRING_KIND => data_kind == "string",
+        COMMENT_KIND | PANEL_KIND => data_kind == "string" || data_kind == "message.any",
         MESSAGE_KIND | BANG_KIND => is_control_message_data_kind(data_kind),
         _ => false,
     }
@@ -1269,12 +1272,12 @@ mod tests {
     }
 
     #[test]
-    fn panel_set_port_updates_runtime_color_text_silently() {
+    fn panel_inlet_accepts_set_message_silently() {
         let graph = graph(vec![panel_node("panel_1")]);
         let mut state = ControlState::from_graph(&graph);
 
         let response = state.apply_event(
-            request("panel_1", "set", ControlMessage::parse_text("set #00ff00")),
+            request("panel_1", "in", ControlMessage::parse_text("set #00ff00")),
             &graph,
         );
 
@@ -1287,8 +1290,30 @@ mod tests {
     }
 
     #[test]
-    fn object_receive_name_dispatches_string_channels_to_panel_set_port() {
-        let mut sender = value_node("string_1", STRING_KIND, json!("idle"));
+    fn comment_inlet_accepts_set_message_silently() {
+        let graph = graph(vec![comment_node("comment_1", "old text")]);
+        let mut state = ControlState::from_graph(&graph);
+
+        let response = state.apply_event(
+            request(
+                "comment_1",
+                "in",
+                ControlMessage::parse_text("set updated note"),
+            ),
+            &graph,
+        );
+
+        assert!(response.ok);
+        assert!(response.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("comment_1"),
+            Some(&ControlValue::string("updated note".to_owned()))
+        );
+    }
+
+    #[test]
+    fn object_receive_name_dispatches_set_messages_to_panel_inlet() {
+        let mut sender = value_node("message_1", MESSAGE_KIND, json!("set #00ff00"));
         sender.params.insert("sendName".to_owned(), json!("status"));
         let mut receiver = panel_node("panel_1");
         receiver
@@ -1297,27 +1322,50 @@ mod tests {
         let routing_graph = graph(vec![sender, receiver]);
         let mut state = ControlState::from_graph(&routing_graph);
 
-        let response = state.apply_event(
-            request(
-                "string_1",
-                "in",
-                ControlMessage::from_value(ControlValue::string("ready".to_owned())),
-            ),
-            &routing_graph,
-        );
+        let response = state.apply_event(bang_request("message_1", "in"), &routing_graph);
 
         assert!(response.ok);
         assert_eq!(
             response.emitted,
             vec![RuntimeControlEmission {
-                node_id: "string_1".to_owned(),
-                port_id: "value".to_owned(),
-                message: ControlMessage::from_value(ControlValue::string("ready".to_owned())),
+                node_id: "message_1".to_owned(),
+                port_id: "out".to_owned(),
+                message: ControlMessage::parse_text("set #00ff00"),
             }]
         );
         assert_eq!(
             state.value_for_node("panel_1"),
-            Some(&ControlValue::string("ready".to_owned()))
+            Some(&ControlValue::string("#00ff00".to_owned()))
+        );
+    }
+
+    #[test]
+    fn message_set_updates_comment_and_panel_through_inlets() {
+        let mut graph = graph(vec![
+            bang_node("button_1"),
+            value_node("message_1", MESSAGE_KIND, json!("set hello world")),
+            comment_node("comment_1", "old comment"),
+            value_node("message_2", MESSAGE_KIND, json!("set #00ff00")),
+            panel_node("panel_1"),
+        ]);
+        graph.edges = vec![
+            edge("button_1", "out", "message_1", "in"),
+            edge("message_1", "out", "comment_1", "in"),
+            edge("button_1", "out", "message_2", "in"),
+            edge("message_2", "out", "panel_1", "in"),
+        ];
+        let mut state = ControlState::from_graph(&graph);
+
+        let response = state.apply_event(bang_request("button_1", "in"), &graph);
+
+        assert!(response.ok, "{:?}", response.diagnostics);
+        assert_eq!(
+            state.value_for_node("comment_1"),
+            Some(&ControlValue::string("hello world".to_owned()))
+        );
+        assert_eq!(
+            state.value_for_node("panel_1"),
+            Some(&ControlValue::string("#00ff00".to_owned()))
         );
     }
 
@@ -2298,7 +2346,25 @@ mod tests {
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![port(
-                "set",
+                "in",
+                PortDirection::Input,
+                DataFlow::Event,
+                "message.any",
+                Some(PortActivation::Trigger),
+            )],
+        }
+    }
+
+    fn comment_node(id: &str, text: &str) -> GraphNode {
+        let mut params = Map::new();
+        params.insert("text".to_owned(), json!(text));
+        GraphNode {
+            id: id.to_owned(),
+            kind: COMMENT_KIND.to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: vec![port(
+                "in",
                 PortDirection::Input,
                 DataFlow::Event,
                 "message.any",
