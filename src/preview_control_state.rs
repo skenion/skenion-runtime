@@ -21,6 +21,8 @@ pub struct PreviewControlStateSnapshot {
     pub control_revision: u64,
     pub values: std::collections::BTreeMap<String, ControlValue>,
     pub channels: std::collections::BTreeMap<String, ControlMessage>,
+    #[serde(default)]
+    pub operator_right: std::collections::BTreeMap<String, ControlValue>,
     pub written_at: String,
 }
 
@@ -33,6 +35,7 @@ impl PreviewControlStateSnapshot {
             control_revision,
             values: control_state.values.clone(),
             channels: control_state.channels.clone(),
+            operator_right: control_state.operator_right.clone(),
             written_at: unix_ms_timestamp(),
         }
     }
@@ -41,6 +44,7 @@ impl PreviewControlStateSnapshot {
         ControlState {
             values: self.values.clone(),
             channels: self.channels.clone(),
+            operator_right: self.operator_right.clone(),
         }
     }
 }
@@ -113,6 +117,9 @@ mod tests {
             "number.float:speed".to_owned(),
             ControlMessage::from_value(ControlValue::float(0.75)),
         );
+        control_state
+            .operator_right
+            .insert("mul_1".to_owned(), ControlValue::float(0.5));
         let snapshot = PreviewControlStateSnapshot::new(12, 5, &control_state);
         let bytes = serde_json::to_vec(&snapshot).expect("snapshot should serialize");
         let decoded: PreviewControlStateSnapshot =
@@ -136,6 +143,9 @@ mod tests {
             "boolean:enabled".to_owned(),
             ControlMessage::from_value(ControlValue::bool(true)),
         );
+        control_state
+            .operator_right
+            .insert("mul_1".to_owned(), ControlValue::float(0.5));
         let snapshot = PreviewControlStateSnapshot::new(3, 2, &control_state);
 
         write_preview_control_state_snapshot(&path, &snapshot).expect("snapshot should write");

@@ -7,7 +7,9 @@ use crate::{
     ControlMessage, ControlValue, GraphDocument, GraphNode, PortDirection, RuntimeDiagnostic,
     control_value::{
         BANG_KIND, BOOL_KIND, COLOR_KIND, COMMENT_KIND, FLOAT_KIND, INT_KIND, MESSAGE_KIND,
-        PANEL_KIND, STRING_KIND, UINT_KIND,
+        OPERATOR_ADD_KIND, OPERATOR_DIV_KIND, OPERATOR_MAX_KIND, OPERATOR_MIN_KIND,
+        OPERATOR_MUL_KIND, OPERATOR_POW_KIND, OPERATOR_SQRT_KIND, OPERATOR_SUB_KIND, PANEL_KIND,
+        STRING_KIND, UINT_KIND,
     },
     convert_control_value_to_stored,
 };
@@ -17,6 +19,8 @@ use crate::{
 pub struct ControlState {
     pub values: BTreeMap<String, ControlValue>,
     pub channels: BTreeMap<String, ControlMessage>,
+    #[serde(default)]
+    pub operator_right: BTreeMap<String, ControlValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -95,9 +99,15 @@ impl ControlState {
                 ControlValue::for_node_default(node).map(|value| (node.id.clone(), value))
             })
             .collect();
+        let operator_right = graph
+            .nodes
+            .iter()
+            .filter_map(|node| operator_right_default(node).map(|value| (node.id.clone(), value)))
+            .collect();
         Self {
             values,
             channels: BTreeMap::new(),
+            operator_right,
         }
     }
 
@@ -106,7 +116,7 @@ impl ControlState {
     }
 
     pub fn output_value_for_node(&self, node: &GraphNode, port_id: &str) -> Option<ControlValue> {
-        if port_id != "value" {
+        if port_id != "value" && !(is_control_operator_kind(&node.kind) && port_id == "out") {
             return None;
         }
         self.values.get(&node.id).cloned()
@@ -160,15 +170,6 @@ impl ControlState {
             }]);
         }
 
-        let message = request.control_message();
-
-        let Some(stored) = self.values.get(&node.id).cloned() else {
-            return RuntimeControlEventResponse::error(format!(
-                "node {} has no runtime control state",
-                node.id
-            ));
-        };
-
         if !node
             .ports
             .iter()
@@ -179,6 +180,19 @@ impl ControlState {
                 node.id, request.port_id
             ));
         }
+
+        let message = request.control_message();
+
+        if is_control_operator_kind(&node.kind) {
+            return self.apply_operator_event(node, &request.port_id, message);
+        }
+
+        let Some(stored) = self.values.get(&node.id).cloned() else {
+            return RuntimeControlEventResponse::error(format!(
+                "node {} has no runtime control state",
+                node.id
+            ));
+        };
 
         match request.port_id.as_str() {
             "in" => {
@@ -414,6 +428,79 @@ impl ControlState {
             }])
         }
     }
+
+    fn apply_operator_event(
+        &mut self,
+        node: &GraphNode,
+        port_id: &str,
+        message: ControlMessage,
+    ) -> RuntimeControlEventResponse {
+        match port_id {
+            "in" => {
+                if is_bang_message(&message) {
+                    let stored = self
+                        .values
+                        .get(&node.id)
+                        .cloned()
+                        .unwrap_or_else(|| ControlValue::float(0.0));
+                    return RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
+                        node_id: node.id.clone(),
+                        port_id: "out".to_owned(),
+                        message: ControlMessage::from_value(stored),
+                    }]);
+                }
+
+                let silent = message.selector == "set";
+                let Some(input) = numeric_message_value(&message) else {
+                    return RuntimeControlEventResponse::error(format!(
+                        "control operator {} expects a numeric message",
+                        node.id
+                    ));
+                };
+                let right = self
+                    .operator_right
+                    .get(&node.id)
+                    .and_then(control_value_as_f64)
+                    .unwrap_or_else(|| {
+                        operator_right_default(node)
+                            .and_then(|value| control_value_as_f64(&value))
+                            .unwrap_or(0.0)
+                    });
+                let result = ControlValue::float(evaluate_operator(&node.kind, input, right));
+                self.values.insert(node.id.clone(), result.clone());
+                if silent {
+                    RuntimeControlEventResponse::ok(Vec::new())
+                } else {
+                    RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
+                        node_id: node.id.clone(),
+                        port_id: "out".to_owned(),
+                        message: ControlMessage::from_value(result),
+                    }])
+                }
+            }
+            "right" => {
+                if is_bang_message(&message) {
+                    return RuntimeControlEventResponse::error(format!(
+                        "control operator {}.right does not accept bang",
+                        node.id
+                    ));
+                }
+                let Some(right) = numeric_message_value(&message) else {
+                    return RuntimeControlEventResponse::error(format!(
+                        "control operator {}.right expects a numeric message",
+                        node.id
+                    ));
+                };
+                self.operator_right
+                    .insert(node.id.clone(), ControlValue::float(right));
+                RuntimeControlEventResponse::ok(Vec::new())
+            }
+            port => RuntimeControlEventResponse::error(format!(
+                "node {} does not support runtime control input port {}",
+                node.id, port
+            )),
+        }
+    }
 }
 
 impl RuntimeControlEventResponse {
@@ -472,8 +559,22 @@ pub fn is_control_value_kind(kind: &str) -> bool {
     )
 }
 
+pub fn is_control_operator_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        OPERATOR_ADD_KIND
+            | OPERATOR_SUB_KIND
+            | OPERATOR_MUL_KIND
+            | OPERATOR_DIV_KIND
+            | OPERATOR_POW_KIND
+            | OPERATOR_MIN_KIND
+            | OPERATOR_MAX_KIND
+            | OPERATOR_SQRT_KIND
+    )
+}
+
 pub fn supports_runtime_control_events(kind: &str) -> bool {
-    is_control_value_kind(kind) || kind == BANG_KIND
+    is_control_value_kind(kind) || is_control_operator_kind(kind) || kind == BANG_KIND
 }
 
 impl RuntimeControlReadResponse {
@@ -553,6 +654,7 @@ fn data_kind_for_control_value(value: &ControlValue) -> &'static str {
 fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
     match node.kind.as_str() {
         FLOAT_KIND | INT_KIND | UINT_KIND => is_numeric_data_kind(data_kind),
+        kind if is_control_operator_kind(kind) => is_numeric_data_kind(data_kind),
         BOOL_KIND => data_kind == "boolean",
         COLOR_KIND => data_kind == "color",
         STRING_KIND => data_kind == "string",
@@ -706,6 +808,62 @@ fn coerce_toggle_input(message: &ControlMessage, current: bool) -> Option<bool> 
         "1" => Some(true),
         _ => None,
     }
+}
+
+fn operator_right_default(node: &GraphNode) -> Option<ControlValue> {
+    if !is_control_operator_kind(&node.kind) || node.kind == OPERATOR_SQRT_KIND {
+        return None;
+    }
+    Some(ControlValue::float(
+        node.params
+            .get("right")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+    ))
+}
+
+fn numeric_message_value(message: &ControlMessage) -> Option<f64> {
+    message.first_atom().and_then(control_value_as_f64)
+}
+
+fn control_value_as_f64(value: &ControlValue) -> Option<f64> {
+    match value {
+        ControlValue::Float { value, .. } => Some(sanitize_operator_number(*value)),
+        ControlValue::Int { value, .. } => Some(*value as f64),
+        ControlValue::Uint { value, .. } => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn evaluate_operator(kind: &str, input: f64, right: f64) -> f64 {
+    let result = match kind {
+        OPERATOR_ADD_KIND => input + right,
+        OPERATOR_SUB_KIND => input - right,
+        OPERATOR_MUL_KIND => input * right,
+        OPERATOR_DIV_KIND => {
+            if right == 0.0 {
+                0.0
+            } else {
+                input / right
+            }
+        }
+        OPERATOR_POW_KIND => input.powf(right),
+        OPERATOR_MIN_KIND => input.min(right),
+        OPERATOR_MAX_KIND => input.max(right),
+        OPERATOR_SQRT_KIND => {
+            if input < 0.0 {
+                0.0
+            } else {
+                input.sqrt()
+            }
+        }
+        _ => 0.0,
+    };
+    sanitize_operator_number(result)
+}
+
+fn sanitize_operator_number(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -887,6 +1045,242 @@ mod tests {
         assert_eq!(
             state.value_for_node("value_1"),
             Some(&ControlValue::bool(true))
+        );
+    }
+
+    #[test]
+    fn control_operator_hot_cold_and_bang_semantics() {
+        let graph = graph(vec![operator_node("add_1", OPERATOR_ADD_KIND, Some(1.0))]);
+        let mut state = ControlState::from_graph(&graph);
+
+        assert_eq!(
+            state.operator_right.get("add_1"),
+            Some(&ControlValue::float(1.0))
+        );
+
+        let hot = state.apply_event(
+            value_request("add_1", "in", ControlValue::float(4.0)),
+            &graph,
+        );
+        assert!(hot.ok);
+        assert_eq!(
+            hot.emitted,
+            vec![RuntimeControlEmission {
+                node_id: "add_1".to_owned(),
+                port_id: "out".to_owned(),
+                message: ControlMessage::from_value(ControlValue::float(5.0))
+            }]
+        );
+        assert_eq!(
+            state.value_for_node("add_1"),
+            Some(&ControlValue::float(5.0))
+        );
+
+        let cold = state.apply_event(
+            value_request("add_1", "right", ControlValue::float(2.0)),
+            &graph,
+        );
+        assert!(cold.ok);
+        assert!(cold.emitted.is_empty());
+        assert_eq!(
+            state.operator_right.get("add_1"),
+            Some(&ControlValue::float(2.0))
+        );
+
+        let silent_hot = state.apply_event(
+            set_value_request("add_1", "in", ControlValue::float(4.0)),
+            &graph,
+        );
+        assert!(silent_hot.ok);
+        assert!(silent_hot.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("add_1"),
+            Some(&ControlValue::float(6.0))
+        );
+
+        let bang = state.apply_event(bang_request("add_1", "in"), &graph);
+        assert!(bang.ok);
+        assert_eq!(
+            bang.emitted,
+            vec![RuntimeControlEmission {
+                node_id: "add_1".to_owned(),
+                port_id: "out".to_owned(),
+                message: ControlMessage::from_value(ControlValue::float(6.0))
+            }]
+        );
+    }
+
+    #[test]
+    fn control_operator_deterministic_fallbacks() {
+        let graph = graph(vec![
+            operator_node("div_1", OPERATOR_DIV_KIND, Some(0.0)),
+            operator_node("sqrt_1", OPERATOR_SQRT_KIND, None),
+            operator_node("pow_1", OPERATOR_POW_KIND, Some(0.5)),
+        ]);
+        let mut state = ControlState::from_graph(&graph);
+
+        let div = state.apply_event(
+            value_request("div_1", "in", ControlValue::float(10.0)),
+            &graph,
+        );
+        let sqrt = state.apply_event(
+            value_request("sqrt_1", "in", ControlValue::float(-1.0)),
+            &graph,
+        );
+        let pow = state.apply_event(
+            value_request("pow_1", "in", ControlValue::float(-1.0)),
+            &graph,
+        );
+
+        assert!(div.ok);
+        assert!(sqrt.ok);
+        assert!(pow.ok);
+        assert_eq!(
+            emitted_value(&div.emitted[0]),
+            Some(ControlValue::float(0.0))
+        );
+        assert_eq!(
+            emitted_value(&sqrt.emitted[0]),
+            Some(ControlValue::float(0.0))
+        );
+        assert_eq!(
+            emitted_value(&pow.emitted[0]),
+            Some(ControlValue::float(0.0))
+        );
+    }
+
+    #[test]
+    fn control_operator_accepts_integer_inputs_and_reports_invalid_messages() {
+        let graph = graph(vec![
+            operator_node("div_1", OPERATOR_DIV_KIND, Some(2.0)),
+            operator_node("sqrt_1", OPERATOR_SQRT_KIND, None),
+            operator_node("add_1", OPERATOR_ADD_KIND, Some(1.0)),
+        ]);
+        let mut state = ControlState::from_graph(&graph);
+
+        let div = state.apply_event(value_request("div_1", "in", ControlValue::int(9)), &graph);
+        let sqrt = state.apply_event(value_request("sqrt_1", "in", ControlValue::uint(9)), &graph);
+        let bad_hot = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "add_1".to_owned(),
+                port_id: "in".to_owned(),
+                message: ControlMessage::from_value(ControlValue::string("bad")),
+            },
+            &graph,
+        );
+        let bad_right_bang = state.apply_event(bang_request("add_1", "right"), &graph);
+        let bad_right_value = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "add_1".to_owned(),
+                port_id: "right".to_owned(),
+                message: ControlMessage::from_value(ControlValue::string("bad")),
+            },
+            &graph,
+        );
+        let bad_port = state.apply_event(
+            value_request("add_1", "missing", ControlValue::float(1.0)),
+            &graph,
+        );
+        let add_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "add_1")
+            .expect("operator node should exist");
+        let bad_internal_port = state.apply_operator_event(
+            add_node,
+            "missing",
+            ControlMessage::from_value(ControlValue::float(1.0)),
+        );
+
+        assert!(div.ok);
+        assert!(sqrt.ok);
+        assert_eq!(
+            emitted_value(&div.emitted[0]),
+            Some(ControlValue::float(4.5))
+        );
+        assert_eq!(
+            emitted_value(&sqrt.emitted[0]),
+            Some(ControlValue::float(3.0))
+        );
+        assert!(!bad_hot.ok);
+        assert!(!bad_right_bang.ok);
+        assert!(!bad_right_value.ok);
+        assert!(!bad_port.ok);
+        assert!(!bad_internal_port.ok);
+        assert_eq!(
+            state.value_for_node("add_1"),
+            Some(&ControlValue::float(0.0))
+        );
+        assert_eq!(
+            state.operator_right.get("add_1"),
+            Some(&ControlValue::float(1.0))
+        );
+        assert_eq!(evaluate_operator("core.operator.unknown", 2.0, 3.0), 0.0);
+    }
+
+    #[test]
+    fn control_operator_uses_fallbacks_for_missing_runtime_slots() {
+        let graph = graph(vec![operator_node("add_1", OPERATOR_ADD_KIND, Some(2.0))]);
+        let mut state = ControlState::from_graph(&graph);
+
+        state.values.remove("add_1");
+        let bang = state.apply_event(bang_request("add_1", "in"), &graph);
+        assert!(bang.ok);
+        assert_eq!(
+            emitted_value(&bang.emitted[0]),
+            Some(ControlValue::float(0.0))
+        );
+
+        state.operator_right.remove("add_1");
+        let numeric = state.apply_event(
+            value_request("add_1", "in", ControlValue::float(3.0)),
+            &graph,
+        );
+        assert!(numeric.ok);
+        assert_eq!(
+            emitted_value(&numeric.emitted[0]),
+            Some(ControlValue::float(5.0))
+        );
+    }
+
+    #[test]
+    fn control_operator_edges_propagate_results() {
+        let mut graph = graph(vec![
+            value_node("source_1", FLOAT_KIND, json!(4.0)),
+            operator_node("mul_1", OPERATOR_MUL_KIND, Some(0.5)),
+            value_node("target_1", FLOAT_KIND, json!(0.0)),
+        ]);
+        graph.edges = vec![
+            edge("source_1", "value", "mul_1", "in"),
+            edge("mul_1", "out", "target_1", "in"),
+        ];
+        let mut state = ControlState::from_graph(&graph);
+
+        let response = state.apply_event(
+            value_request("source_1", "in", ControlValue::float(8.0)),
+            &graph,
+        );
+
+        assert!(response.ok);
+        assert_eq!(
+            state.value_for_node("mul_1"),
+            Some(&ControlValue::float(4.0))
+        );
+        assert_eq!(
+            state.value_for_node("target_1"),
+            Some(&ControlValue::float(4.0))
+        );
+        assert_eq!(
+            response
+                .emitted
+                .iter()
+                .map(|emission| (emission.node_id.as_str(), emission.port_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("source_1", "value"),
+                ("mul_1", "out"),
+                ("target_1", "value")
+            ]
         );
     }
 
@@ -2372,6 +2766,43 @@ mod tests {
         if id.contains("toggle") {
             params.insert("widget".to_owned(), json!("toggle"));
         }
+        GraphNode {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports,
+        }
+    }
+
+    fn operator_node(id: &str, kind: &str, right: Option<f64>) -> GraphNode {
+        let mut params = Map::new();
+        if let Some(right) = right {
+            params.insert("right".to_owned(), json!(right));
+        }
+        let mut ports = vec![port(
+            "in",
+            PortDirection::Input,
+            DataFlow::Event,
+            "message.any",
+            Some(PortActivation::Trigger),
+        )];
+        if kind != OPERATOR_SQRT_KIND {
+            ports.push(port(
+                "right",
+                PortDirection::Input,
+                DataFlow::Value,
+                "number.float",
+                Some(PortActivation::Latched),
+            ));
+        }
+        ports.push(port(
+            "out",
+            PortDirection::Output,
+            DataFlow::Value,
+            "number.float",
+            None,
+        ));
         GraphNode {
             id: id.to_owned(),
             kind: kind.to_owned(),
