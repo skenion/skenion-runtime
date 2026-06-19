@@ -1945,8 +1945,8 @@ mod tests {
             "/v0/session/control/event",
             json!({
                 "nodeId": "value_1",
-                "portId": "set",
-                "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 32.0 }] }
+                "portId": "in",
+                "message": { "selector": "set", "atoms": [{ "type": "float", "representation": "f32", "value": 32.0 }] }
             }),
         )
         .await;
@@ -1956,7 +1956,7 @@ mod tests {
         let bang = post_json_with(
             app.clone(),
             "/v0/session/control/event",
-            json!({ "nodeId": "value_1", "portId": "bang", "message": { "selector": "bang", "atoms": [] } }),
+            json!({ "nodeId": "value_1", "portId": "in", "message": { "selector": "bang", "atoms": [] } }),
         )
         .await;
         assert_eq!(bang["ok"], true);
@@ -2066,8 +2066,8 @@ mod tests {
             "/v0/session/control/event",
             json!({
                 "nodeId": "value_1",
-                "portId": "set",
-                "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 2.0 }] }
+                "portId": "in",
+                "message": { "selector": "set", "atoms": [{ "type": "float", "representation": "f32", "value": 2.0 }] }
             }),
         )
         .await;
@@ -2092,8 +2092,8 @@ mod tests {
             "/v0/session/control/event",
             json!({
                 "nodeId": "value_1",
-                "portId": "set",
-                "message": { "selector": "float", "atoms": [{ "type": "float", "representation": "f32", "value": 1.0 }] }
+                "portId": "in",
+                "message": { "selector": "set", "atoms": [{ "type": "float", "representation": "f32", "value": 1.0 }] }
             }),
         )
         .await;
@@ -2572,25 +2572,17 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": { "flow": "value", "dataKind": "number.float" },
+            "type": { "flow": "event", "dataKind": "message.any" },
             "required": false,
             "activation": "trigger"
           },
           {
-            "id": "set",
+            "id": "cold",
             "direction": "input",
-            "label": "Set",
+            "label": "Cold",
             "type": { "flow": "value", "dataKind": "number.float" },
             "required": false,
             "activation": "latched"
-          },
-          {
-            "id": "bang",
-            "direction": "input",
-            "label": "Bang",
-            "type": { "flow": "event", "dataKind": "event.bang" },
-            "required": false,
-            "activation": "trigger"
           },
           {
             "id": "value",

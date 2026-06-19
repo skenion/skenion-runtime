@@ -1604,17 +1604,17 @@ mod tests {
                     "direction": "input",
                     "label": "In",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "number.float"
+                        "flow": "event",
+                        "dataKind": "message.any"
                     },
                     "required": false,
                     "activation": "trigger"
                 }))
                 .expect("valid value input port"),
                 serde_json::from_value(json!({
-                    "id": "set",
+                    "id": "cold",
                     "direction": "input",
-                    "label": "Set",
+                    "label": "Cold",
                     "type": {
                         "flow": "value",
                         "dataKind": "number.float"
@@ -1622,19 +1622,7 @@ mod tests {
                     "required": false,
                     "activation": "latched"
                 }))
-                .expect("valid value set port"),
-                serde_json::from_value(json!({
-                    "id": "bang",
-                    "direction": "input",
-                    "label": "Bang",
-                    "type": {
-                        "flow": "event",
-                        "dataKind": "event.bang"
-                    },
-                    "required": false,
-                    "activation": "trigger"
-                }))
-                .expect("valid value bang port"),
+                .expect("valid value cold port"),
                 serde_json::from_value(json!({
                     "id": "value",
                     "direction": "output",
@@ -1732,17 +1720,17 @@ mod tests {
                     "direction": "input",
                     "label": "In",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "color"
+                        "flow": "event",
+                        "dataKind": "message.any"
                     },
                     "required": false,
                     "activation": "trigger"
                 }))
                 .expect("valid color input port"),
                 serde_json::from_value(json!({
-                    "id": "set",
+                    "id": "cold",
                     "direction": "input",
-                    "label": "Set",
+                    "label": "Cold",
                     "type": {
                         "flow": "value",
                         "dataKind": "color"
@@ -1750,19 +1738,7 @@ mod tests {
                     "required": false,
                     "activation": "latched"
                 }))
-                .expect("valid color set port"),
-                serde_json::from_value(json!({
-                    "id": "bang",
-                    "direction": "input",
-                    "label": "Bang",
-                    "type": {
-                        "flow": "event",
-                        "dataKind": "event.bang"
-                    },
-                    "required": false,
-                    "activation": "trigger"
-                }))
-                .expect("valid color bang port"),
+                .expect("valid color cold port"),
                 serde_json::from_value(json!({
                     "id": "value",
                     "direction": "output",

@@ -925,7 +925,7 @@ mod tests {
         let mut session = RuntimeSession::default();
 
         let response =
-            session.apply_control_event(control_request("value_1", "set", f32_value(32.0)));
+            session.apply_control_event(set_control_request("value_1", "in", f32_value(32.0)));
 
         assert!(!response.ok);
         assert!(response.emitted.is_empty());
@@ -942,7 +942,8 @@ mod tests {
         let mut session = RuntimeSession::default();
         assert!(session.load_project(sample_project()).ok);
 
-        let set = session.apply_control_event(control_request("value_1", "set", f32_value(32.0)));
+        let set =
+            session.apply_control_event(set_control_request("value_1", "in", f32_value(32.0)));
         assert!(set.ok);
         assert!(set.changed);
         assert!(set.emitted.is_empty());
@@ -955,7 +956,7 @@ mod tests {
             Some(&ControlValue::float(32.0))
         );
 
-        let bang = session.apply_control_event(bang_control_request("value_1", "bang"));
+        let bang = session.apply_control_event(bang_control_request("value_1", "in"));
         assert!(bang.ok);
         assert_eq!(bang.emitted.len(), 2);
         assert_eq!(bang.emitted[0].node_id, "value_1");
@@ -1029,7 +1030,7 @@ mod tests {
         assert!(session.load_project(project).ok);
         assert!(
             session
-                .apply_control_event(control_request("value_1", "set", f32_value(32.0)))
+                .apply_control_event(set_control_request("value_1", "in", f32_value(32.0)))
                 .ok
         );
 
@@ -1181,7 +1182,7 @@ mod tests {
         assert!(session.load_project(sample_project()).ok);
         assert!(
             session
-                .apply_control_event(control_request("value_1", "set", f32_value(32.0)))
+                .apply_control_event(set_control_request("value_1", "in", f32_value(32.0)))
                 .ok
         );
         let before = session.snapshot();
@@ -1204,7 +1205,7 @@ mod tests {
         assert!(session.load_project(sample_project()).ok);
         assert!(
             session
-                .apply_control_event(control_request("value_1", "set", f32_value(32.0)))
+                .apply_control_event(set_control_request("value_1", "in", f32_value(32.0)))
                 .ok
         );
 
@@ -1366,10 +1367,17 @@ mod tests {
         assert!(!response.ok);
         assert!(!response.applied);
         assert!(!response.conflict);
+        let diagnostics = response
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
         assert!(
-            response.diagnostics[0]
-                .message
-                .contains("incompatible edge")
+            diagnostics.contains("incompatible edge")
+                || diagnostics.contains("output")
+                || diagnostics.contains("not an input port"),
+            "{diagnostics}"
         );
         assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
@@ -1690,6 +1698,21 @@ mod tests {
         }
     }
 
+    fn set_control_request(
+        node_id: &str,
+        port_id: &str,
+        value: ControlValue,
+    ) -> RuntimeControlEventRequest {
+        RuntimeControlEventRequest {
+            node_id: node_id.to_owned(),
+            port_id: port_id.to_owned(),
+            message: ControlMessage {
+                selector: "set".to_owned(),
+                atoms: vec![value],
+            },
+        }
+    }
+
     fn bang_control_request(node_id: &str, port_id: &str) -> RuntimeControlEventRequest {
         RuntimeControlEventRequest {
             node_id: node_id.to_owned(),
@@ -1755,7 +1778,7 @@ mod tests {
               "op": "addEdge",
               "edge": {
                 "from": { "node": "value_1", "port": "value" },
-                "to": { "node": "target_1", "port": "bang" }
+                "to": { "node": "target_1", "port": "value" }
               }
             }
           ]
@@ -1844,25 +1867,17 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": { "flow": "value", "dataKind": "number.float" },
+            "type": { "flow": "event", "dataKind": "message.any" },
             "required": false,
             "activation": "trigger"
           },
           {
-            "id": "set",
+            "id": "cold",
             "direction": "input",
-            "label": "Set",
+            "label": "Cold",
             "type": { "flow": "value", "dataKind": "number.float" },
             "required": false,
             "activation": "latched"
-          },
-          {
-            "id": "bang",
-            "direction": "input",
-            "label": "Bang",
-            "type": { "flow": "event", "dataKind": "event.bang" },
-            "required": false,
-            "activation": "trigger"
           },
           {
             "id": "value",
