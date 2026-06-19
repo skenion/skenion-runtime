@@ -250,12 +250,12 @@ mod tests {
             json!({
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.value-f32",
+              "id": "core.float",
               "version": "0.1.0",
-              "displayName": "Value F32",
+              "displayName": "Float",
               "category": "Core",
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ],
               "execution": { "model": "value" },
               "state": { "persistent": false },
@@ -265,13 +265,13 @@ mod tests {
             json!({
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.pass-f32",
+              "id": "core.pass-float",
               "version": "0.1.0",
-              "displayName": "Pass F32",
+              "displayName": "Pass Float",
               "category": "Core",
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ],
               "execution": { "model": "value" },
               "state": { "persistent": false },
@@ -293,11 +293,11 @@ mod tests {
     fn graph_node(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "core.value-f32",
+          "kind": "core.float",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
           ]
         })
     }
@@ -312,21 +312,21 @@ mod tests {
           "nodes": [
             {
               "id": "value",
-              "kind": "core.value-f32",
+              "kind": "core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             },
             {
               "id": "pass",
-              "kind": "core.pass-f32",
+              "kind": "core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             }
           ],
@@ -369,22 +369,22 @@ mod tests {
           "nodes": [
             {
               "id": "a",
-              "kind": "core.pass-f32",
+              "kind": "core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             },
             {
               "id": "b",
-              "kind": "core.pass-f32",
+              "kind": "core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
               ]
             }
           ],

@@ -108,10 +108,10 @@ mod tests {
         let mut control_state = ControlState::default();
         control_state
             .values
-            .insert("slider_1".to_owned(), ControlValue::F32(0.75));
+            .insert("slider_1".to_owned(), ControlValue::float(0.75));
         control_state.channels.insert(
-            "number.f32:speed".to_owned(),
-            ControlMessage::from_value(ControlValue::F32(0.75)),
+            "number.float:speed".to_owned(),
+            ControlMessage::from_value(ControlValue::float(0.75)),
         );
         let snapshot = PreviewControlStateSnapshot::new(12, 5, &control_state);
         let bytes = serde_json::to_vec(&snapshot).expect("snapshot should serialize");
@@ -134,7 +134,7 @@ mod tests {
         let mut control_state = ControlState::default();
         control_state.channels.insert(
             "boolean:enabled".to_owned(),
-            ControlMessage::from_value(ControlValue::Bool(true)),
+            ControlMessage::from_value(ControlValue::bool(true)),
         );
         let snapshot = PreviewControlStateSnapshot::new(3, 2, &control_state);
 

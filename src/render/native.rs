@@ -662,6 +662,7 @@ impl SkenionFrameUniform {
             match &uniform.value {
                 ShaderUniformValue::F32(value) => write_f32(&mut bytes, offset, *value),
                 ShaderUniformValue::I32(value) => write_i32(&mut bytes, offset, *value),
+                ShaderUniformValue::U32(value) => write_u32(&mut bytes, offset, *value),
                 ShaderUniformValue::Bool(value) => {
                     write_u32(&mut bytes, offset, u32::from(*value));
                 }
@@ -719,6 +720,7 @@ fn wgsl_type(value: &ShaderUniformValue) -> &'static str {
     match value {
         ShaderUniformValue::F32(_) => "f32",
         ShaderUniformValue::I32(_) => "i32",
+        ShaderUniformValue::U32(_) => "u32",
         ShaderUniformValue::Bool(_) => "u32",
         ShaderUniformValue::ColorRgba(_) => "vec4<f32>",
     }
@@ -727,9 +729,10 @@ fn wgsl_type(value: &ShaderUniformValue) -> &'static str {
 fn uniform_layout(value: &ShaderUniformValue) -> (usize, usize) {
     match value {
         ShaderUniformValue::ColorRgba(_) => (16, 16),
-        ShaderUniformValue::F32(_) | ShaderUniformValue::I32(_) | ShaderUniformValue::Bool(_) => {
-            (4, 4)
-        }
+        ShaderUniformValue::F32(_)
+        | ShaderUniformValue::I32(_)
+        | ShaderUniformValue::U32(_)
+        | ShaderUniformValue::Bool(_) => (4, 4),
     }
 }
 

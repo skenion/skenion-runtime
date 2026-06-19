@@ -3,26 +3,45 @@ use serde_json::Value;
 
 use crate::GraphNode;
 
-pub const VALUE_F32_KIND: &str = "core.value-f32";
-pub const VALUE_I32_KIND: &str = "core.value-i32";
-pub const VALUE_BOOL_KIND: &str = "core.value-bool";
-pub const COLOR_RGBA_KIND: &str = "core.color-rgba";
+pub const FLOAT_KIND: &str = "core.float";
+pub const INT_KIND: &str = "core.int";
+pub const UINT_KIND: &str = "core.uint";
+pub const BOOL_KIND: &str = "core.bool";
+pub const COLOR_KIND: &str = "core.color";
 pub const STRING_KIND: &str = "core.string";
 pub const TOGGLE_KIND: &str = "core.toggle";
 pub const MESSAGE_KIND: &str = "core.message";
 pub const PANEL_KIND: &str = "core.panel";
 pub const UI_BUTTON_KIND: &str = "ui.button";
-pub const UI_SLIDER_F32_KIND: &str = "ui.slider-f32";
+pub const UI_SLIDER_FLOAT_KIND: &str = "ui.slider-float";
 pub const UI_TOGGLE_KIND: &str = "ui.toggle";
 
+pub const DEFAULT_FLOAT_REPRESENTATION: &str = "f32";
+pub const DEFAULT_INT_REPRESENTATION: &str = "i32";
+pub const DEFAULT_UINT_REPRESENTATION: &str = "u32";
+pub const DEFAULT_COLOR_REPRESENTATION: &str = "rgba32f";
+pub const DEFAULT_COLOR_SPACE: &str = "linear";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ControlValue {
-    F32(f64),
-    I32(i64),
-    Bool(bool),
-    String(String),
-    Rgba([f64; 4]),
+    #[serde(rename = "float")]
+    Float { representation: String, value: f64 },
+    #[serde(rename = "int")]
+    Int { representation: String, value: i64 },
+    #[serde(rename = "uint")]
+    Uint { representation: String, value: u64 },
+    #[serde(rename = "bool")]
+    Bool { value: bool },
+    #[serde(rename = "string")]
+    String { value: String },
+    #[serde(rename = "color")]
+    Color {
+        representation: String,
+        #[serde(rename = "colorSpace", default = "default_color_space")]
+        color_space: String,
+        value: [f64; 4],
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,62 +53,142 @@ pub struct ControlMessage {
 }
 
 impl ControlValue {
+    pub fn float(value: f64) -> Self {
+        Self::Float {
+            representation: DEFAULT_FLOAT_REPRESENTATION.to_owned(),
+            value,
+        }
+    }
+
+    pub fn int(value: i64) -> Self {
+        Self::Int {
+            representation: DEFAULT_INT_REPRESENTATION.to_owned(),
+            value,
+        }
+    }
+
+    pub fn uint(value: u64) -> Self {
+        Self::Uint {
+            representation: DEFAULT_UINT_REPRESENTATION.to_owned(),
+            value,
+        }
+    }
+
+    pub fn bool(value: bool) -> Self {
+        Self::Bool { value }
+    }
+
+    pub fn string(value: impl Into<String>) -> Self {
+        Self::String {
+            value: value.into(),
+        }
+    }
+
+    pub fn color(value: [f64; 4]) -> Self {
+        Self::Color {
+            representation: DEFAULT_COLOR_REPRESENTATION.to_owned(),
+            color_space: DEFAULT_COLOR_SPACE.to_owned(),
+            value,
+        }
+    }
+
     pub fn for_node_default(node: &GraphNode) -> Option<Self> {
         match node.kind.as_str() {
-            VALUE_F32_KIND => Some(Self::F32(read_f64_param(node).unwrap_or(0.0))),
-            VALUE_I32_KIND => Some(Self::I32(read_i64_param(node).unwrap_or(0))),
-            VALUE_BOOL_KIND => Some(Self::Bool(read_bool_param(node).unwrap_or(false))),
-            COLOR_RGBA_KIND => Some(Self::Rgba(
-                read_rgba_param(node).unwrap_or([1.0, 1.0, 1.0, 1.0]),
-            )),
-            STRING_KIND | MESSAGE_KIND => Some(Self::String(
-                read_string_param(node).unwrap_or_default().to_owned(),
-            )),
-            PANEL_KIND => Some(Self::String(
+            FLOAT_KIND => Some(Self::Float {
+                representation: read_representation_param(node, DEFAULT_FLOAT_REPRESENTATION),
+                value: read_f64_param(node).unwrap_or(0.0),
+            }),
+            INT_KIND => Some(Self::Int {
+                representation: read_representation_param(node, DEFAULT_INT_REPRESENTATION),
+                value: read_i64_param(node).unwrap_or(0),
+            }),
+            UINT_KIND => Some(Self::Uint {
+                representation: read_representation_param(node, DEFAULT_UINT_REPRESENTATION),
+                value: read_u64_param(node).unwrap_or(0),
+            }),
+            BOOL_KIND => Some(Self::bool(read_bool_param(node).unwrap_or(false))),
+            COLOR_KIND => Some(Self::Color {
+                representation: read_representation_param(node, DEFAULT_COLOR_REPRESENTATION),
+                color_space: read_color_space_param(node),
+                value: read_rgba_param(node).unwrap_or([1.0, 1.0, 1.0, 1.0]),
+            }),
+            STRING_KIND | MESSAGE_KIND => {
+                Some(Self::string(read_string_param(node).unwrap_or_default()))
+            }
+            PANEL_KIND => Some(Self::string(
                 node.params
                     .get("color")
                     .and_then(Value::as_str)
-                    .unwrap_or("transparent")
-                    .to_owned(),
+                    .unwrap_or("transparent"),
             )),
-            TOGGLE_KIND => Some(Self::Bool(read_bool_param(node).unwrap_or(false))),
-            UI_SLIDER_F32_KIND => Some(Self::F32(read_f64_param(node).unwrap_or(0.0))),
-            UI_TOGGLE_KIND => Some(Self::Bool(read_bool_param(node).unwrap_or(false))),
+            TOGGLE_KIND => Some(Self::bool(read_bool_param(node).unwrap_or(false))),
+            UI_SLIDER_FLOAT_KIND => Some(Self::Float {
+                representation: read_representation_param(node, DEFAULT_FLOAT_REPRESENTATION),
+                value: read_f64_param(node).unwrap_or(0.0),
+            }),
+            UI_TOGGLE_KIND => Some(Self::bool(read_bool_param(node).unwrap_or(false))),
             _ => None,
         }
     }
 
-    pub fn kind_label(&self) -> &'static str {
+    pub fn kind_label(&self) -> String {
         match self {
-            Self::F32(_) => "f32",
-            Self::I32(_) => "i32",
-            Self::Bool(_) => "bool",
-            Self::String(_) => "string",
-            Self::Rgba(_) => "rgba",
+            Self::Float { representation, .. } => format!("number.float/{representation}"),
+            Self::Int { representation, .. } => format!("number.int/{representation}"),
+            Self::Uint { representation, .. } => format!("number.uint/{representation}"),
+            Self::Bool { .. } => "boolean".to_owned(),
+            Self::String { .. } => "string".to_owned(),
+            Self::Color { representation, .. } => format!("color/{representation}"),
         }
     }
 
     pub fn matches_stored_type(&self, stored: &Self) -> bool {
         matches!(
             (self, stored),
-            (Self::F32(_), Self::F32(_))
-                | (Self::I32(_), Self::I32(_))
-                | (Self::Bool(_), Self::Bool(_))
-                | (Self::String(_), Self::String(_))
-                | (Self::Rgba(_), Self::Rgba(_))
+            (Self::Float { .. }, Self::Float { .. })
+                | (Self::Int { .. }, Self::Int { .. })
+                | (Self::Uint { .. }, Self::Uint { .. })
+                | (Self::Bool { .. }, Self::Bool { .. })
+                | (Self::String { .. }, Self::String { .. })
+                | (Self::Color { .. }, Self::Color { .. })
         )
     }
 
     pub fn as_f32(&self) -> Option<f32> {
         match self {
-            Self::F32(value) => Some(*value as f32),
+            Self::Float { value, .. } => Some(sanitize_f64(*value) as f32),
+            _ => None,
+        }
+    }
+
+    pub fn as_i32(&self) -> Option<i32> {
+        match self {
+            Self::Int { value, .. } => {
+                Some((*value).clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::Uint { value, .. } => Some((*value).min(u32::MAX as u64) as u32),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool { value } => Some(*value),
             _ => None,
         }
     }
 
     pub fn as_rgba_f32(&self) -> Option<[f32; 4]> {
         match self {
-            Self::Rgba(value) => Some(value.map(|component| component.clamp(0.0, 1.0) as f32)),
+            Self::Color { value, .. } => {
+                Some(value.map(|component| component.clamp(0.0, 1.0) as f32))
+            }
             _ => None,
         }
     }
@@ -105,11 +204,12 @@ impl ControlMessage {
 
     pub fn from_value(value: ControlValue) -> Self {
         let selector = match value {
-            ControlValue::F32(_) => "float",
-            ControlValue::I32(_) => "int",
-            ControlValue::Bool(_) => "bool",
-            ControlValue::String(_) => "symbol",
-            ControlValue::Rgba(_) => "rgba",
+            ControlValue::Float { .. } => "float",
+            ControlValue::Int { .. } => "int",
+            ControlValue::Uint { .. } => "uint",
+            ControlValue::Bool { .. } => "bool",
+            ControlValue::String { .. } => "symbol",
+            ControlValue::Color { .. } => "color",
         }
         .to_owned();
         Self {
@@ -123,7 +223,7 @@ impl ControlMessage {
         if trimmed.is_empty() {
             return Self {
                 selector: "symbol".to_owned(),
-                atoms: vec![ControlValue::String(String::new())],
+                atoms: vec![ControlValue::string(String::new())],
             };
         }
 
@@ -146,7 +246,7 @@ impl ControlMessage {
                 } else {
                     Self {
                         selector: "symbol".to_owned(),
-                        atoms: vec![ControlValue::String(trimmed.to_owned())],
+                        atoms: vec![ControlValue::string(trimmed.to_owned())],
                     }
                 }
             }
@@ -183,37 +283,38 @@ fn parse_message_atoms(text: &str) -> Vec<ControlValue> {
     }
     text.split_whitespace()
         .map(|token| {
-            parse_scalar_atom(token).unwrap_or_else(|| ControlValue::String(token.to_owned()))
+            parse_scalar_atom(token).unwrap_or_else(|| ControlValue::string(token.to_owned()))
         })
         .collect()
 }
 
 fn parse_scalar_atom(token: &str) -> Option<ControlValue> {
     match token.to_ascii_lowercase().as_str() {
-        "true" | "on" => Some(ControlValue::Bool(true)),
-        "false" | "off" => Some(ControlValue::Bool(false)),
+        "true" | "on" => Some(ControlValue::bool(true)),
+        "false" | "off" => Some(ControlValue::bool(false)),
         _ => token
             .parse::<i64>()
-            .map(ControlValue::I32)
-            .or_else(|_| token.parse::<f64>().map(ControlValue::F32))
+            .map(ControlValue::int)
+            .or_else(|_| token.parse::<f64>().map(ControlValue::float))
             .ok(),
     }
 }
 
 fn atom_to_text(atom: &ControlValue) -> String {
     match atom {
-        ControlValue::F32(value) => value.to_string(),
-        ControlValue::I32(value) => value.to_string(),
-        ControlValue::Bool(value) => {
+        ControlValue::Float { value, .. } => value.to_string(),
+        ControlValue::Int { value, .. } => value.to_string(),
+        ControlValue::Uint { value, .. } => value.to_string(),
+        ControlValue::Bool { value } => {
             if *value {
                 "on".to_owned()
             } else {
                 "off".to_owned()
             }
         }
-        ControlValue::String(value) => value.clone(),
-        ControlValue::Rgba(value) => {
-            format!("rgba {} {} {} {}", value[0], value[1], value[2], value[3])
+        ControlValue::String { value } => value.clone(),
+        ControlValue::Color { value, .. } => {
+            format!("color {} {} {} {}", value[0], value[1], value[2], value[3])
         }
     }
 }
@@ -226,6 +327,10 @@ fn read_i64_param(node: &GraphNode) -> Option<i64> {
     node.params.get("value").and_then(Value::as_i64)
 }
 
+fn read_u64_param(node: &GraphNode) -> Option<u64> {
+    node.params.get("value").and_then(Value::as_u64)
+}
+
 fn read_bool_param(node: &GraphNode) -> Option<bool> {
     node.params.get("value").and_then(Value::as_bool)
 }
@@ -234,12 +339,36 @@ fn read_string_param(node: &GraphNode) -> Option<&str> {
     node.params.get("value").and_then(Value::as_str)
 }
 
+fn read_representation_param(node: &GraphNode, default: &str) -> String {
+    node.params
+        .get("representation")
+        .and_then(Value::as_str)
+        .unwrap_or(default)
+        .to_owned()
+}
+
+fn read_color_space_param(node: &GraphNode) -> String {
+    node.params
+        .get("colorSpace")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_COLOR_SPACE)
+        .to_owned()
+}
+
 fn read_rgba_param(node: &GraphNode) -> Option<[f64; 4]> {
     let values = node.params.get("value")?.as_array()?;
     let [r, g, b, a] = values.as_slice() else {
         return None;
     };
     Some([r.as_f64()?, g.as_f64()?, b.as_f64()?, a.as_f64()?])
+}
+
+fn default_color_space() -> String {
+    DEFAULT_COLOR_SPACE.to_owned()
+}
+
+fn sanitize_f64(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -251,24 +380,50 @@ mod tests {
     #[test]
     fn serializes_control_values_with_canonical_type_labels() {
         assert_eq!(
-            serde_json::to_value(ControlValue::F32(32.0)).unwrap(),
-            json!({ "type": "f32", "value": 32.0 })
+            serde_json::to_value(ControlValue::float(32.0)).unwrap(),
+            json!({ "type": "float", "representation": "f32", "value": 32.0 })
         );
         assert_eq!(
-            serde_json::to_value(ControlValue::I32(32)).unwrap(),
-            json!({ "type": "i32", "value": 32 })
+            serde_json::to_value(ControlValue::int(32)).unwrap(),
+            json!({ "type": "int", "representation": "i32", "value": 32 })
         );
         assert_eq!(
-            serde_json::to_value(ControlValue::Bool(true)).unwrap(),
+            serde_json::to_value(ControlValue::uint(32)).unwrap(),
+            json!({ "type": "uint", "representation": "u32", "value": 32 })
+        );
+        assert_eq!(
+            serde_json::to_value(ControlValue::bool(true)).unwrap(),
             json!({ "type": "bool", "value": true })
         );
         assert_eq!(
-            serde_json::to_value(ControlValue::String("ready".to_owned())).unwrap(),
+            serde_json::to_value(ControlValue::string("ready".to_owned())).unwrap(),
             json!({ "type": "string", "value": "ready" })
         );
         assert_eq!(
-            serde_json::to_value(ControlValue::Rgba([0.1, 0.2, 0.3, 1.0])).unwrap(),
-            json!({ "type": "rgba", "value": [0.1, 0.2, 0.3, 1.0] })
+            serde_json::to_value(ControlValue::color([0.1, 0.2, 0.3, 1.0])).unwrap(),
+            json!({
+                "type": "color",
+                "representation": "rgba32f",
+                "colorSpace": "linear",
+                "value": [0.1, 0.2, 0.3, 1.0]
+            })
+        );
+    }
+
+    #[test]
+    fn deserializes_color_with_default_color_space() {
+        assert_eq!(
+            serde_json::from_value::<ControlValue>(json!({
+                "type": "color",
+                "representation": "rgba32f",
+                "value": [0.1, 0.2, 0.3, 1.0]
+            }))
+            .unwrap(),
+            ControlValue::Color {
+                representation: "rgba32f".to_owned(),
+                color_space: "linear".to_owned(),
+                value: [0.1, 0.2, 0.3, 1.0],
+            }
         );
     }
 
@@ -279,14 +434,17 @@ mod tests {
             json!({ "selector": "bang", "atoms": [] })
         );
         assert_eq!(
-            serde_json::to_value(ControlMessage::from_value(ControlValue::F32(0.5))).unwrap(),
-            json!({ "selector": "float", "atoms": [{ "type": "f32", "value": 0.5 }] })
+            serde_json::to_value(ControlMessage::from_value(ControlValue::float(0.5))).unwrap(),
+            json!({
+                "selector": "float",
+                "atoms": [{ "type": "float", "representation": "f32", "value": 0.5 }]
+            })
         );
         assert_eq!(
             ControlMessage::parse_text("set on"),
             ControlMessage {
                 selector: "set".to_owned(),
-                atoms: vec![ControlValue::Bool(true)]
+                atoms: vec![ControlValue::bool(true)]
             }
         );
     }
@@ -297,7 +455,7 @@ mod tests {
             ControlMessage::parse_text("   "),
             ControlMessage {
                 selector: "symbol".to_owned(),
-                atoms: vec![ControlValue::String(String::new())]
+                atoms: vec![ControlValue::string(String::new())]
             }
         );
         assert_eq!(
@@ -305,9 +463,9 @@ mod tests {
             ControlMessage {
                 selector: "route".to_owned(),
                 atoms: vec![
-                    ControlValue::I32(1),
-                    ControlValue::Bool(true),
-                    ControlValue::String("label".to_owned())
+                    ControlValue::int(1),
+                    ControlValue::bool(true),
+                    ControlValue::string("label".to_owned())
                 ]
             }
         );
@@ -320,44 +478,60 @@ mod tests {
         );
         assert_eq!(ControlMessage::bang().to_text(), "bang");
         assert_eq!(
-            ControlMessage::from_value(ControlValue::String("ready".to_owned())).to_text(),
+            ControlMessage::from_value(ControlValue::string("ready".to_owned())).to_text(),
             "symbol ready"
         );
         assert_eq!(
-            ControlMessage::from_value(ControlValue::Rgba([1.0, 0.5, 0.25, 1.0])).to_text(),
-            "rgba rgba 1 0.5 0.25 1"
+            ControlMessage::from_value(ControlValue::uint(9)).to_text(),
+            "uint 9"
+        );
+        assert_eq!(
+            ControlMessage::from_value(ControlValue::bool(true)).to_text(),
+            "bool on"
+        );
+        assert_eq!(
+            ControlMessage::from_value(ControlValue::bool(false)).to_text(),
+            "bool off"
+        );
+        assert_eq!(
+            ControlMessage::from_value(ControlValue::color([1.0, 0.5, 0.25, 1.0])).to_text(),
+            "color color 1 0.5 0.25 1"
         );
     }
 
     #[test]
     fn derives_default_value_from_graph_node_params() {
         assert_eq!(
-            ControlValue::for_node_default(&node(VALUE_F32_KIND, json!(1.5))),
-            Some(ControlValue::F32(1.5))
+            ControlValue::for_node_default(&node(FLOAT_KIND, json!(1.5))),
+            Some(ControlValue::float(1.5))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(VALUE_I32_KIND, json!(7))),
-            Some(ControlValue::I32(7))
+            ControlValue::for_node_default(&node(INT_KIND, json!(7))),
+            Some(ControlValue::int(7))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(VALUE_BOOL_KIND, json!(true))),
-            Some(ControlValue::Bool(true))
+            ControlValue::for_node_default(&node(UINT_KIND, json!(7))),
+            Some(ControlValue::uint(7))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(COLOR_RGBA_KIND, json!([0.1, 0.2, 0.3, 1.0]))),
-            Some(ControlValue::Rgba([0.1, 0.2, 0.3, 1.0]))
+            ControlValue::for_node_default(&node(BOOL_KIND, json!(true))),
+            Some(ControlValue::bool(true))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(COLOR_KIND, json!([0.1, 0.2, 0.3, 1.0]))),
+            Some(ControlValue::color([0.1, 0.2, 0.3, 1.0]))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(STRING_KIND, json!("ready"))),
-            Some(ControlValue::String("ready".to_owned()))
+            Some(ControlValue::string("ready".to_owned()))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(TOGGLE_KIND, json!(true))),
-            Some(ControlValue::Bool(true))
+            Some(ControlValue::bool(true))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(MESSAGE_KIND, json!("perform"))),
-            Some(ControlValue::String("perform".to_owned()))
+            Some(ControlValue::string("perform".to_owned()))
         );
         assert_eq!(
             ControlValue::for_node_default(&node("core.comment", json!(null))),
@@ -367,39 +541,43 @@ mod tests {
         panel.params.insert("color".to_owned(), json!("#00ff00"));
         assert_eq!(
             ControlValue::for_node_default(&panel),
-            Some(ControlValue::String("#00ff00".to_owned()))
+            Some(ControlValue::string("#00ff00".to_owned()))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(UI_SLIDER_F32_KIND, json!(0.75))),
-            Some(ControlValue::F32(0.75))
+            ControlValue::for_node_default(&node(UI_SLIDER_FLOAT_KIND, json!(0.75))),
+            Some(ControlValue::float(0.75))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(UI_TOGGLE_KIND, json!(true))),
-            Some(ControlValue::Bool(true))
+            Some(ControlValue::bool(true))
         );
     }
 
     #[test]
     fn invalid_or_missing_params_use_type_defaults() {
         assert_eq!(
-            ControlValue::for_node_default(&node(VALUE_F32_KIND, json!("bad"))),
-            Some(ControlValue::F32(0.0))
+            ControlValue::for_node_default(&node(FLOAT_KIND, json!("bad"))),
+            Some(ControlValue::float(0.0))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(VALUE_I32_KIND, json!(1.25))),
-            Some(ControlValue::I32(0))
+            ControlValue::for_node_default(&node(INT_KIND, json!(1.25))),
+            Some(ControlValue::int(0))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(VALUE_BOOL_KIND, json!("bad"))),
-            Some(ControlValue::Bool(false))
+            ControlValue::for_node_default(&node(UINT_KIND, json!(-1))),
+            Some(ControlValue::uint(0))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(COLOR_RGBA_KIND, json!([0.1, 0.2]))),
-            Some(ControlValue::Rgba([1.0, 1.0, 1.0, 1.0]))
+            ControlValue::for_node_default(&node(BOOL_KIND, json!("bad"))),
+            Some(ControlValue::bool(false))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(COLOR_KIND, json!([0.1, 0.2]))),
+            Some(ControlValue::color([1.0, 1.0, 1.0, 1.0]))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(STRING_KIND, json!(false))),
-            Some(ControlValue::String(String::new()))
+            Some(ControlValue::string(String::new()))
         );
         assert_eq!(
             ControlValue::for_node_default(&node("core.comment", json!(null))),
@@ -407,48 +585,56 @@ mod tests {
         );
         assert_eq!(
             ControlValue::for_node_default(&node(PANEL_KIND, json!(null))),
-            Some(ControlValue::String("transparent".to_owned()))
+            Some(ControlValue::string("transparent".to_owned()))
         );
     }
 
     #[test]
     fn matches_only_stored_value_types() {
-        assert!(ControlValue::F32(1.0).matches_stored_type(&ControlValue::F32(0.0)));
-        assert!(ControlValue::I32(1).matches_stored_type(&ControlValue::I32(0)));
-        assert!(ControlValue::Bool(true).matches_stored_type(&ControlValue::Bool(false)));
+        assert!(ControlValue::float(1.0).matches_stored_type(&ControlValue::float(0.0)));
+        assert!(ControlValue::int(1).matches_stored_type(&ControlValue::int(0)));
+        assert!(ControlValue::bool(true).matches_stored_type(&ControlValue::bool(false)));
         assert!(
-            ControlValue::String("a".to_owned())
-                .matches_stored_type(&ControlValue::String("b".to_owned()))
+            ControlValue::string("a".to_owned())
+                .matches_stored_type(&ControlValue::string("b".to_owned()))
         );
         assert!(
-            ControlValue::Rgba([1.0, 0.0, 0.0, 1.0])
-                .matches_stored_type(&ControlValue::Rgba([0.0, 0.0, 0.0, 1.0]))
+            ControlValue::color([1.0, 0.0, 0.0, 1.0])
+                .matches_stored_type(&ControlValue::color([0.0, 0.0, 0.0, 1.0]))
         );
-        assert!(!ControlValue::F32(1.0).matches_stored_type(&ControlValue::I32(1)));
+        assert!(!ControlValue::float(1.0).matches_stored_type(&ControlValue::int(1)));
     }
 
     #[test]
     fn reports_kind_labels_for_diagnostics() {
-        assert_eq!(ControlValue::F32(1.0).kind_label(), "f32");
-        assert_eq!(ControlValue::I32(1).kind_label(), "i32");
-        assert_eq!(ControlValue::Bool(true).kind_label(), "bool");
-        assert_eq!(ControlValue::String("x".to_owned()).kind_label(), "string");
+        assert_eq!(ControlValue::float(1.0).kind_label(), "number.float/f32");
+        assert_eq!(ControlValue::int(1).kind_label(), "number.int/i32");
+        assert_eq!(ControlValue::uint(1).kind_label(), "number.uint/u32");
+        assert_eq!(ControlValue::bool(true).kind_label(), "boolean");
+        assert_eq!(ControlValue::string("x".to_owned()).kind_label(), "string");
         assert_eq!(
-            ControlValue::Rgba([0.0, 0.0, 0.0, 1.0]).kind_label(),
-            "rgba"
+            ControlValue::color([0.0, 0.0, 0.0, 1.0]).kind_label(),
+            "color/rgba32f"
         );
         assert_eq!(ControlMessage::bang().selector, "bang");
     }
 
     #[test]
     fn converts_shader_values() {
-        assert_eq!(ControlValue::F32(1.25).as_f32(), Some(1.25));
+        assert_eq!(ControlValue::float(1.25).as_f32(), Some(1.25));
+        assert_eq!(ControlValue::float(f64::NAN).as_f32(), Some(0.0));
+        assert_eq!(ControlValue::int(i64::MAX).as_i32(), Some(i32::MAX));
+        assert_eq!(ControlValue::uint(u64::MAX).as_u32(), Some(u32::MAX));
+        assert_eq!(ControlValue::bool(true).as_bool(), Some(true));
         assert_eq!(
-            ControlValue::Rgba([-1.0, 0.25, 2.0, 1.0]).as_rgba_f32(),
+            ControlValue::color([-1.0, 0.25, 2.0, 1.0]).as_rgba_f32(),
             Some([0.0, 0.25, 1.0, 1.0])
         );
-        assert_eq!(ControlValue::Bool(false).as_f32(), None);
-        assert_eq!(ControlValue::F32(0.0).as_rgba_f32(), None);
+        assert_eq!(ControlValue::bool(false).as_f32(), None);
+        assert_eq!(ControlValue::bool(false).as_i32(), None);
+        assert_eq!(ControlValue::bool(false).as_u32(), None);
+        assert_eq!(ControlValue::float(0.0).as_rgba_f32(), None);
+        assert_eq!(ControlValue::float(0.0).as_bool(), None);
     }
 
     fn node(kind: &str, value: serde_json::Value) -> GraphNode {

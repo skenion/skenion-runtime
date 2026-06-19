@@ -90,7 +90,7 @@ mod tests {
             nodes: vec![
                 PlanNode {
                     node_id: "a".to_owned(),
-                    kind: "core.value-f32".to_owned(),
+                    kind: "core.float".to_owned(),
                     kind_version: "0.1.0".to_owned(),
                     execution_model: ExecutionModel::Value,
                     order: 0,
@@ -134,6 +134,6 @@ mod tests {
         assert_eq!(report.frames.len(), 1);
         assert!(text.contains("dummy execution: graph revision 1 frames=1"));
         assert!(text.contains("frame 0:"));
-        assert!(text.contains("a core.value-f32@0.1.0 order=0 status=simulated"));
+        assert!(text.contains("a core.float@0.1.0 order=0 status=simulated"));
     }
 }

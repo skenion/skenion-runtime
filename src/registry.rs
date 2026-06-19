@@ -219,7 +219,7 @@ mod tests {
           "displayName": "Node",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.f32" } }
+            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
           ],
           "execution": { "model": "value" },
           "state": { "persistent": false },
