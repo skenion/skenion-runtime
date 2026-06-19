@@ -13,6 +13,14 @@ pub const BANG_KIND: &str = "core.bang";
 pub const MESSAGE_KIND: &str = "core.message";
 pub const COMMENT_KIND: &str = "core.comment";
 pub const PANEL_KIND: &str = "core.panel";
+pub const OPERATOR_ADD_KIND: &str = "core.operator.add";
+pub const OPERATOR_SUB_KIND: &str = "core.operator.sub";
+pub const OPERATOR_MUL_KIND: &str = "core.operator.mul";
+pub const OPERATOR_DIV_KIND: &str = "core.operator.div";
+pub const OPERATOR_POW_KIND: &str = "core.operator.pow";
+pub const OPERATOR_MIN_KIND: &str = "core.operator.min";
+pub const OPERATOR_MAX_KIND: &str = "core.operator.max";
+pub const OPERATOR_SQRT_KIND: &str = "core.operator.sqrt";
 
 pub const DEFAULT_FLOAT_REPRESENTATION: &str = "f32";
 pub const DEFAULT_INT_REPRESENTATION: &str = "i32";
@@ -125,6 +133,10 @@ impl ControlValue {
                     .and_then(Value::as_str)
                     .unwrap_or("transparent"),
             )),
+            OPERATOR_ADD_KIND | OPERATOR_SUB_KIND | OPERATOR_MUL_KIND | OPERATOR_DIV_KIND
+            | OPERATOR_POW_KIND | OPERATOR_MIN_KIND | OPERATOR_MAX_KIND | OPERATOR_SQRT_KIND => {
+                Some(Self::float(0.0))
+            }
             _ => None,
         }
     }
