@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.33.0...skenion-runtime-v0.34.0) (2026-06-20)
+
+
+### Features
+
+* **runtime:** expose clock source API ([#85](https://github.com/echovisionlab/skenion-runtime/issues/85)) ([6760b48](https://github.com/echovisionlab/skenion-runtime/commit/6760b48f0c6f65b4f7185ff9683fe54cc8770d7c))
+
 ## [0.33.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.32.0...skenion-runtime-v0.33.0) (2026-06-20)
 
 
