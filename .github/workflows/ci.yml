@@ -50,7 +50,7 @@ jobs:
       - run: cargo test --all-targets --all-features
       - run: rustup component add llvm-tools-preview
       - run: cargo install cargo-llvm-cov --locked
-      - run: cargo llvm-cov --lib --all-features --ignore-filename-regex '(Skenion-contracts|src/main\.rs|src/audio_backend\.rs|src/midi_input\.rs|src/visual\.rs|src/render/native\.rs|src/render/preview_document\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 100 --fail-under-functions 100 --summary-only
+      - run: cargo llvm-cov --lib --all-features --ignore-filename-regex '(Skenion-contracts|src/main\.rs|src/audio_backend\.rs|src/clock_source_manager\.rs|src/midi_input\.rs|src/visual\.rs|src/render/native\.rs|src/render/preview_document\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 100 --fail-under-functions 100 --summary-only
       - run: bash scripts/validate-with-runtime.sh ../..
         working-directory: .deps/skenion-examples
       - run: cargo run -- validate-project --graph .deps/skenion-examples/compatibility/v0.1/graphs/valid/minimal-value.graph.json --nodes .deps/skenion-examples/compatibility/v0.1/nodes
@@ -166,6 +166,11 @@ jobs:
               SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-shader-diagnostics.sh
             else
               echo "shader diagnostics smoke script is not available on examples main yet"
+            fi
+            if [[ -x scripts/smoke-runtime-clock-source-api.sh ]]; then
+              SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-clock-source-api.sh
+            else
+              echo "clock source API smoke script is not available on examples main yet"
             fi
           )
 

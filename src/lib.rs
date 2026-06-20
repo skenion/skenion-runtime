@@ -1,5 +1,6 @@
 mod audio_backend;
 mod clock;
+mod clock_source_manager;
 mod contract;
 mod control_state;
 mod control_value;
@@ -33,6 +34,12 @@ pub use clock::{
     RuntimeClockSourceId, RuntimeClockSourceKind, RuntimeMidiClockFixture,
     RuntimeMidiClockFixtureEvent, RuntimeMidiClockFixtureReport, TimestampedMidiMessage,
     format_midi_clock_fixture_report_text, run_midi_clock_fixture, run_midi_clock_fixture_file,
+};
+pub use clock_source_manager::{
+    ClockSourceListResponse, ClockSourceManager, ClockSourceSnapshot, ClockSourceSnapshotResponse,
+    MidiClockSourceStartRequest, MidiClockSourceStartResponse, MidiClockSourceStopRequest,
+    MidiClockSourceStopResponse, MidiInputDescriptor, MidiInputListResponse,
+    RuntimeClockSourceStatus,
 };
 pub use contract::{
     ApplyPatchError, AudioClockBridgeMethod, AudioClockBridgePlan, AudioClockDomain,

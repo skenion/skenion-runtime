@@ -21,14 +21,17 @@ use tokio_stream::{Stream, StreamExt, wrappers::IntervalStream};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, GraphDocument, GraphPatch,
-    NodeDefinition, NodeRegistry, PreviewDocument, PreviewManager, ProjectRequestV02,
-    RunProjectRequestV02, RuntimeControlEventRequest, RuntimeControlEventResponse,
-    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
-    RuntimePreviewStartRequest, RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest,
-    ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource, build_execution_plan,
-    build_execution_plan_v02, generated_shader_response_from_preview_document, run_dummy_execution,
-    validate_project, validate_project_v02,
+    ClockSourceListResponse, ClockSourceManager, ClockSourceSnapshotResponse, DummyExecutionReport,
+    ExecutionPlan, GeneratedShaderResponse, GraphDocument, GraphPatch, MidiClockSourceStartRequest,
+    MidiClockSourceStartResponse, MidiClockSourceStopRequest, MidiClockSourceStopResponse,
+    MidiInputListResponse, NodeDefinition, NodeRegistry, PreviewDocument, PreviewManager,
+    ProjectRequestV02, RunProjectRequestV02, RuntimeControlEventRequest,
+    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
+    RuntimeControlStateResponse, RuntimePreviewStartRequest, RuntimeSession,
+    RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
+    ShaderDiagnosticSource, build_execution_plan, build_execution_plan_v02,
+    generated_shader_response_from_preview_document, run_dummy_execution, validate_project,
+    validate_project_v02,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -96,6 +99,7 @@ pub struct RuntimeServerState {
     pub session: Arc<RwLock<RuntimeSession>>,
     pub preview: Arc<Mutex<PreviewManager>>,
     pub assets: Arc<RwLock<RuntimeAssetStore>>,
+    pub clock_sources: Arc<ClockSourceManager>,
     pub started_at: Instant,
 }
 
@@ -105,6 +109,7 @@ impl Default for RuntimeServerState {
             session: Arc::new(RwLock::new(RuntimeSession::default())),
             preview: Arc::new(Mutex::new(PreviewManager::from_env())),
             assets: Arc::new(RwLock::new(RuntimeAssetStore::default())),
+            clock_sources: Arc::new(ClockSourceManager::default()),
             started_at: Instant::now(),
         }
     }
@@ -158,6 +163,11 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v0/runtime/info", get(runtime_info))
+        .route("/v0/clock/sources", get(clock_sources))
+        .route("/v0/clock/sources/{source_id}", get(clock_source))
+        .route("/v0/clock/midi/inputs", get(clock_midi_inputs))
+        .route("/v0/clock/midi/start", post(start_clock_midi))
+        .route("/v0/clock/midi/stop", post(stop_clock_midi))
         .route("/v0/validate", post(validate_project_endpoint))
         .route("/v0/plan", post(plan_project_endpoint))
         .route("/v0/run", post(run_project_endpoint))
@@ -236,8 +246,42 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "assets.get",
             "session.telemetry",
             "session.telemetry.stream",
+            "clock.sources",
+            "clock.sources.read",
+            "clock.midi.inputs",
+            "clock.midi.start",
+            "clock.midi.stop",
         ],
     })
+}
+
+async fn clock_sources(State(state): State<RuntimeServerState>) -> Json<ClockSourceListResponse> {
+    Json(state.clock_sources.list_sources())
+}
+
+async fn clock_source(
+    State(state): State<RuntimeServerState>,
+    Path(source_id): Path<String>,
+) -> Json<ClockSourceSnapshotResponse> {
+    Json(state.clock_sources.get_source(source_id))
+}
+
+async fn clock_midi_inputs(State(state): State<RuntimeServerState>) -> Json<MidiInputListResponse> {
+    Json(state.clock_sources.list_midi_inputs())
+}
+
+async fn start_clock_midi(
+    State(state): State<RuntimeServerState>,
+    Json(request): Json<MidiClockSourceStartRequest>,
+) -> Json<MidiClockSourceStartResponse> {
+    Json(state.clock_sources.start_midi_clock(request))
+}
+
+async fn stop_clock_midi(
+    State(state): State<RuntimeServerState>,
+    Json(request): Json<MidiClockSourceStopRequest>,
+) -> Json<MidiClockSourceStopResponse> {
+    Json(state.clock_sources.stop_midi_clock(request))
 }
 
 async fn validate_project_endpoint(
@@ -1044,6 +1088,8 @@ fn cors_layer() -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, atomic::AtomicU64, mpsc::SyncSender};
+
     use axum::{
         body::{Body, to_bytes},
         http::{
@@ -1056,7 +1102,55 @@ mod tests {
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
+    use crate::{
+        MidiInputDescriptor, RuntimeClockDiagnostic, RuntimeClockDiagnosticSeverity,
+        TimestampedMidiMessage,
+        clock_source_manager::{MidiClockInputConnection, MidiInputRegistry},
+    };
+
     use super::*;
+
+    struct ServerFakeMidiConnection;
+
+    impl MidiClockInputConnection for ServerFakeMidiConnection {}
+
+    struct ServerFakeMidiInputRegistry {
+        inputs: Vec<MidiInputDescriptor>,
+    }
+
+    impl MidiInputRegistry for ServerFakeMidiInputRegistry {
+        fn list_inputs(&self) -> MidiInputListResponse {
+            MidiInputListResponse {
+                ok: true,
+                inputs: self.inputs.clone(),
+                diagnostics: Vec::new(),
+            }
+        }
+
+        fn open_midi_clock_input(
+            &self,
+            input_port_index: usize,
+            _event_sender: SyncSender<TimestampedMidiMessage>,
+            _dropped_event_count: Arc<AtomicU64>,
+        ) -> Result<Box<dyn MidiClockInputConnection>, RuntimeClockDiagnostic> {
+            if self
+                .inputs
+                .iter()
+                .any(|input| input.index == input_port_index)
+            {
+                Ok(Box::new(ServerFakeMidiConnection))
+            } else {
+                Err(RuntimeClockDiagnostic {
+                    severity: RuntimeClockDiagnosticSeverity::Error,
+                    code: "invalid-midi-input-port".to_owned(),
+                    message: format!(
+                        "requested MIDI input port does not exist; requested index {input_port_index}, available MIDI input ports {}",
+                        self.inputs.len()
+                    ),
+                })
+            }
+        }
+    }
 
     #[tokio::test]
     async fn health_response() {
@@ -1096,6 +1190,11 @@ mod tests {
             "session.render.generatedShader",
             "session.telemetry",
             "session.telemetry.stream",
+            "clock.sources",
+            "clock.sources.read",
+            "clock.midi.inputs",
+            "clock.midi.start",
+            "clock.midi.stop",
         ] {
             assert!(
                 capabilities
@@ -1104,6 +1203,134 @@ mod tests {
                 "missing capability {expected}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn clock_source_api_reports_empty_state_and_invalid_requests() {
+        let app = runtime_router_with_fake_midi_inputs(Vec::new());
+
+        let sources = get_json_with(app.clone(), "/v0/clock/sources").await;
+        assert_eq!(sources["ok"], true);
+        assert_eq!(sources["sources"], json!([]));
+
+        let missing = get_json_with(app.clone(), "/v0/clock/sources/missing").await;
+        assert_eq!(missing["ok"], false);
+        assert_eq!(missing["source"], Value::Null);
+        assert_eq!(missing["diagnostics"][0]["code"], "clock-source-not-found");
+
+        let inputs = get_json_with(app.clone(), "/v0/clock/midi/inputs").await;
+        assert_eq!(inputs["ok"], true);
+        assert_eq!(inputs["inputs"], json!([]));
+
+        let invalid_start = post_json_with(
+            app.clone(),
+            "/v0/clock/midi/start",
+            json!({
+                "sourceId": "midi-clock-1",
+                "inputPortIndex": 65535
+            }),
+        )
+        .await;
+        assert_eq!(invalid_start["ok"], false);
+        assert_eq!(
+            invalid_start["diagnostics"][0]["code"],
+            "invalid-midi-input-port"
+        );
+
+        let sources_after_invalid = get_json_with(app.clone(), "/v0/clock/sources").await;
+        assert_eq!(sources_after_invalid["sources"], json!([]));
+
+        let stop_unknown = post_json_with(
+            app,
+            "/v0/clock/midi/stop",
+            json!({ "sourceId": "midi-clock-1" }),
+        )
+        .await;
+        assert_eq!(stop_unknown["ok"], false);
+        assert_eq!(
+            stop_unknown["diagnostics"][0]["code"],
+            "clock-source-not-found"
+        );
+    }
+
+    #[tokio::test]
+    async fn clock_source_api_rejects_duplicate_running_source_id() {
+        let app = runtime_router_with_fake_midi_inputs(vec![MidiInputDescriptor {
+            index: 0,
+            name: "Fake MIDI".to_owned(),
+            backend: "midir".to_owned(),
+            id: None,
+            stable: false,
+        }]);
+
+        let start = post_json_with(
+            app.clone(),
+            "/v0/clock/midi/start",
+            json!({
+                "sourceId": "midi-clock-1",
+                "inputPortIndex": 0
+            }),
+        )
+        .await;
+        assert_eq!(start["ok"], true);
+        assert_eq!(start["source"]["status"], "running");
+        assert_eq!(
+            start["source"]["latestSnapshot"]["sourceId"],
+            "midi-clock-1"
+        );
+
+        let duplicate = post_json_with(
+            app.clone(),
+            "/v0/clock/midi/start",
+            json!({
+                "sourceId": "midi-clock-1",
+                "inputPortIndex": 0
+            }),
+        )
+        .await;
+        assert_eq!(duplicate["ok"], false);
+        assert_eq!(
+            duplicate["diagnostics"][0]["code"],
+            "clock-source-already-running"
+        );
+
+        let stop = post_json_with(
+            app.clone(),
+            "/v0/clock/midi/stop",
+            json!({ "sourceId": "midi-clock-1" }),
+        )
+        .await;
+        assert_eq!(stop["ok"], true);
+        assert_eq!(stop["source"]["status"], "stopped");
+
+        let restarted = post_json_with(
+            app.clone(),
+            "/v0/clock/midi/start",
+            json!({
+                "sourceId": "midi-clock-1",
+                "inputPortIndex": 0
+            }),
+        )
+        .await;
+        assert_eq!(restarted["ok"], true);
+        let _ = post_json_with(
+            app,
+            "/v0/clock/midi/stop",
+            json!({ "sourceId": "midi-clock-1" }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn session_load_does_not_autostart_clock_sources() {
+        let app = runtime_router_with_fake_midi_inputs(Vec::new());
+
+        let loaded = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        assert_eq!(loaded["ok"], true);
+
+        let sources = get_json_with(app, "/v0/clock/sources").await;
+        assert_eq!(sources["ok"], true);
+        assert_eq!(sources["sources"], json!([]));
     }
 
     #[tokio::test]
@@ -2041,6 +2268,7 @@ mod tests {
             session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            clock_sources: std::sync::Arc::new(ClockSourceManager::default()),
             started_at: std::time::Instant::now(),
         };
         let app = runtime_router_with_state(state.clone());
@@ -2517,6 +2745,19 @@ mod tests {
             session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            clock_sources: std::sync::Arc::new(ClockSourceManager::default()),
+            started_at: std::time::Instant::now(),
+        })
+    }
+
+    fn runtime_router_with_fake_midi_inputs(inputs: Vec<MidiInputDescriptor>) -> Router {
+        runtime_router_with_state(RuntimeServerState {
+            session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
+            preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
+            assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            clock_sources: std::sync::Arc::new(ClockSourceManager::with_midi_input_registry(
+                Arc::new(ServerFakeMidiInputRegistry { inputs }),
+            )),
             started_at: std::time::Instant::now(),
         })
     }

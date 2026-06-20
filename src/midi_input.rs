@@ -233,7 +233,7 @@ pub fn format_midi_clock_input_report_text(report: &RuntimeMidiClockInputReport)
     lines.join("\n") + "\n"
 }
 
-fn create_midi_input(client_name: &str) -> Result<MidiInput, RuntimeClockDiagnostic> {
+pub(crate) fn create_midi_input(client_name: &str) -> Result<MidiInput, RuntimeClockDiagnostic> {
     let mut input = MidiInput::new(client_name).map_err(|error| RuntimeClockDiagnostic {
         severity: RuntimeClockDiagnosticSeverity::Error,
         code: "midi-input-unavailable".to_owned(),
@@ -243,7 +243,7 @@ fn create_midi_input(client_name: &str) -> Result<MidiInput, RuntimeClockDiagnos
     Ok(input)
 }
 
-fn collect_midi_input_ports(
+pub(crate) fn collect_midi_input_ports(
     input: &MidiInput,
     midir_ports: &[MidiInputPort],
     diagnostics: &mut Vec<RuntimeClockDiagnostic>,
@@ -265,7 +265,7 @@ fn collect_midi_input_ports(
         .collect()
 }
 
-fn invalid_port_diagnostic(
+pub(crate) fn invalid_port_diagnostic(
     index: usize,
     available_count: usize,
     reason: &str,
@@ -320,7 +320,7 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-fn host_monotonic_timestamp_ns() -> u64 {
+pub(crate) fn host_monotonic_timestamp_ns() -> u64 {
     static PROCESS_START: OnceLock<Instant> = OnceLock::new();
     PROCESS_START
         .get_or_init(Instant::now)
