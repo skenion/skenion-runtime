@@ -6,6 +6,7 @@ mod control_value;
 mod conversion;
 mod dsp;
 mod loader;
+mod midi_input;
 mod planner;
 mod preview_control_state;
 mod preview_manager;
@@ -66,6 +67,13 @@ pub use dsp::{
     AudioRealtimeDspExecutor, AudioRealtimeDspOptions, build_audio_dsp_plan, run_offline_audio_dsp,
 };
 pub use loader::{LoadError, load_graph_document, load_node_definition};
+pub use midi_input::{
+    RUNTIME_MIDI_CLOCK_INPUT_SCHEMA, RUNTIME_MIDI_CLOCK_INPUT_SCHEMA_VERSION,
+    RUNTIME_MIDI_INPUT_SCHEMA, RUNTIME_MIDI_INPUT_SCHEMA_VERSION, RuntimeMidiClockInputReport,
+    RuntimeMidiClockInputRequest, RuntimeMidiInputListReport, RuntimeMidiInputPort,
+    format_midi_clock_input_report_text, format_midi_input_list_report_text, list_midi_input_ports,
+    run_midi_clock_input,
+};
 pub use planner::{
     ExecutionGroup, ExecutionPlan, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode,
     build_execution_plan, format_plan_text,
