@@ -25,14 +25,18 @@ pub use audio_backend::{
     start_default_audio_output_backend,
 };
 pub use contract::{
-    ApplyPatchError, CycleValidationV02, DataFlow, DataType, Edge, EdgeSpecV02, ExecutionModel,
-    ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02, FeedbackPolicyV02, GraphDocument,
-    GraphDocumentV02, GraphNode, GraphNodeV02, GraphPatch, GraphPatchEvent, GraphPatchEventKind,
-    GraphPatchHistory, GraphPatchOperation, GraphValidationResultV02, InvertPatchError,
-    MergePolicyV02, NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState, NumberRange, Port,
-    PortActivation, PortDirection, PortDirectionV02, PortRef, PortSpecV02,
+    ApplyPatchError, AudioClockBridgeMethod, AudioClockBridgePlan, AudioClockDomain,
+    AudioClockDomainAuthority, AudioDeviceDescriptor, AudioDevicePreference, AudioEndpoint,
+    AudioEndpointDirection, AudioGraphPartition, AudioResamplerPlan, AudioStreamConfigRequest,
+    AudioStreamConfigResolved, CycleValidationV02, DataFlow, DataType, Edge, EdgeSpecV02,
+    ExecutionModel, ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02, FeedbackPolicyV02,
+    GraphDocument, GraphDocumentV02, GraphNode, GraphNodeV02, GraphPatch, GraphPatchEvent,
+    GraphPatchEventKind, GraphPatchHistory, GraphPatchOperation, GraphValidationResultV02,
+    InvertPatchError, MergePolicyV02, NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState,
+    NumberRange, Port, PortActivation, PortDirection, PortDirectionV02, PortRef, PortSpecV02,
     ReplaceNodeInterfaceEdgePolicy, ShaderInterface, ShaderInterfaceDiagnostic, ShaderUniform,
-    StringOrStrings, analyze_shader_interface_v01, shader_interface_to_ports_v01,
+    StringOrStrings, analyze_shader_interface_v01, plan_audio_clock_bridge,
+    shader_interface_to_ports_v01,
 };
 pub use control_state::{
     ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,
@@ -44,9 +48,9 @@ pub use conversion::{convert_control_value_to_data_kind, convert_control_value_t
 pub use dsp::{
     AudioDspBlockReport, AudioDspBuffer, AudioDspControlInput, AudioDspPlan, AudioDspPlanEdge,
     AudioDspPlanError, AudioDspPlanNode, AudioDspPlanOptions, AudioDspRenderedBuffer,
-    AudioDspSignalInput, AudioDspSignalOutput, AudioDspSnapshot, AudioOfflineDspError,
-    AudioOfflineDspOptions, AudioOfflineDspReport, AudioRealtimeDspError, AudioRealtimeDspExecutor,
-    AudioRealtimeDspOptions, build_audio_dsp_plan, run_offline_audio_dsp,
+    AudioDspSignalInput, AudioDspSignalOutput, AudioDspSnapshot, AudioEndpointPlanNode,
+    AudioOfflineDspError, AudioOfflineDspOptions, AudioOfflineDspReport, AudioRealtimeDspError,
+    AudioRealtimeDspExecutor, AudioRealtimeDspOptions, build_audio_dsp_plan, run_offline_audio_dsp,
 };
 pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{

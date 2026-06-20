@@ -13,7 +13,7 @@ cpal = "0.18.1"
 pollster = "0.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-skenion-contracts = { git = "https://github.com/echovisionlab/skenion-contracts", tag = "skenion-contracts-v0.29.0" }
+skenion-contracts = { git = "https://github.com/echovisionlab/skenion-contracts", tag = "skenion-contracts-v0.30.0" }
 thiserror = "2.0.17"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 tokio-stream = "0.1.17"

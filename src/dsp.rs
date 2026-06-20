@@ -6,12 +6,17 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::{
-    DataFlow, Edge, ExecutionModel, GraphDocument, GraphNode, NodeRegistry, PlanError, Port,
-    PortDirection, build_execution_plan, validate_project,
+    AudioClockBridgeMethod, AudioClockBridgePlan, AudioClockDomain, AudioClockDomainAuthority,
+    AudioEndpoint, AudioEndpointDirection, AudioGraphPartition, DataFlow, Edge, ExecutionModel,
+    GraphDocument, GraphNode, NodeRegistry, PlanError, Port, PortDirection, build_execution_plan,
+    plan_audio_clock_bridge, validate_project,
 };
 
 const AUDIO_SIGNAL_KIND: &str = "signal.audio";
+const AUDIO_INPUT_KIND: &str = "audio.input";
 const AUDIO_OUTPUT_KIND: &str = "audio.output";
+const AUDIO_CLOCK_BRIDGE_KIND: &str = "audio.clock-bridge";
+const AUDIO_RESAMPLE_KIND: &str = "audio.resample";
 const DEFAULT_BLOCK_SIZE: u32 = 64;
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_SAMPLE_FORMAT: &str = "f32";
@@ -38,9 +43,20 @@ pub struct AudioDspPlan {
     pub graph_revision: String,
     pub block_size: u32,
     pub sample_rate: u32,
+    pub endpoints: Vec<AudioEndpoint>,
+    pub clock_domains: Vec<AudioClockDomain>,
+    pub partitions: Vec<AudioGraphPartition>,
+    pub bridge_plans: Vec<AudioClockBridgePlan>,
     pub nodes: Vec<AudioDspPlanNode>,
     pub edges: Vec<AudioDspPlanEdge>,
     pub buffers: Vec<AudioDspBuffer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioEndpointPlanNode {
+    pub node_id: String,
+    pub kind: String,
+    pub clock_domain_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -181,6 +197,15 @@ pub enum AudioDspPlanError {
     InvalidSampleRate,
     #[error("audio signal port {node_id}.{port_id} is not an audio_block node")]
     SignalPortOutsideAudioBlock { node_id: String, port_id: String },
+    #[error(
+        "audio signal route from {source_node_id} domain {source_clock_domain_id} to {target_node_id} domain {target_clock_domain_id} requires audio.clock-bridge or audio.resample"
+    )]
+    ClockDomainCrossingRequiresBridge {
+        source_node_id: String,
+        target_node_id: String,
+        source_clock_domain_id: String,
+        target_clock_domain_id: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -438,6 +463,11 @@ pub fn build_audio_dsp_plan(
         .collect::<std::collections::HashSet<_>>();
 
     reject_signal_ports_outside_audio_block(graph, &audio_node_set)?;
+    let endpoint_nodes = audio_endpoint_plan_nodes(graph);
+    let endpoints = audio_endpoints(graph, &endpoint_nodes);
+    let clock_domains = audio_clock_domains(&endpoint_nodes, options.sample_rate);
+    let partitions = audio_graph_partitions(graph, &endpoint_nodes, &audio_node_set);
+    let bridge_plans = audio_clock_bridge_plans(graph, &endpoint_nodes)?;
 
     let mut buffers = Vec::new();
     let mut buffer_by_output = BTreeMap::new();
@@ -497,6 +527,10 @@ pub fn build_audio_dsp_plan(
         graph_revision: graph.revision.clone(),
         block_size: options.block_size,
         sample_rate: options.sample_rate,
+        endpoints,
+        clock_domains,
+        partitions,
+        bridge_plans,
         nodes,
         edges: signal_edges,
         buffers,
@@ -709,6 +743,250 @@ fn matches_realtime_kind(kind: &str) -> bool {
     )
 }
 
+fn audio_endpoint_plan_nodes(graph: &GraphDocument) -> Vec<AudioEndpointPlanNode> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == AUDIO_INPUT_KIND || node.kind == AUDIO_OUTPUT_KIND)
+        .map(|node| AudioEndpointPlanNode {
+            node_id: node.id.clone(),
+            kind: node.kind.clone(),
+            clock_domain_id: audio_clock_domain_id(node),
+        })
+        .collect()
+}
+
+fn audio_clock_domain_id(node: &GraphNode) -> String {
+    node.params
+        .get("clockDomain")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("endpoint:{}", node.id))
+}
+
+fn audio_endpoints(
+    graph: &GraphDocument,
+    endpoint_nodes: &[AudioEndpointPlanNode],
+) -> Vec<AudioEndpoint> {
+    endpoint_nodes
+        .iter()
+        .filter_map(|endpoint| {
+            let node = graph
+                .nodes
+                .iter()
+                .find(|node| node.id == endpoint.node_id)?;
+            let direction = if node.kind == AUDIO_INPUT_KIND {
+                AudioEndpointDirection::Input
+            } else {
+                AudioEndpointDirection::Output
+            };
+            let channel_ports = node
+                .ports
+                .iter()
+                .filter(|port| is_audio_signal_port(port))
+                .map(|port| port.id.clone())
+                .collect();
+            Some(AudioEndpoint {
+                id: node.id.clone(),
+                node_id: node.id.clone(),
+                direction,
+                channel_ports,
+                requested_config: None,
+                resolved_config: None,
+                clock_domain_id: Some(endpoint.clock_domain_id.clone()),
+            })
+        })
+        .collect()
+}
+
+fn audio_clock_domains(
+    endpoint_nodes: &[AudioEndpointPlanNode],
+    sample_rate: u32,
+) -> Vec<AudioClockDomain> {
+    let mut domains = BTreeMap::<String, Vec<String>>::new();
+    for endpoint in endpoint_nodes {
+        domains
+            .entry(endpoint.clock_domain_id.clone())
+            .or_default()
+            .push(endpoint.node_id.clone());
+    }
+    domains
+        .into_iter()
+        .map(|(id, endpoint_ids)| AudioClockDomain {
+            id: id.clone(),
+            authority: if id.starts_with("endpoint:") {
+                AudioClockDomainAuthority::Unavailable
+            } else {
+                AudioClockDomainAuthority::UserConfigured
+            },
+            source: "runtime.audio-domain-planner.v0".to_owned(),
+            sample_rate: Some(sample_rate),
+            drift_compensated: None,
+            shared_with: Some(endpoint_ids),
+        })
+        .collect()
+}
+
+fn audio_graph_partitions(
+    graph: &GraphDocument,
+    endpoint_nodes: &[AudioEndpointPlanNode],
+    audio_node_set: &std::collections::HashSet<&str>,
+) -> Vec<AudioGraphPartition> {
+    let mut nodes_by_domain = BTreeMap::<String, Vec<String>>::new();
+    for endpoint in endpoint_nodes {
+        nodes_by_domain
+            .entry(endpoint.clock_domain_id.clone())
+            .or_default()
+            .push(endpoint.node_id.clone());
+    }
+    if endpoint_nodes.is_empty() {
+        return Vec::new();
+    }
+    let default_domain = endpoint_nodes
+        .iter()
+        .find(|endpoint| endpoint.kind == AUDIO_OUTPUT_KIND)
+        .or_else(|| endpoint_nodes.first())
+        .map(|endpoint| endpoint.clock_domain_id.clone())
+        .expect("endpoint_nodes is not empty");
+    for node in &graph.nodes {
+        if !audio_node_set.contains(node.id.as_str()) || is_audio_endpoint_kind(&node.kind) {
+            continue;
+        }
+        nodes_by_domain
+            .entry(default_domain.clone())
+            .or_default()
+            .push(node.id.clone());
+    }
+    nodes_by_domain
+        .into_iter()
+        .map(|(clock_domain_id, node_ids)| {
+            let endpoint_ids = endpoint_nodes
+                .iter()
+                .filter(|endpoint| endpoint.clock_domain_id == clock_domain_id)
+                .map(|endpoint| endpoint.node_id.clone())
+                .collect::<Vec<_>>();
+            AudioGraphPartition {
+                id: format!("partition:{clock_domain_id}"),
+                clock_domain_id,
+                endpoint_ids,
+                node_ids,
+            }
+        })
+        .collect()
+}
+
+fn audio_clock_bridge_plans(
+    graph: &GraphDocument,
+    endpoint_nodes: &[AudioEndpointPlanNode],
+) -> Result<Vec<AudioClockBridgePlan>, AudioDspPlanError> {
+    let nodes_by_id = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let mut plans = Vec::new();
+
+    for source in endpoint_nodes
+        .iter()
+        .filter(|endpoint| endpoint.kind == AUDIO_INPUT_KIND)
+    {
+        for output in endpoint_nodes
+            .iter()
+            .filter(|endpoint| endpoint.kind == AUDIO_OUTPUT_KIND)
+        {
+            let Some(route) =
+                find_audio_route_to_output(graph, &nodes_by_id, &source.node_id, &output.node_id)
+            else {
+                continue;
+            };
+            let bridge_node_id = route.explicit_bridge_node_id.as_deref();
+            let source_domain = endpoint_domain(source);
+            let target_domain = endpoint_domain(output);
+            let mut plan = plan_audio_clock_bridge(&source_domain, &target_domain, bridge_node_id);
+            if matches!(
+                route.explicit_bridge_kind.as_deref(),
+                Some(AUDIO_RESAMPLE_KIND)
+            ) {
+                plan.method = AudioClockBridgeMethod::Resample;
+            }
+            if plan.method == AudioClockBridgeMethod::Invalid {
+                return Err(AudioDspPlanError::ClockDomainCrossingRequiresBridge {
+                    source_node_id: source.node_id.clone(),
+                    target_node_id: output.node_id.clone(),
+                    source_clock_domain_id: source.clock_domain_id.clone(),
+                    target_clock_domain_id: output.clock_domain_id.clone(),
+                });
+            }
+            plans.push(plan);
+        }
+    }
+
+    Ok(plans)
+}
+
+fn endpoint_domain(endpoint: &AudioEndpointPlanNode) -> AudioClockDomain {
+    AudioClockDomain {
+        id: endpoint.clock_domain_id.clone(),
+        authority: if endpoint.clock_domain_id.starts_with("endpoint:") {
+            AudioClockDomainAuthority::Unavailable
+        } else {
+            AudioClockDomainAuthority::UserConfigured
+        },
+        source: endpoint.node_id.clone(),
+        sample_rate: None,
+        drift_compensated: None,
+        shared_with: None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioSignalRoute {
+    explicit_bridge_node_id: Option<String>,
+    explicit_bridge_kind: Option<String>,
+}
+
+fn find_audio_route_to_output(
+    graph: &GraphDocument,
+    nodes_by_id: &HashMap<&str, &GraphNode>,
+    source_node_id: &str,
+    output_node_id: &str,
+) -> Option<AudioSignalRoute> {
+    let mut stack = vec![(source_node_id.to_owned(), None::<(String, String)>)];
+    let mut visited = std::collections::HashSet::<String>::new();
+    while let Some((node_id, bridge)) = stack.pop() {
+        if !visited.insert(node_id.clone()) {
+            continue;
+        }
+        if node_id == output_node_id {
+            return Some(AudioSignalRoute {
+                explicit_bridge_node_id: bridge.as_ref().map(|(id, _)| id.clone()),
+                explicit_bridge_kind: bridge.map(|(_, kind)| kind),
+            });
+        }
+        for edge in graph.edges.iter().filter(|edge| edge.from.node == node_id) {
+            if !is_audio_signal_edge(edge, graph) {
+                continue;
+            }
+            let next_bridge = nodes_by_id
+                .get(edge.to.node.as_str())
+                .filter(|node| is_audio_clock_boundary_kind(&node.kind))
+                .map(|node| (node.id.clone(), node.kind.clone()))
+                .or_else(|| bridge.clone());
+            stack.push((edge.to.node.clone(), next_bridge));
+        }
+    }
+    None
+}
+
+fn is_audio_endpoint_kind(kind: &str) -> bool {
+    kind == AUDIO_INPUT_KIND || kind == AUDIO_OUTPUT_KIND
+}
+
+fn is_audio_clock_boundary_kind(kind: &str) -> bool {
+    kind == AUDIO_CLOCK_BRIDGE_KIND || kind == AUDIO_RESAMPLE_KIND
+}
+
 fn realtime_node(
     node: &AudioDspPlanNode,
     buffer_index_by_id: &BTreeMap<String, usize>,
@@ -884,7 +1162,10 @@ mod tests {
             audio_binary_definition("audio.operator.mul"),
             audio_unary_definition("audio.operator.sqrt", "in"),
             audio_snapshot_definition(),
+            audio_input_definition(),
             audio_output_definition(),
+            audio_clock_boundary_definition("audio.clock-bridge"),
+            audio_clock_boundary_definition("audio.resample"),
             float_definition(),
             bad_signal_definition(),
         ] {
@@ -1013,6 +1294,319 @@ mod tests {
         assert_eq!(plan.buffers, Vec::new());
         assert_eq!(plan.block_size, DEFAULT_BLOCK_SIZE);
         assert_eq!(plan.sample_rate, DEFAULT_SAMPLE_RATE);
+    }
+
+    #[test]
+    fn plans_same_clock_domain_audio_input_to_output_as_direct_route() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "same-domain-audio-route",
+          "revision": "1",
+          "nodes": [
+            audio_input_node_with_domain("input", "device:aggregate-a"),
+            audio_output_node_with_domain("output", "device:aggregate-a")
+          ],
+          "edges": [
+            { "from": { "node": "input", "port": "out" }, "to": { "node": "output", "port": "left" } }
+          ]
+        }));
+
+        let plan =
+            build_audio_dsp_plan(&graph, &registry(), AudioDspPlanOptions::default()).unwrap();
+
+        assert_eq!(
+            plan.endpoints
+                .iter()
+                .map(|endpoint| {
+                    (
+                        endpoint.node_id.as_str(),
+                        endpoint.direction.clone(),
+                        endpoint.clock_domain_id.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "input",
+                    AudioEndpointDirection::Input,
+                    Some("device:aggregate-a")
+                ),
+                (
+                    "output",
+                    AudioEndpointDirection::Output,
+                    Some("device:aggregate-a")
+                )
+            ]
+        );
+        assert_eq!(plan.clock_domains.len(), 1);
+        assert_eq!(plan.clock_domains[0].id, "device:aggregate-a");
+        assert_eq!(
+            plan.clock_domains[0].authority,
+            AudioClockDomainAuthority::UserConfigured
+        );
+        assert_eq!(
+            plan.partitions
+                .iter()
+                .map(|partition| {
+                    (
+                        partition.clock_domain_id.as_str(),
+                        partition.endpoint_ids.as_slice(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![(
+                "device:aggregate-a",
+                ["input".to_owned(), "output".to_owned()].as_slice()
+            )]
+        );
+        assert_eq!(plan.bridge_plans.len(), 1);
+        assert_eq!(plan.bridge_plans[0].method, AudioClockBridgeMethod::Direct);
+        assert!(!plan.bridge_plans[0].required);
+    }
+
+    #[test]
+    fn rejects_independent_audio_input_to_output_without_explicit_bridge() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "missing-clock-bridge",
+          "revision": "1",
+          "nodes": [
+            audio_input_node_with_domain("input", "device:input-clock"),
+            audio_output_node_with_domain("output", "device:output-clock")
+          ],
+          "edges": [
+            { "from": { "node": "input", "port": "out" }, "to": { "node": "output", "port": "left" } }
+          ]
+        }));
+
+        let error =
+            build_audio_dsp_plan(&graph, &registry(), AudioDspPlanOptions::default()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AudioDspPlanError::ClockDomainCrossingRequiresBridge {
+                source_node_id,
+                target_node_id,
+                source_clock_domain_id,
+                target_clock_domain_id,
+            } if source_node_id == "input"
+                && target_node_id == "output"
+                && source_clock_domain_id == "device:input-clock"
+                && target_clock_domain_id == "device:output-clock"
+        ));
+    }
+
+    #[test]
+    fn unconnected_audio_endpoint_route_has_no_bridge_plan() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "unconnected-endpoints",
+          "revision": "1",
+          "nodes": [
+            audio_input_node("input"),
+            audio_output_node("output")
+          ],
+          "edges": []
+        }));
+
+        let plan =
+            build_audio_dsp_plan(&graph, &registry(), AudioDspPlanOptions::default()).unwrap();
+
+        assert_eq!(plan.endpoints.len(), 2);
+        assert_eq!(plan.bridge_plans, Vec::new());
+    }
+
+    #[test]
+    fn partitions_audio_nodes_under_input_domain_when_no_output_exists() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "input-only-partition",
+          "revision": "1",
+          "nodes": [
+            audio_input_node("input"),
+            audio_sig_node("sig", 0.25)
+          ],
+          "edges": []
+        }));
+
+        let plan =
+            build_audio_dsp_plan(&graph, &registry(), AudioDspPlanOptions::default()).unwrap();
+
+        assert_eq!(plan.bridge_plans, Vec::new());
+        assert_eq!(
+            plan.partitions
+                .iter()
+                .map(|partition| {
+                    (
+                        partition.clock_domain_id.as_str(),
+                        partition.endpoint_ids.clone(),
+                        partition.node_ids.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![(
+                "endpoint:input",
+                vec!["input".to_owned()],
+                vec!["input".to_owned(), "sig".to_owned()]
+            )]
+        );
+    }
+
+    #[test]
+    fn plans_explicit_clock_bridge_for_independent_audio_domains() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "clock-bridge-route",
+          "revision": "1",
+          "nodes": [
+            audio_input_node_with_domain("input", "device:input-clock"),
+            audio_clock_boundary_node("bridge", "audio.clock-bridge"),
+            audio_output_node_with_domain("output", "device:output-clock")
+          ],
+          "edges": [
+            { "from": { "node": "input", "port": "out" }, "to": { "node": "bridge", "port": "in" } },
+            { "from": { "node": "bridge", "port": "out" }, "to": { "node": "output", "port": "left" } }
+          ]
+        }));
+
+        let plan =
+            build_audio_dsp_plan(&graph, &registry(), AudioDspPlanOptions::default()).unwrap();
+
+        assert_eq!(plan.bridge_plans.len(), 1);
+        assert!(plan.bridge_plans[0].required);
+        assert_eq!(
+            plan.bridge_plans[0].source_clock_domain_id,
+            "device:input-clock"
+        );
+        assert_eq!(
+            plan.bridge_plans[0].target_clock_domain_id,
+            "device:output-clock"
+        );
+        assert_eq!(
+            plan.bridge_plans[0].method,
+            AudioClockBridgeMethod::ClockBridge
+        );
+        assert_eq!(
+            plan.bridge_plans[0].bridge_node_id.as_deref(),
+            Some("bridge")
+        );
+    }
+
+    #[test]
+    fn plans_default_endpoint_domains_as_unavailable_with_explicit_bridge() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "default-endpoint-domains",
+          "revision": "1",
+          "nodes": [
+            audio_input_node("input"),
+            audio_clock_boundary_node("bridge", "audio.clock-bridge"),
+            audio_output_node("output")
+          ],
+          "edges": [
+            { "from": { "node": "input", "port": "out" }, "to": { "node": "bridge", "port": "in" } },
+            { "from": { "node": "bridge", "port": "out" }, "to": { "node": "output", "port": "left" } }
+          ]
+        }));
+
+        let plan =
+            build_audio_dsp_plan(&graph, &registry(), AudioDspPlanOptions::default()).unwrap();
+
+        assert_eq!(
+            plan.clock_domains
+                .iter()
+                .map(|domain| (domain.id.as_str(), domain.authority.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("endpoint:input", AudioClockDomainAuthority::Unavailable),
+                ("endpoint:output", AudioClockDomainAuthority::Unavailable)
+            ]
+        );
+        assert_eq!(
+            plan.bridge_plans[0].source_clock_domain_id,
+            "endpoint:input"
+        );
+        assert_eq!(
+            plan.bridge_plans[0].target_clock_domain_id,
+            "endpoint:output"
+        );
+    }
+
+    #[test]
+    fn plans_explicit_resample_for_independent_audio_domains() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "resample-route",
+          "revision": "1",
+          "nodes": [
+            audio_input_node_with_domain("input", "device:input-clock"),
+            audio_clock_boundary_node("resample", "audio.resample"),
+            audio_output_node_with_domain("output", "device:output-clock")
+          ],
+          "edges": [
+            { "from": { "node": "input", "port": "out" }, "to": { "node": "resample", "port": "in" } },
+            { "from": { "node": "resample", "port": "out" }, "to": { "node": "output", "port": "left" } }
+          ]
+        }));
+
+        let plan =
+            build_audio_dsp_plan(&graph, &registry(), AudioDspPlanOptions::default()).unwrap();
+
+        assert_eq!(plan.bridge_plans.len(), 1);
+        assert_eq!(
+            plan.bridge_plans[0].method,
+            AudioClockBridgeMethod::Resample
+        );
+        assert_eq!(
+            plan.bridge_plans[0].bridge_node_id.as_deref(),
+            Some("resample")
+        );
+    }
+
+    #[test]
+    fn audio_route_helper_skips_cycles_and_non_signal_edges() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "route-helper",
+          "revision": "1",
+          "nodes": [
+            audio_input_node("input"),
+            audio_clock_boundary_node("bridge_a", "audio.clock-bridge"),
+            audio_clock_boundary_node("bridge_b", "audio.clock-bridge"),
+            audio_output_node("output"),
+            float_node("not_signal", 1.0)
+          ],
+          "edges": [
+            { "from": { "node": "input", "port": "out" }, "to": { "node": "not_signal", "port": "value" } },
+            { "from": { "node": "input", "port": "out" }, "to": { "node": "bridge_a", "port": "in" } },
+            { "from": { "node": "bridge_a", "port": "out" }, "to": { "node": "bridge_b", "port": "in" } },
+            { "from": { "node": "bridge_b", "port": "out" }, "to": { "node": "output", "port": "left" } },
+            { "from": { "node": "bridge_b", "port": "out" }, "to": { "node": "bridge_a", "port": "in" } }
+          ]
+        }));
+        let nodes_by_id = graph
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect::<HashMap<_, _>>();
+
+        let route = find_audio_route_to_output(&graph, &nodes_by_id, "input", "output").unwrap();
+        let missing = find_audio_route_to_output(&graph, &nodes_by_id, "output", "input");
+
+        assert_eq!(route.explicit_bridge_node_id.as_deref(), Some("bridge_b"));
+        assert_eq!(
+            route.explicit_bridge_kind.as_deref(),
+            Some("audio.clock-bridge")
+        );
+        assert_eq!(missing, None);
     }
 
     #[test]
@@ -1633,6 +2227,24 @@ mod tests {
         }))
     }
 
+    fn audio_input_definition() -> NodeDefinition {
+        node_definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "audio.input",
+          "version": "0.1.0",
+          "displayName": "adc~",
+          "category": "Audio",
+          "ports": [
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+          ],
+          "execution": { "model": "audio_block" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+    }
+
     fn audio_output_definition() -> NodeDefinition {
         node_definition(json!({
           "schema": "skenion.node.definition",
@@ -1644,6 +2256,25 @@ mod tests {
           "ports": [
             { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
             { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" }
+          ],
+          "execution": { "model": "audio_block" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+    }
+
+    fn audio_clock_boundary_definition(id: &str) -> NodeDefinition {
+        node_definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": id,
+          "version": "0.1.0",
+          "displayName": id,
+          "category": "Audio",
+          "ports": [
+            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -1780,6 +2411,56 @@ mod tests {
           "ports": [
             { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
             { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" }
+          ]
+        })
+    }
+
+    fn audio_input_node(id: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "audio.input",
+          "kindVersion": "0.1.0",
+          "params": {},
+          "ports": [
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+          ]
+        })
+    }
+
+    fn audio_input_node_with_domain(id: &str, clock_domain: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "audio.input",
+          "kindVersion": "0.1.0",
+          "params": { "clockDomain": clock_domain },
+          "ports": [
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+          ]
+        })
+    }
+
+    fn audio_output_node_with_domain(id: &str, clock_domain: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "audio.output",
+          "kindVersion": "0.1.0",
+          "params": { "clockDomain": clock_domain },
+          "ports": [
+            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
+            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" }
+          ]
+        })
+    }
+
+    fn audio_clock_boundary_node(id: &str, kind: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": kind,
+          "kindVersion": "0.1.0",
+          "params": {},
+          "ports": [
+            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ]
         })
     }
