@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.31.0...skenion-runtime-v0.32.0) (2026-06-20)
+
+
+### Features
+
+* **runtime:** add midi clock adapter fixture mode ([cb5629b](https://github.com/echovisionlab/skenion-runtime/commit/cb5629bd2fab6b7afb54f8953ce0ef173be9ef18))
+
 ## [0.31.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.30.0...skenion-runtime-v0.31.0) (2026-06-20)
 
 
