@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.30.0...skenion-runtime-v0.31.0) (2026-06-20)
+
+
+### Features
+
+* **runtime:** expose audio dsp plan cli ([693364f](https://github.com/echovisionlab/skenion-runtime/commit/693364f896b4a9372883d99b835eb2326db51979))
+
 ## [0.30.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.29.0...skenion-runtime-v0.30.0) (2026-06-20)
 
 
