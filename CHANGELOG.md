@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.28.0...skenion-runtime-v0.29.0) (2026-06-20)
+
+
+### Features
+
+* **runtime:** add default audio output backend ([#75](https://github.com/echovisionlab/skenion-runtime/issues/75)) ([73f0f2e](https://github.com/echovisionlab/skenion-runtime/commit/73f0f2e99ffc9bd243ca9c53f3648d42017e2e77))
+
 ## [0.28.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.27.0...skenion-runtime-v0.28.0) (2026-06-19)
 
 
