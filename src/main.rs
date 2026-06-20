@@ -5,9 +5,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
     AudioBackendConfig, AudioDspPlan, AudioDspPlanOptions, DEFAULT_HOST, DEFAULT_PORT,
     ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit, build_audio_dsp_plan,
-    build_execution_plan, format_dummy_execution_text, format_plan_text, load_graph_document,
-    load_node_definition, run_dummy_execution, run_preview_window, run_render_preview_window,
-    serve_runtime, start_default_audio_output_backend, validate_project,
+    build_execution_plan, format_dummy_execution_text, format_midi_clock_fixture_report_text,
+    format_plan_text, load_graph_document, load_node_definition, run_dummy_execution,
+    run_midi_clock_fixture_file, run_preview_window, run_render_preview_window, serve_runtime,
+    start_default_audio_output_backend, validate_project,
 };
 
 #[derive(Debug, Parser)]
@@ -139,6 +140,15 @@ enum Command {
         /// How long to keep the output backend alive.
         #[arg(long, default_value_t = 1000)]
         duration_ms: u64,
+    },
+    /// Run the Runtime MIDI Clock adapter against a simulated raw-byte fixture.
+    ClockMidi {
+        /// Path to a simulated MIDI Clock fixture.
+        #[arg(long)]
+        simulate: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
     /// Start the local HTTP JSON control API.
     Serve {
@@ -303,6 +313,18 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 info.device_name, info.sample_rate, info.channels, info.sample_format
             );
             backend.keep_alive_for(Duration::from_millis(duration_ms));
+            Ok(())
+        }
+        Command::ClockMidi { simulate, format } => {
+            let report = run_midi_clock_fixture_file(&simulate)?;
+            match format {
+                OutputFormat::Text => {
+                    print!("{}", format_midi_clock_fixture_report_text(&report));
+                }
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+            }
             Ok(())
         }
         Command::Serve { host, port } => serve_runtime(&host, port).await,

@@ -1,4 +1,5 @@
 mod audio_backend;
+mod clock;
 mod contract;
 mod control_state;
 mod control_value;
@@ -24,18 +25,30 @@ pub use audio_backend::{
     AudioBackendConfig, AudioBackendError, AudioBackendInfo, RunningAudioBackend,
     start_default_audio_output_backend,
 };
+pub use clock::{
+    ClockSourceStore, MidiClockAdapter, MidiClockFixtureError, MidiSongPositionSource,
+    RUNTIME_MIDI_CLOCK_FIXTURE_SCHEMA, RUNTIME_MIDI_CLOCK_FIXTURE_SCHEMA_VERSION,
+    RuntimeClockDiagnostic, RuntimeClockDiagnosticSeverity, RuntimeClockSnapshot,
+    RuntimeClockSourceId, RuntimeClockSourceKind, RuntimeMidiClockFixture,
+    RuntimeMidiClockFixtureEvent, RuntimeMidiClockFixtureReport, TimestampedMidiMessage,
+    format_midi_clock_fixture_report_text, run_midi_clock_fixture, run_midi_clock_fixture_file,
+};
 pub use contract::{
     ApplyPatchError, AudioClockBridgeMethod, AudioClockBridgePlan, AudioClockDomain,
     AudioClockDomainAuthority, AudioDeviceDescriptor, AudioDevicePreference, AudioEndpoint,
     AudioEndpointDirection, AudioGraphPartition, AudioResamplerPlan, AudioStreamConfigRequest,
-    AudioStreamConfigResolved, CycleValidationV02, DataFlow, DataType, Edge, EdgeSpecV02,
+    AudioStreamConfigResolved, ClockAuthority, ClockCapability, ClockField, ClockSourceKind,
+    ClockState, ClockTimeSignature, CycleValidationV02, DataFlow, DataType, Edge, EdgeSpecV02,
     ExecutionModel, ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02, FeedbackPolicyV02,
     GraphDocument, GraphDocumentV02, GraphNode, GraphNodeV02, GraphPatch, GraphPatchEvent,
     GraphPatchEventKind, GraphPatchHistory, GraphPatchOperation, GraphValidationResultV02,
-    InvertPatchError, MergePolicyV02, NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState,
-    NumberRange, Port, PortActivation, PortDirection, PortDirectionV02, PortRef, PortSpecV02,
-    ReplaceNodeInterfaceEdgePolicy, ShaderInterface, ShaderInterfaceDiagnostic, ShaderUniform,
-    StringOrStrings, analyze_shader_interface_v01, plan_audio_clock_bridge,
+    InvertPatchError, MIDI_CLOCK_TICKS_PER_QUARTER, MIDI_CLOCK_TICKS_PER_SIXTEENTH, MergePolicyV02,
+    MidiClockApplyResult, MidiClockDiagnostic, MidiClockDiagnosticSeverity, MidiClockMessage,
+    MidiClockMessageKind, MidiClockSnapshot, NodeDefinition, NodeDefinitionV02, NodeExecution,
+    NodeState, NumberRange, Port, PortActivation, PortDirection, PortDirectionV02, PortRef,
+    PortSpecV02, ReplaceNodeInterfaceEdgePolicy, ShaderInterface, ShaderInterfaceDiagnostic,
+    ShaderUniform, StringOrStrings, analyze_shader_interface_v01, apply_midi_clock_message,
+    midi_clock_snapshot_to_clock_state, parse_midi_clock_message, plan_audio_clock_bridge,
     shader_interface_to_ports_v01,
 };
 pub use control_state::{
