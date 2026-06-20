@@ -60,6 +60,7 @@ jobs:
       - run: cargo run -- preview --help
       - run: cargo run -- preview-plan --help
       - run: cargo run -- preview-document --help
+      - run: cargo run -- audio-plan --help
       - run: cargo run -- audio-output --help
       - run: |
           SKENION_PREVIEW_DRY_RUN=1 cargo run -- serve --host 127.0.0.1 --port 3761 &

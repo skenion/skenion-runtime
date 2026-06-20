@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
-    AudioBackendConfig, DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeRegistry, PreviewDocument,
-    PreviewFrameLimit, build_execution_plan, format_dummy_execution_text, format_plan_text,
-    load_graph_document, load_node_definition, run_dummy_execution, run_preview_window,
-    run_render_preview_window, serve_runtime, start_default_audio_output_backend, validate_project,
+    AudioBackendConfig, AudioDspPlan, AudioDspPlanOptions, DEFAULT_HOST, DEFAULT_PORT,
+    ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit, build_audio_dsp_plan,
+    build_execution_plan, format_dummy_execution_text, format_plan_text, load_graph_document,
+    load_node_definition, run_dummy_execution, run_preview_window, run_render_preview_window,
+    serve_runtime, start_default_audio_output_backend, validate_project,
 };
 
 #[derive(Debug, Parser)]
@@ -45,6 +46,24 @@ enum Command {
         /// Directory containing node definition manifests.
         #[arg(long)]
         nodes: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Build an audio DSP plan with endpoint, clock-domain, and bridge metadata.
+    AudioPlan {
+        /// Path to the graph document.
+        #[arg(long)]
+        graph: PathBuf,
+        /// Directory containing node definition manifests.
+        #[arg(long)]
+        nodes: PathBuf,
+        /// Internal DSP block size used by the audio plan.
+        #[arg(long, default_value_t = 64)]
+        block_size: u32,
+        /// Sample rate used for unresolved planning metadata.
+        #[arg(long, default_value_t = 48_000)]
+        sample_rate: u32,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
@@ -186,6 +205,31 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
+        Command::AudioPlan {
+            graph,
+            nodes,
+            block_size,
+            sample_rate,
+            format,
+        } => {
+            let plan = load_audio_plan(
+                graph,
+                nodes,
+                AudioDspPlanOptions {
+                    block_size,
+                    sample_rate,
+                },
+            )?;
+            match format {
+                OutputFormat::Text => {
+                    print!("{}", format_audio_dsp_plan_text(&plan));
+                }
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                }
+            }
+            Ok(())
+        }
         Command::Run {
             graph,
             nodes,
@@ -269,6 +313,40 @@ fn load_plan(graph: PathBuf, nodes: PathBuf) -> Result<ExecutionPlan, Box<dyn st
     let graph = load_graph_document(&graph)?;
     let registry = NodeRegistry::load_dir(&nodes)?;
     Ok(build_execution_plan(&graph, &registry)?)
+}
+
+fn load_audio_plan(
+    graph: PathBuf,
+    nodes: PathBuf,
+    options: AudioDspPlanOptions,
+) -> Result<AudioDspPlan, Box<dyn std::error::Error>> {
+    let graph = load_graph_document(&graph)?;
+    let registry = NodeRegistry::load_dir(&nodes)?;
+    Ok(build_audio_dsp_plan(&graph, &registry, options)?)
+}
+
+fn format_audio_dsp_plan_text(plan: &AudioDspPlan) -> String {
+    let mut lines = vec![
+        format!("audio dsp plan: {} {}", plan.graph_id, plan.graph_revision),
+        format!("blockSize: {}", plan.block_size),
+        format!("sampleRate: {}", plan.sample_rate),
+        format!("endpoints: {}", plan.endpoints.len()),
+        format!("clockDomains: {}", plan.clock_domains.len()),
+        format!("partitions: {}", plan.partitions.len()),
+        format!("bridgePlans: {}", plan.bridge_plans.len()),
+    ];
+
+    for bridge in &plan.bridge_plans {
+        lines.push(format!(
+            "bridge: {} -> {} method={:?} required={}",
+            bridge.source_clock_domain_id,
+            bridge.target_clock_domain_id,
+            bridge.method,
+            bridge.required
+        ));
+    }
+
+    lines.join("\n") + "\n"
 }
 
 fn load_execution_plan(path: PathBuf) -> Result<ExecutionPlan, Box<dyn std::error::Error>> {
