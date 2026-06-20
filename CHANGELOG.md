@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.32.0...skenion-runtime-v0.33.0) (2026-06-20)
+
+
+### Features
+
+* **runtime:** add physical midi input adapter ([#83](https://github.com/echovisionlab/skenion-runtime/issues/83)) ([1eb5ea6](https://github.com/echovisionlab/skenion-runtime/commit/1eb5ea64539d42c07c6d19a69a43a995a8462b45))
+
 ## [0.32.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.31.0...skenion-runtime-v0.32.0) (2026-06-20)
 
 
