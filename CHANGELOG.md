@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.37.0...skenion-runtime-v0.37.1) (2026-06-21)
+
+
+### Bug Fixes
+
+* **ci:** publish runtime against released contracts ([#102](https://github.com/echovisionlab/skenion-runtime/issues/102)) ([2974c71](https://github.com/echovisionlab/skenion-runtime/commit/2974c71cc7b3c0340b363e8b7b7cc7da1599cf34))
+
 ## [0.37.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.36.2...skenion-runtime-v0.37.0) (2026-06-21)
 
 
