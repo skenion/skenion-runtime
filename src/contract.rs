@@ -40,8 +40,13 @@ pub use skenion_contracts::{
     plan_audio_clock_bridge_v01 as plan_audio_clock_bridge, shader_interface_to_ports_v01,
 };
 pub use skenion_contracts::{
-    CycleValidationV02, EdgeSpecV02, ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02,
-    FeedbackPolicyV02, GraphDocumentV02, GraphNodeV02, GraphValidationResultV02, MergePolicyV02,
-    NodeDefinitionManifestV02 as NodeDefinitionV02, PatchContractPortV02, PatchContractV02,
-    PatchDefinitionV02, PortDirectionV02, PortSpecV02, ProjectDocumentV02, ProjectMetadataV02,
+    CycleValidationV02, EdgeEndpointV02, EdgeSpecV02, ExecutionModelV02, FanOutPolicyV02,
+    FeedbackBoundaryV02, FeedbackPolicyV02, GraphDocumentV02,
+    GraphFragmentOutsideEndpointPolicyV02, GraphFragmentV02, GraphNodeV02, GraphTargetRef,
+    GraphValidationResultV02, IdConflictPolicy, IdRemapResult, MergePolicyV02,
+    NodeDefinitionManifestV02 as NodeDefinitionV02, PasteGraphFragmentRequest,
+    PasteGraphFragmentResponse, PastePlacement, PatchContractPortV02, PatchContractV02,
+    PatchDefinitionV02, PatchPath, PortDirectionV02, PortRateV02, PortSpecV02, ProjectDocumentV02,
+    ProjectMetadataV02, RuntimeOperationAttribution, RuntimeOperationDiagnostic,
+    RuntimeOperationEnvelope,
 };
