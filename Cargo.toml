@@ -4,6 +4,13 @@ version = "0.35.0"
 edition = "2024"
 description = "Skenion native runtime"
 license = "Apache-2.0"
+repository = "https://github.com/echovisionlab/skenion-runtime"
+homepage = "https://github.com/echovisionlab/skenion-runtime#readme"
+documentation = "https://docs.rs/skenion-runtime"
+readme = "README.md"
+keywords = ["skenion", "runtime", "graph", "visual", "audio"]
+categories = ["multimedia", "rendering"]
+rust-version = "1.85"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
@@ -14,7 +21,7 @@ midir = "0.11"
 pollster = "0.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-skenion-contracts = { path = "../Skenion-contracts/packages/rust" }
+skenion-contracts = { version = "0.34.0", path = "../Skenion-contracts/packages/rust" }
 thiserror = "2.0.17"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }

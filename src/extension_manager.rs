@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -53,7 +55,11 @@ pub struct RuntimeExtensionManager {
 
 impl RuntimeExtensionManager {
     pub fn from_env() -> Self {
-        let Some(paths) = env::var_os(SKENION_EXTENSION_PATH_ENV) else {
+        Self::from_extension_paths(env::var_os(SKENION_EXTENSION_PATH_ENV))
+    }
+
+    fn from_extension_paths(paths: Option<OsString>) -> Self {
+        let Some(paths) = paths else {
             return Self::default();
         };
 
@@ -407,6 +413,41 @@ mod tests {
         fs::write(package_dir.join(RUNTIME_EXTENSION_MANIFEST_FILE), body).unwrap();
     }
 
+    fn current_artifact(path: &str) -> String {
+        format!(
+            r#"{{ "os": "{}", "arch": "{}", "abi": "c", "path": "{path}" }}"#,
+            env::consts::OS,
+            env::consts::ARCH
+        )
+    }
+
+    #[test]
+    fn extension_paths_parse_like_runtime_environment() {
+        let first = PathBuf::from("/tmp/skenion-extension-one");
+        let second = PathBuf::from("/tmp/skenion-extension-two");
+        let joined = env::join_paths([&first, &second]).unwrap();
+
+        let manager = RuntimeExtensionManager::from_extension_paths(Some(joined));
+
+        assert_eq!(manager.package_dirs, vec![first, second]);
+    }
+
+    #[test]
+    fn extension_manager_can_be_created_from_process_environment() {
+        let manager = RuntimeExtensionManager::from_env();
+
+        let _ = manager.list_extensions();
+    }
+
+    #[test]
+    fn default_extension_response_is_empty_and_ok() {
+        let response = RuntimeExtensionListResponse::default();
+
+        assert!(response.ok);
+        assert!(response.extensions.is_empty());
+        assert!(response.diagnostics.is_empty());
+    }
+
     #[test]
     fn package_directory_without_manifest_is_reported_as_warning() {
         let package_dir = temp_dir("missing-manifest");
@@ -419,6 +460,46 @@ mod tests {
         assert_eq!(
             response.diagnostics[0].severity,
             DiagnosticSeverity::Warning
+        );
+    }
+
+    #[test]
+    fn malformed_manifest_fails_only_that_extension() {
+        let package_dir = temp_dir("malformed-manifest");
+        write_manifest(&package_dir, "{ not-json");
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir]);
+
+        let response = manager.list_extensions();
+
+        assert!(!response.ok);
+        assert!(response.extensions[0].id.contains("malformed-manifest"));
+        assert_eq!(
+            response.extensions[0].status,
+            RuntimeExtensionStatus::Failed
+        );
+        assert!(
+            response.extensions[0].diagnostics[0]
+                .message
+                .contains("failed to parse extension manifest")
+        );
+    }
+
+    #[test]
+    fn manifest_read_error_reports_failed_extension_with_fallback_path() {
+        let package_dir = temp_dir("unreadable-manifest");
+        let manifest_path = package_dir.join(RUNTIME_EXTENSION_MANIFEST_FILE);
+
+        let descriptor = read_extension_package(&package_dir, &manifest_path);
+
+        assert_eq!(descriptor.status, RuntimeExtensionStatus::Failed);
+        assert_eq!(
+            descriptor.manifest_path,
+            manifest_path.display().to_string()
+        );
+        assert!(
+            descriptor.diagnostics[0]
+                .message
+                .contains("failed to read extension manifest")
         );
     }
 
@@ -460,6 +541,202 @@ mod tests {
                 .message
                 .contains("must stay inside package directory")
         }));
+    }
+
+    #[test]
+    fn schema_abi_and_native_contract_errors_are_package_diagnostics() {
+        let package_dir = temp_dir("invalid-package-contract");
+        write_manifest(
+            &package_dir,
+            r#"{
+              "schema": "other.manifest",
+              "schemaVersion": "9.9.9",
+              "id": "example/native-missing",
+              "version": "0.1.0",
+              "runtimeAbiVersion": "9.9.9",
+              "kind": "native-runtime",
+              "provides": {},
+              "permissions": []
+            }"#,
+        );
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir]);
+
+        let response = manager.list_extensions();
+        let messages = response.extensions[0]
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!response.ok);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("schema must"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("schemaVersion must"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("requires runtimeAbiVersion"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("must declare native binding"))
+        );
+    }
+
+    #[test]
+    fn invalid_node_contract_is_reported_as_package_failure() {
+        let package_dir = temp_dir("invalid-node-contract");
+        write_manifest(
+            &package_dir,
+            r#"{
+              "schema": "skenion.extension.manifest",
+              "schemaVersion": "0.1.0",
+              "id": "example/invalid-node",
+              "version": "0.1.0",
+              "runtimeAbiVersion": "0.1.0",
+              "kind": "node-pack",
+              "provides": {
+                "nodes": [
+                  {
+                    "schema": "skenion.node.definition",
+                    "schemaVersion": "9.9.9",
+                    "id": "example.bad",
+                    "version": "0.1.0",
+                    "displayName": "Bad",
+                    "category": "Example",
+                    "ports": [],
+                    "execution": { "model": "value" },
+                    "state": { "persistent": false },
+                    "permissions": [],
+                    "capabilities": []
+                  }
+                ]
+              },
+              "permissions": []
+            }"#,
+        );
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir]);
+
+        let response = manager.list_extensions();
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.extensions[0].status,
+            RuntimeExtensionStatus::Failed
+        );
+        assert!(response.extensions[0].diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("node example.bad failed contract validation")
+        }));
+    }
+
+    #[test]
+    fn native_binding_validation_reports_missing_and_unsafe_artifacts() {
+        let missing_artifact_dir = temp_dir("native-missing-artifact");
+        write_manifest(
+            &missing_artifact_dir,
+            &format!(
+                r#"{{
+                  "schema": "skenion.extension.manifest",
+                  "schemaVersion": "0.1.0",
+                  "id": "example/native-missing-artifact",
+                  "version": "0.1.0",
+                  "runtimeAbiVersion": "0.1.0",
+                  "kind": "native-runtime",
+                  "native": {{
+                    "entrypoint": "bad_init",
+                    "artifacts": [{}]
+                  }},
+                  "provides": {{}},
+                  "permissions": []
+                }}"#,
+                current_artifact("target/release/libmissing.dylib")
+            ),
+        );
+
+        let unsupported_artifact_dir = temp_dir("native-unsupported-artifact");
+        write_manifest(
+            &unsupported_artifact_dir,
+            r#"{
+              "schema": "skenion.extension.manifest",
+              "schemaVersion": "0.1.0",
+              "id": "example/native-unsupported-artifact",
+              "version": "0.1.0",
+              "runtimeAbiVersion": "0.1.0",
+              "kind": "native-runtime",
+              "native": {
+                "entrypoint": "skenion_extension_init",
+                "artifacts": [
+                  { "os": "not-this-os", "arch": "not-this-arch", "abi": "c", "path": "libnative.dylib" }
+                ]
+              },
+              "provides": {},
+              "permissions": []
+            }"#,
+        );
+
+        let unsafe_artifact_dir = temp_dir("native-unsafe-artifact");
+        write_manifest(
+            &unsafe_artifact_dir,
+            &format!(
+                r#"{{
+                  "schema": "skenion.extension.manifest",
+                  "schemaVersion": "0.1.0",
+                  "id": "example/native-unsafe-artifact",
+                  "version": "0.1.0",
+                  "runtimeAbiVersion": "0.1.0",
+                  "kind": "native-runtime",
+                  "native": {{
+                    "entrypoint": "skenion_extension_init",
+                    "artifacts": [{}]
+                  }},
+                  "provides": {{}},
+                  "permissions": []
+                }}"#,
+                current_artifact("../outside/libnative.dylib")
+            ),
+        );
+
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![
+            missing_artifact_dir,
+            unsupported_artifact_dir,
+            unsafe_artifact_dir,
+        ]);
+
+        let response = manager.list_extensions();
+        let messages = response
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.diagnostics.iter())
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!response.ok);
+        assert!(messages.iter().any(|message| message.contains("bad_init")));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("native artifact does not exist"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("has no artifact"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("must stay inside package directory"))
+        );
     }
 
     #[test]
@@ -526,5 +803,134 @@ mod tests {
         assert_eq!(response.extensions[0].provided_nodes, vec!["core.value"]);
         assert_eq!(response.extensions[0].provided_help, vec!["core.value"]);
         assert_eq!(response.extensions[0].test_ids, vec!["value-baseline"]);
+    }
+
+    #[test]
+    fn native_package_with_artifact_loads_codecs_transports_help_and_tests() {
+        let package_dir = temp_dir("native-valid");
+        fs::create_dir_all(package_dir.join("target/release")).unwrap();
+        fs::create_dir_all(package_dir.join("help")).unwrap();
+        fs::create_dir_all(package_dir.join("tests")).unwrap();
+        fs::write(package_dir.join("target/release/libnative.dylib"), "").unwrap();
+        fs::write(package_dir.join("help/native.md"), "# Native").unwrap();
+        fs::write(package_dir.join("help/native.graph.json"), "{}").unwrap();
+        fs::write(package_dir.join("tests/native.input.json"), "{}").unwrap();
+        fs::write(package_dir.join("tests/native.expected.json"), "{}").unwrap();
+        write_manifest(
+            &package_dir,
+            &format!(
+                r#"{{
+                  "schema": "skenion.extension.manifest",
+                  "schemaVersion": "0.1.0",
+                  "id": "example/native-valid",
+                  "version": "0.1.0",
+                  "runtimeAbiVersion": "0.1.0",
+                  "kind": "native-runtime",
+                  "native": {{
+                    "entrypoint": "skenion_extension_init",
+                    "artifacts": [{}]
+                  }},
+                  "provides": {{
+                    "codecs": [
+                      {{
+                        "id": "example.serial.decode",
+                        "version": "0.1.0",
+                        "transportKinds": ["serial"],
+                        "direction": "decode"
+                      }}
+                    ],
+                    "transports": [
+                      {{ "id": "example.serial", "version": "0.1.0", "kind": "serial" }}
+                    ],
+                    "help": [
+                      {{
+                        "nodeId": "example.native",
+                        "markdownPath": "help/native.md",
+                        "graphPath": "help/native.graph.json"
+                      }}
+                    ]
+                  }},
+                  "permissions": ["io.serial"],
+                  "tests": [
+                    {{
+                      "id": "native-baseline",
+                      "kind": "extension",
+                      "target": "example/native-valid",
+                      "fixturePath": "tests/native.input.json",
+                      "expectedPath": "tests/native.expected.json"
+                    }}
+                  ]
+                }}"#,
+                current_artifact("target/release/libnative.dylib")
+            ),
+        );
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir]);
+
+        let response = manager.list_extensions();
+
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.extensions[0].status,
+            RuntimeExtensionStatus::Loaded
+        );
+        assert_eq!(
+            response.extensions[0].provided_codecs,
+            vec!["example.serial.decode"]
+        );
+        assert_eq!(
+            response.extensions[0].provided_transports,
+            vec!["example.serial"]
+        );
+        assert_eq!(response.extensions[0].provided_help, vec!["example.native"]);
+        assert_eq!(response.extensions[0].test_ids, vec!["native-baseline"]);
+    }
+
+    #[test]
+    fn codec_package_can_optionally_declare_native_binding() {
+        let package_dir = temp_dir("codec-native-valid");
+        fs::create_dir_all(package_dir.join("target/release")).unwrap();
+        fs::write(package_dir.join("target/release/libcodec.dylib"), "").unwrap();
+        write_manifest(
+            &package_dir,
+            &format!(
+                r#"{{
+                  "schema": "skenion.extension.manifest",
+                  "schemaVersion": "0.1.0",
+                  "id": "example/codec-native-valid",
+                  "version": "0.1.0",
+                  "runtimeAbiVersion": "0.1.0",
+                  "kind": "codec",
+                  "native": {{
+                    "entrypoint": "skenion_extension_init",
+                    "artifacts": [{}]
+                  }},
+                  "provides": {{
+                    "codecs": [
+                      {{
+                        "id": "example.hid.decode",
+                        "version": "0.1.0",
+                        "transportKinds": ["hid"],
+                        "direction": "decode"
+                      }}
+                    ]
+                  }},
+                  "permissions": ["io.hid"]
+                }}"#,
+                current_artifact("target/release/libcodec.dylib")
+            ),
+        );
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir]);
+
+        let response = manager.list_extensions();
+
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.extensions[0].status,
+            RuntimeExtensionStatus::Loaded
+        );
+        assert_eq!(
+            response.extensions[0].provided_codecs,
+            vec!["example.hid.decode"]
+        );
     }
 }

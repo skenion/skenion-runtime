@@ -19,4 +19,4 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v5
         with:
-          token: ${{ secrets.SKENION_RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SKENION_RELEASE_PLEASE_TOKEN || secrets.CI_TOKEN }}
