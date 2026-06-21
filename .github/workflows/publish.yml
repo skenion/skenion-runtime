@@ -46,7 +46,6 @@ jobs:
             echo "release tag ${actual} does not match crate version ${expected}" >&2
             exit 1
           fi
-      - run: cargo update -p skenion-runtime --precise "${{ steps.package.outputs.version }}"
       - id: registry
         run: |
           if curl --fail --silent "https://crates.io/api/v1/crates/skenion-runtime/${{ steps.package.outputs.version }}" >/dev/null; then
@@ -54,8 +53,12 @@ jobs:
           else
             echo "published=false" >> "${GITHUB_OUTPUT}"
           fi
-      - run: cargo package --allow-dirty
       - if: steps.registry.outputs.published != 'true'
-        run: cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"
+        run: test -n "${CARGO_REGISTRY_TOKEN}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo package
+      - if: steps.registry.outputs.published != 'true'
+        run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
