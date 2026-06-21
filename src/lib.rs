@@ -18,10 +18,13 @@ mod project;
 mod project_v02;
 mod registry;
 mod render;
+mod runtime_time;
 mod scheduler;
 mod serve;
 mod server;
 mod session;
+mod session_registry;
+mod sidecar;
 mod telemetry;
 mod validation;
 mod visual;
@@ -127,17 +130,24 @@ pub use scheduler::{
     DummyExecutionReport, DummyFrameReport, DummyNodeExecution, format_dummy_execution_text,
     run_dummy_execution,
 };
-pub use serve::serve_runtime;
+pub use serve::{ServeRuntimeOptions, serve_runtime, serve_runtime_with_options};
 pub use server::{
     DEFAULT_HOST, DEFAULT_PORT, DiagnosticSeverity, HealthResponse, ProjectRequest,
     RUNTIME_API_VERSION, RunProjectRequest, RuntimeApiResponse, RuntimeDiagnostic,
-    RuntimeInfoResponse, RuntimeServerState, RuntimeSessionEvent, RuntimeSessionEventKind,
-    runtime_router, runtime_router_with_state,
+    RuntimeInfoResponse, RuntimeServerState, runtime_router, runtime_router_with_state,
 };
 pub use session::{
     RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
     RuntimePatchResponse, RuntimeProjectSnapshot, RuntimeSession, RuntimeSessionResponse,
     RuntimeSessionSnapshot, RuntimeViewPatch, RuntimeViewPatchOperation, SessionRunRequest,
+};
+pub use session_registry::{
+    DEFAULT_SESSION_ID, RuntimeSessionEvent, RuntimeSessionEventKind, RuntimeSessionRecord,
+    RuntimeSessionRegistry, SessionEventsQuery,
+};
+pub use sidecar::{
+    RuntimeEndpointConfig, RuntimeSidecarShutdownInfo, RuntimeSidecarShutdownRequest,
+    RuntimeSidecarShutdownResponse, RuntimeSidecarStartupResponse, RuntimeSidecarTokenInfo,
 };
 pub use telemetry::{
     PREVIEW_TELEMETRY_SCHEMA, PREVIEW_TELEMETRY_SCHEMA_VERSION, PreviewTelemetryHeartbeat,
