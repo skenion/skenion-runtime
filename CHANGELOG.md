@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.36.0...skenion-runtime-v0.36.1) (2026-06-21)
+
+
+### Bug Fixes
+
+* **runtime:** resolve contracts path during crate publish ([#95](https://github.com/echovisionlab/skenion-runtime/issues/95)) ([3291b8d](https://github.com/echovisionlab/skenion-runtime/commit/3291b8dbb732ee746abebdbc28c6534958e6d411))
+
 ## [0.36.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.35.0...skenion-runtime-v0.36.0) (2026-06-21)
 
 
