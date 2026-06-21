@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.36.2...skenion-runtime-v0.37.0) (2026-06-21)
+
+
+### Features
+
+* **graph:** expand v0.2 project subpatches ([#100](https://github.com/echovisionlab/skenion-runtime/issues/100)) ([ce02d06](https://github.com/echovisionlab/skenion-runtime/commit/ce02d061a2d578ee3cb3fc02c7f77f6080633fac))
+
 ## [0.36.2](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.36.1...skenion-runtime-v0.36.2) (2026-06-21)
 
 
