@@ -5,6 +5,7 @@ mod control_state;
 mod control_value;
 mod conversion;
 mod dsp;
+mod extension_manager;
 mod io_device_manager;
 mod loader;
 mod log_store;
@@ -44,10 +45,11 @@ pub use contract::{
     AudioEndpointDirection, AudioGraphPartition, AudioResamplerPlan, AudioStreamConfigRequest,
     AudioStreamConfigResolved, CanvasNodeView, ClockAuthority, ClockCapability, ClockField,
     ClockSourceKind, ClockState, ClockTimeSignature, CycleValidationV02, DataFlow, DataType, Edge,
-    EdgeSpecV02, ExecutionModel, ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02,
-    FeedbackPolicyV02, GraphDocument, GraphDocumentV02, GraphNode, GraphNodeV02, GraphPatch,
-    GraphPatchEvent, GraphPatchEventKind, GraphPatchHistory, GraphPatchOperation,
-    GraphValidationResultV02, InvertPatchError, MIDI_CLOCK_TICKS_PER_QUARTER,
+    EdgeSpecV02, ExecutionModel, ExecutionModelV02, ExtensionKind, ExtensionManifest,
+    ExtensionNativeArtifact, ExtensionNativeBinding, ExtensionProvides, FanOutPolicyV02,
+    FeedbackBoundaryV02, FeedbackPolicyV02, GraphDocument, GraphDocumentV02, GraphNode,
+    GraphNodeV02, GraphPatch, GraphPatchEvent, GraphPatchEventKind, GraphPatchHistory,
+    GraphPatchOperation, GraphValidationResultV02, InvertPatchError, MIDI_CLOCK_TICKS_PER_QUARTER,
     MIDI_CLOCK_TICKS_PER_SIXTEENTH, MergePolicyV02, MidiClockApplyResult, MidiClockDiagnostic,
     MidiClockDiagnosticSeverity, MidiClockMessage, MidiClockMessageKind, MidiClockSnapshot,
     NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState, NumberRange, Port, PortActivation,
@@ -70,6 +72,11 @@ pub use dsp::{
     AudioDspSignalInput, AudioDspSignalOutput, AudioDspSnapshot, AudioEndpointPlanNode,
     AudioOfflineDspError, AudioOfflineDspOptions, AudioOfflineDspReport, AudioRealtimeDspError,
     AudioRealtimeDspExecutor, AudioRealtimeDspOptions, build_audio_dsp_plan, run_offline_audio_dsp,
+};
+pub use extension_manager::{
+    RUNTIME_EXTENSION_ABI_VERSION, RUNTIME_EXTENSION_MANIFEST_FILE, RuntimeExtensionDescriptor,
+    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeExtensionStatus,
+    SKENION_EXTENSION_PATH_ENV,
 };
 pub use io_device_manager::{
     RuntimeIoBindingConfig, RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,

@@ -28,8 +28,9 @@ use crate::{
     DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, GraphDocument, NodeDefinition,
     NodeRegistry, PreviewDocument, PreviewManager, ProjectRequestV02, RunProjectRequestV02,
     RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
-    RuntimeControlReadResponse, RuntimeControlStateResponse, RuntimeIoDeviceListResponse,
-    RuntimeIoDeviceManager, RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest,
+    RuntimeControlReadResponse, RuntimeControlStateResponse, RuntimeExtensionListResponse,
+    RuntimeExtensionManager, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
+    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest,
     RuntimePreviewStartRequest, RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest,
     ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource, ViewState,
     build_execution_plan, build_execution_plan_v02,
@@ -135,6 +136,7 @@ pub struct RuntimeServerState {
     pub preview: Arc<Mutex<PreviewManager>>,
     pub assets: Arc<RwLock<RuntimeAssetStore>>,
     pub io_devices: Arc<RuntimeIoDeviceManager>,
+    pub extensions: Arc<RuntimeExtensionManager>,
     pub logs: Arc<RuntimeLogStore>,
     pub started_at: Instant,
 }
@@ -150,6 +152,7 @@ impl Default for RuntimeServerState {
             preview: Arc::new(Mutex::new(PreviewManager::from_env())),
             assets: Arc::new(RwLock::new(RuntimeAssetStore::default())),
             io_devices: Arc::new(RuntimeIoDeviceManager::new()),
+            extensions: Arc::new(RuntimeExtensionManager::from_env()),
             logs,
             started_at: Instant::now(),
         }
@@ -204,6 +207,7 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v0/runtime/info", get(runtime_info))
+        .route("/v0/extensions", get(runtime_extensions))
         .route("/v0/runtime/logs", get(runtime_logs))
         .route("/v0/runtime/logs/stream", get(runtime_logs_stream))
         .route("/v0/io/devices", get(io_devices))
@@ -291,9 +295,16 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.telemetry.stream",
             "runtime.logs",
             "runtime.logs.stream",
+            "runtime.extensions",
             "io.devices",
         ],
     })
+}
+
+async fn runtime_extensions(
+    State(state): State<RuntimeServerState>,
+) -> Json<RuntimeExtensionListResponse> {
+    Json(state.extensions.list_extensions())
 }
 
 async fn runtime_logs(State(state): State<RuntimeServerState>) -> Json<RuntimeLogSnapshotResponse> {
@@ -1459,6 +1470,7 @@ mod tests {
             "session.telemetry.stream",
             "runtime.logs",
             "runtime.logs.stream",
+            "runtime.extensions",
             "io.devices",
         ] {
             assert!(
@@ -1468,6 +1480,15 @@ mod tests {
                 "missing capability {expected}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_extensions_response_defaults_to_empty_package_list() {
+        let response = get_json("/v0/extensions").await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["extensions"], json!([]));
+        assert_eq!(response["diagnostics"], json!([]));
     }
 
     #[tokio::test]
@@ -2608,6 +2629,7 @@ mod tests {
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
+            extensions: std::sync::Arc::new(RuntimeExtensionManager::default()),
             logs,
             started_at: std::time::Instant::now(),
         };
@@ -3099,6 +3121,7 @@ mod tests {
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
+            extensions: std::sync::Arc::new(RuntimeExtensionManager::default()),
             logs,
             started_at: std::time::Instant::now(),
         })
@@ -3116,6 +3139,7 @@ mod tests {
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::with_device_registry(
                 Arc::new(ServerFakeIoDeviceRegistry { devices }),
             )),
+            extensions: std::sync::Arc::new(RuntimeExtensionManager::default()),
             logs,
             started_at: std::time::Instant::now(),
         })
