@@ -110,6 +110,12 @@ pub struct RuntimeSessionRecord {
     replay_limit: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeSessionReplay {
+    pub events: Vec<RuntimeSessionEvent>,
+    pub high_water_sequence: u64,
+}
+
 impl RuntimeSessionRecord {
     fn new(session_id: &str, replay_limit: usize, dry_preview: bool) -> Self {
         let (events, _) = broadcast::channel(replay_limit);
@@ -320,13 +326,18 @@ fn store_session_event(record: &RuntimeSessionRecord, event: RuntimeSessionEvent
     }
 }
 
-pub fn replay_session_events(
+pub fn capture_session_replay(
     record: &RuntimeSessionRecord,
     after: Option<u64>,
     snapshot: RuntimeSessionEvent,
-) -> Vec<RuntimeSessionEvent> {
+) -> RuntimeSessionReplay {
+    let high_water_sequence = latest_stored_session_event_sequence(record)
+        .unwrap_or_else(|| current_session_event_sequence(record));
     let Some(after) = after else {
-        return vec![snapshot];
+        return RuntimeSessionReplay {
+            events: vec![snapshot],
+            high_water_sequence,
+        };
     };
     let store = record
         .event_store
@@ -352,7 +363,10 @@ pub fn replay_session_events(
         );
         replay.insert(0, gap);
     }
-    replay
+    RuntimeSessionReplay {
+        events: replay,
+        high_water_sequence,
+    }
 }
 
 fn replay_gap_event(
@@ -391,14 +405,16 @@ pub fn event_cursor_from_headers(headers: &HeaderMap) -> Option<u64> {
     }
 }
 
-pub fn session_broadcast_event(
+pub fn session_broadcast_event_after_high_water(
     result: Result<RuntimeSessionEvent, BroadcastStreamRecvError>,
     record: RuntimeSessionRecord,
-) -> Result<Event, Infallible> {
+    high_water_sequence: u64,
+) -> Option<Result<Event, Infallible>> {
     match result {
-        Ok(event) => session_event(event),
+        Ok(event) if event.sequence <= high_water_sequence => None,
+        Ok(event) => Some(session_event(event)),
         Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-            session_event(session_lag_gap_event(&record, skipped))
+            Some(session_event(session_lag_gap_event(&record, skipped)))
         }
     }
 }
@@ -412,12 +428,11 @@ pub fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
 }
 
 pub fn session_lag_gap_event(record: &RuntimeSessionRecord, skipped: u64) -> RuntimeSessionEvent {
-    let latest_sequence = current_session_event_sequence(record).max(2);
+    let actual_sequence = oldest_retained_session_event_sequence(record)
+        .unwrap_or_else(|| current_session_event_sequence(record))
+        .max(2);
     let skipped = skipped.max(1);
-    let mut expected_sequence = latest_sequence.saturating_sub(skipped);
-    if expected_sequence == 0 {
-        expected_sequence = 1;
-    }
+    let expected_sequence = actual_sequence.saturating_sub(skipped).max(1);
     let session = record
         .session
         .read()
@@ -428,7 +443,7 @@ pub fn session_lag_gap_event(record: &RuntimeSessionRecord, skipped: u64) -> Run
         &session,
         SessionEventReplayFields {
             id: format!(
-                "{}_stream_gap_{expected_sequence:06}_{latest_sequence:06}",
+                "{}_stream_gap_{expected_sequence:06}_{actual_sequence:06}",
                 record.id
             ),
             sequence: expected_sequence,
@@ -437,13 +452,31 @@ pub fn session_lag_gap_event(record: &RuntimeSessionRecord, skipped: u64) -> Run
             replayed: true,
             gap: Some(RuntimeEventReplayGap {
                 expected_sequence,
-                actual_sequence: latest_sequence,
+                actual_sequence,
                 reason: RuntimeEventReplayGapReason::StreamReset,
             }),
             overflow: true,
         },
         Vec::new(),
     )
+}
+
+fn oldest_retained_session_event_sequence(record: &RuntimeSessionRecord) -> Option<u64> {
+    record
+        .event_store
+        .lock()
+        .expect("runtime session event store lock should not be poisoned")
+        .front()
+        .map(|event| event.sequence)
+}
+
+fn latest_stored_session_event_sequence(record: &RuntimeSessionRecord) -> Option<u64> {
+    record
+        .event_store
+        .lock()
+        .expect("runtime session event store lock should not be poisoned")
+        .back()
+        .map(|event| event.sequence)
 }
 
 fn contract_session_snapshot(
@@ -496,6 +529,7 @@ fn runtime_session_capabilities() -> RuntimeSessionCapabilitySet {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use skenion_contracts::RuntimeEventReplayGapReason;
+    use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
     use super::*;
     use crate::sidecar::RuntimeEndpointConfig;
@@ -523,7 +557,7 @@ mod tests {
             );
         }
         let snapshot = session_snapshot_event(&record, &session);
-        let replay = replay_session_events(&record, Some(0), snapshot);
+        let replay = capture_session_replay(&record, Some(0), snapshot).events;
         let gap = replay[0]
             .replay
             .gap
@@ -559,7 +593,8 @@ mod tests {
             );
         }
         let replay =
-            replay_session_events(&record, Some(1), session_snapshot_event(&record, &session));
+            capture_session_replay(&record, Some(1), session_snapshot_event(&record, &session))
+                .events;
         let gap = replay[0]
             .replay
             .gap
@@ -630,7 +665,126 @@ mod tests {
             RuntimeEventReplayGapReason::StreamReset
         );
         assert_eq!(gap.replay.gap.as_ref().unwrap().expected_sequence, 1);
+        assert_eq!(gap.replay.gap.as_ref().unwrap().actual_sequence, 2);
         validate_runtime_session_event(&gap).expect("live lag gap event should validate");
+    }
+
+    #[tokio::test]
+    async fn broadcast_lag_gap_and_retained_live_events_are_monotonic() {
+        let record = RuntimeSessionRecord::new("lag-order-test", 2, true);
+        let session = RuntimeSession::default();
+        let receiver = record.events.subscribe();
+        for _ in 0..5 {
+            publish_session_event(
+                &record,
+                RuntimeSessionEventKind::Snapshot,
+                &session,
+                Vec::new(),
+            );
+        }
+
+        let mut stream = BroadcastStream::new(receiver);
+        let BroadcastStreamRecvError::Lagged(skipped) = stream
+            .next()
+            .await
+            .expect("lagged stream should yield an item")
+            .expect_err("first stream item should be a lag error");
+        let gap = session_lag_gap_event(&record, skipped);
+        let first_retained = stream
+            .next()
+            .await
+            .expect("first retained event should arrive")
+            .expect("first retained event should be ok");
+        let second_retained = stream
+            .next()
+            .await
+            .expect("second retained event should arrive")
+            .expect("second retained event should be ok");
+        let sequences = vec![
+            gap.sequence,
+            first_retained.sequence,
+            second_retained.sequence,
+        ];
+
+        assert_eq!(
+            gap.replay.gap.as_ref().unwrap().actual_sequence,
+            first_retained.sequence
+        );
+        assert_eq!(sequences, vec![1, 4, 5]);
+        assert!(sequences.windows(2).all(|pair| pair[0] <= pair[1]));
+        validate_runtime_session_event(&gap).expect("lag gap event should validate");
+        validate_runtime_session_event(&first_retained)
+            .expect("first retained live event should validate");
+        validate_runtime_session_event(&second_retained)
+            .expect("second retained live event should validate");
+    }
+
+    #[test]
+    fn live_lag_gap_at_stream_start_uses_valid_conservative_cursor() {
+        let record = RuntimeSessionRecord::new("lag-at-start-test", 2, true);
+        let session = RuntimeSession::default();
+        publish_session_event(
+            &record,
+            RuntimeSessionEventKind::Snapshot,
+            &session,
+            Vec::new(),
+        );
+
+        let gap = session_lag_gap_event(&record, 0);
+
+        assert_eq!(gap.sequence, 1);
+        assert_eq!(gap.replay.gap.as_ref().unwrap().expected_sequence, 1);
+        assert_eq!(gap.replay.gap.as_ref().unwrap().actual_sequence, 2);
+        validate_runtime_session_event(&gap).expect("start gap event should validate");
+    }
+
+    #[test]
+    fn high_water_filter_drops_replayed_live_duplicates() {
+        let record = RuntimeSessionRecord::new("high-water-test", 4, true);
+        let session = RuntimeSession::default();
+        publish_session_event(
+            &record,
+            RuntimeSessionEventKind::Snapshot,
+            &session,
+            Vec::new(),
+        );
+        let replay =
+            capture_session_replay(&record, Some(0), session_snapshot_event(&record, &session));
+        let first_event = record
+            .event_store
+            .lock()
+            .expect("event store should not be poisoned")[0]
+            .clone();
+
+        assert_eq!(replay.high_water_sequence, 1);
+        assert!(
+            session_broadcast_event_after_high_water(
+                Ok(first_event),
+                record.clone(),
+                replay.high_water_sequence
+            )
+            .is_none()
+        );
+
+        publish_session_event(
+            &record,
+            RuntimeSessionEventKind::Snapshot,
+            &session,
+            Vec::new(),
+        );
+        let second_event = record
+            .event_store
+            .lock()
+            .expect("event store should not be poisoned")[1]
+            .clone();
+        assert!(
+            session_broadcast_event_after_high_water(
+                Ok(second_event),
+                record,
+                replay.high_water_sequence
+            )
+            .is_some()
+        );
     }
 
     #[test]

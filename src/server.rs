@@ -38,8 +38,9 @@ use crate::{
     runtime_time::created_at_now,
     session_registry::{
         DEFAULT_SESSION_ID, RuntimeSessionEventKind, RuntimeSessionRecord, RuntimeSessionRegistry,
-        SessionEventsQuery, event_cursor_from_headers, publish_session_event,
-        replay_session_events, session_broadcast_event, session_event, session_snapshot_event,
+        SessionEventsQuery, capture_session_replay, event_cursor_from_headers,
+        publish_session_event, session_broadcast_event_after_high_water, session_event,
+        session_snapshot_event,
     },
     sidecar::{
         RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
@@ -480,6 +481,7 @@ fn session_events_stream_for(
     headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let after = query.after.or_else(|| event_cursor_from_headers(&headers));
+    let receiver = record.events.subscribe();
     let snapshot = {
         let session = record
             .session
@@ -487,11 +489,13 @@ fn session_events_stream_for(
             .expect("runtime session lock should not be poisoned");
         session_snapshot_event(&record, &session)
     };
-    let replay_events = replay_session_events(&record, after, snapshot);
-    let replay = tokio_stream::iter(replay_events.into_iter().map(session_event));
+    let replay = capture_session_replay(&record, after, snapshot);
+    let high_water_sequence = replay.high_water_sequence;
+    let replay = tokio_stream::iter(replay.events.into_iter().map(session_event));
     let live_record = record.clone();
-    let live = BroadcastStream::new(record.events.subscribe())
-        .map(move |result| session_broadcast_event(result, live_record.clone()));
+    let live = BroadcastStream::new(receiver).filter_map(move |result| {
+        session_broadcast_event_after_high_water(result, live_record.clone(), high_water_sequence)
+    });
     Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
 }
 
@@ -2493,8 +2497,18 @@ mod tests {
 
         assert!(runtime_log_broadcast_event(Ok(log_event)).is_ok());
         assert!(runtime_log_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1))).is_ok());
-        assert!(session_broadcast_event(Ok(session_event), record.clone()).is_ok());
-        assert!(session_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1)), record).is_ok());
+        assert!(
+            session_broadcast_event_after_high_water(Ok(session_event), record.clone(), 0)
+                .is_some()
+        );
+        assert!(
+            session_broadcast_event_after_high_water(
+                Err(BroadcastStreamRecvError::Lagged(1)),
+                record,
+                0
+            )
+            .is_some()
+        );
     }
 
     #[tokio::test]
@@ -2525,7 +2539,7 @@ mod tests {
         assert_eq!(beta_events[0].session_id, "beta");
         assert_eq!(beta_events[0].sequence, 1);
 
-        let replay = replay_session_events(&alpha, Some(0), alpha_events[0].clone());
+        let replay = capture_session_replay(&alpha, Some(0), alpha_events[0].clone()).events;
         assert_eq!(replay.len(), 1);
         assert!(replay[0].replay.replayed);
         assert_eq!(replay[0].session_id, "alpha");
