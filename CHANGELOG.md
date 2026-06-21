@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.39.0...skenion-runtime-v0.40.0) (2026-06-21)
+
+
+### Features
+
+* **runtime:** add collaboration coordinator ([a5bd9d4](https://github.com/echovisionlab/skenion-runtime/commit/a5bd9d4f5a20845c5385a458cf4c6aab7c362848)), closes [#107](https://github.com/echovisionlab/skenion-runtime/issues/107)
+
 ## [0.39.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.38.0...skenion-runtime-v0.39.0) (2026-06-21)
 
 

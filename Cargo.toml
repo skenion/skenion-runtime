@@ -1,6 +1,6 @@
 [package]
 name = "skenion-runtime"
-version = "0.39.0"
+version = "0.40.0"
 edition = "2024"
 description = "Skenion native runtime"
 license = "Apache-2.0"
