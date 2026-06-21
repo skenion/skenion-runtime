@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.35.0...skenion-runtime-v0.36.0) (2026-06-21)
+
+
+### Features
+
+* **runtime:** discover extension packages ([#93](https://github.com/echovisionlab/skenion-runtime/issues/93)) ([327e10c](https://github.com/echovisionlab/skenion-runtime/commit/327e10cb32e75ce6d5725a744786f9c242f368a2))
+
 ## [0.35.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.34.0...skenion-runtime-v0.35.0) (2026-06-21)
 
 
