@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.2](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.36.1...skenion-runtime-v0.36.2) (2026-06-21)
+
+
+### Bug Fixes
+
+* **runtime:** publish crates from clean release tags ([3719ba4](https://github.com/echovisionlab/skenion-runtime/commit/3719ba47f271171d3d8f174a92afc2c62a3edb23))
+
 ## [0.36.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.36.0...skenion-runtime-v0.36.1) (2026-06-21)
 
 
