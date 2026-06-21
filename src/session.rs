@@ -1147,6 +1147,7 @@ fn normalize_mutation_base_revisions(
     }
 }
 
+#[derive(Debug)]
 struct LoweredPaste {
     graph_patch: GraphPatch,
     view_patch: Option<RuntimeViewPatch>,
@@ -1356,13 +1357,14 @@ fn empty_id_remap() -> IdRemapResult {
 }
 
 fn next_available_node_id(base: &str, used_node_ids: &HashSet<String>) -> String {
-    for index in 2.. {
+    let mut index = 2;
+    loop {
         let candidate = format!("{base}_{index}");
         if !used_node_ids.contains(&candidate) {
             return candidate;
         }
+        index += 1;
     }
-    unreachable!("unbounded id remap search should always return");
 }
 
 fn graph_node_v02_to_v01(node: &GraphNodeV02, pasted_id: &str) -> GraphNode {
@@ -1673,18 +1675,22 @@ fn created_at_now() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::{Value, json};
 
     use crate::{
-        ControlMessage, ControlValue, Edge, GraphDocument, GraphPatch, NodeRegistry, PortRef,
-        ProjectRequest, RuntimeControlEmission, RuntimeControlEventRequest,
-        RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeDiagnostic,
-        RuntimeOperationEnvelope, ViewState,
+        ControlMessage, ControlValue, Edge, EdgeEndpointV02, EdgeSpecV02, GraphDocument,
+        GraphPatch, NodeRegistry, PortRef, PortSpecV02, ProjectRequest, RuntimeControlEmission,
+        RuntimeControlEventRequest, RuntimeControlReadRequest, RuntimeControlReadTarget,
+        RuntimeDiagnostic, RuntimeOperationEnvelope, ViewState,
     };
 
     use super::{
         HistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest, RuntimePatchResponse,
-        RuntimeSession, RuntimeViewPatch, RuntimeViewPatchOperation,
+        RuntimeSession, RuntimeViewPatch, RuntimeViewPatchOperation, lower_fragment_view_patch,
+        lower_paste_graph_fragment, port_v02_to_v01, remap_edge,
+        runtime_diagnostic_to_operation_diagnostic,
     };
 
     #[test]
@@ -1711,9 +1717,11 @@ mod tests {
 
         let validation = session.validate_current();
         let plan = session.plan_current();
+        let preview_control = session.preview_control_state_snapshot();
 
         assert!(!validation.ok);
         assert!(!plan.ok);
+        assert!(preview_control.is_none());
         assert!(
             plan.diagnostics[0]
                 .message
@@ -1745,6 +1753,27 @@ mod tests {
 
     #[test]
     fn validate_current_reports_invalid_stored_project() {
+        let mut session = RuntimeSession {
+            graph: Some(sample_project().graph),
+            registry: None,
+            plan: None,
+            diagnostics: Vec::new(),
+            revision: 1,
+            ..RuntimeSession::default()
+        };
+
+        let response = session.validate_current();
+
+        assert!(!response.ok);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("no project loaded")
+        );
+    }
+
+    #[test]
+    fn validate_current_reports_registry_validation_errors() {
         let mut session = RuntimeSession {
             graph: Some(sample_project().graph),
             registry: Some(NodeRegistry::new()),
@@ -1835,6 +1864,12 @@ mod tests {
             session.control_state_response().values.get("value_1"),
             Some(&ControlValue::float(32.0))
         );
+
+        let same_set =
+            session.apply_control_event(set_control_request("value_1", "in", f32_value(32.0)));
+        assert!(same_set.ok);
+        assert!(!same_set.changed);
+        assert_eq!(same_set.control_revision, Some(1));
 
         let bang = session.apply_control_event(bang_control_request("value_1", "in"));
         assert!(bang.ok);
@@ -3060,6 +3095,295 @@ mod tests {
     }
 
     #[test]
+    fn paste_graph_fragment_remaps_past_existing_generated_ids() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let first = session.apply_runtime_operation(paste_operation("1"));
+        assert!(first.ok);
+
+        let second = session.apply_runtime_operation(paste_operation("2"));
+
+        assert!(second.ok);
+        assert_eq!(
+            second
+                .id_remap
+                .node_id_map
+                .get("value_1")
+                .map(String::as_str),
+            Some("value_1_3")
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_uses_default_descriptions_without_attribution() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.attribution = None;
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(response.ok);
+        let mut history = session.history();
+        let entry = history.entries.pop().expect("history should exist");
+        assert_eq!(
+            entry.description.as_deref(),
+            Some("Paste graph fragment op-paste")
+        );
+        assert_eq!(
+            entry
+                .mutation
+                .graph_patch
+                .as_ref()
+                .and_then(|patch| patch.description.as_deref()),
+            Some("Paste graph fragment")
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_reports_no_loaded_project() {
+        let mut session = RuntimeSession::default();
+
+        let response = session.apply_runtime_operation(paste_operation("1"));
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(response.revision_before, "1");
+        assert_eq!(response.diagnostics[0].code, "paste.target.no-project");
+    }
+
+    #[test]
+    fn paste_graph_fragment_rejects_invalid_operation_envelope() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.kind = "loadProject".to_owned();
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.operation.invalid-envelope"
+        );
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("unsupported runtime operation kind")
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_rejects_id_conflicts_when_requested() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.options = Some(skenion_contracts::PasteGraphFragmentOptions {
+            outside_endpoint_policy: None,
+            id_conflict_policy: Some(skenion_contracts::IdConflictPolicy::Reject),
+            preserve_relative_positions: None,
+        });
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(response.diagnostics[0].code, "paste.id-conflict");
+        assert_eq!(
+            response.diagnostics[0].duplicates.as_deref(),
+            Some(&["value_1".to_owned()][..])
+        );
+        assert_eq!(
+            response
+                .id_remap
+                .node_id_map
+                .get("value_1")
+                .map(String::as_str),
+            Some("value_1")
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_reports_apply_mutation_failures_as_operation_diagnostics() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.fragment.nodes[1].kind = "missing.kind".to_owned();
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(response.history_entry_id, None);
+        assert_eq!(response.revision_after, None);
+        assert_eq!(response.diagnostics[0].code, "paste.lowering.failed");
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("missing node definition")
+        );
+    }
+
+    #[test]
+    fn paste_lowering_reports_fragment_analysis_errors() {
+        let request_graph = sample_project().graph;
+        let mut operation = paste_operation("1");
+        operation.request.fragment.nodes[1].ports[1].id = "renamed".to_owned();
+
+        let error = lower_paste_graph_fragment(&request_graph, 1, &operation.request, &operation)
+            .expect_err("fragment with missing target port should fail lowering");
+
+        assert_eq!(error.0[0].code, "paste.fragment.missing-target-port");
+        assert_eq!(
+            error.0[0].edges.as_deref(),
+            Some(&["edge_value_to_pasted".to_owned()][..])
+        );
+        assert!(error.1.node_id_map.is_empty());
+    }
+
+    #[test]
+    fn paste_lowering_skips_fragment_view_entries_missing_from_view_map() {
+        let mut operation = paste_operation("1");
+        operation
+            .request
+            .fragment
+            .view
+            .as_mut()
+            .expect("fragment should include view")
+            .nodes
+            .as_mut()
+            .expect("fragment view should include nodes")
+            .remove("pasted_target");
+        let node_id_map = [("pasted_target".to_owned(), "pasted_target".to_owned())]
+            .into_iter()
+            .collect();
+
+        let patch = lower_fragment_view_patch(1, &operation.request, &node_id_map);
+
+        assert!(patch.is_none());
+    }
+
+    #[test]
+    fn paste_lowering_handles_absent_fragment_view_and_unmapped_edge_endpoints() {
+        let mut operation = paste_operation("1");
+        operation.request.fragment.view = None;
+
+        let patch = lower_fragment_view_patch(1, &operation.request, &BTreeMap::new());
+
+        assert!(patch.is_none());
+
+        operation.request.fragment.view =
+            Some(skenion_contracts::GraphFragmentViewV02 { nodes: None });
+        let patch = lower_fragment_view_patch(1, &operation.request, &BTreeMap::new());
+        assert!(patch.is_none());
+
+        let edge = EdgeSpecV02 {
+            id: "edge".to_owned(),
+            source: EdgeEndpointV02 {
+                node_id: "outside_source".to_owned(),
+                port_id: "out".to_owned(),
+            },
+            target: EdgeEndpointV02 {
+                node_id: "outside_target".to_owned(),
+                port_id: "in".to_owned(),
+            },
+            resolved_type: None,
+            order: None,
+            enabled: None,
+            adapter: None,
+            feedback: None,
+            style_override: None,
+            label: None,
+            description: None,
+        };
+
+        let remapped = remap_edge(&edge, &BTreeMap::new());
+
+        assert_eq!(remapped.from.node, "outside_source");
+        assert_eq!(remapped.to.node, "outside_target");
+    }
+
+    #[test]
+    fn runtime_diagnostic_conversion_preserves_severity_and_code_defaults() {
+        let target = skenion_contracts::GraphTargetRef {
+            path: skenion_contracts::PatchPath::Root,
+            base_revision: "1".to_owned(),
+            target_revision: None,
+        };
+        let error = RuntimeDiagnostic::error("plain error");
+        let warning = RuntimeDiagnostic {
+            severity: crate::DiagnosticSeverity::Warning,
+            message: "coded warning".to_owned(),
+            code: Some("runtime.warning".to_owned()),
+            details: None,
+        };
+        let info = RuntimeDiagnostic {
+            severity: crate::DiagnosticSeverity::Info,
+            message: "info".to_owned(),
+            code: Some("runtime.info".to_owned()),
+            details: None,
+        };
+
+        let converted_error = runtime_diagnostic_to_operation_diagnostic(&error, &target);
+        let converted_warning = runtime_diagnostic_to_operation_diagnostic(&warning, &target);
+        let converted_info = runtime_diagnostic_to_operation_diagnostic(&info, &target);
+
+        assert_eq!(converted_error.severity, "error");
+        assert_eq!(converted_error.code, "paste.lowering.failed");
+        assert_eq!(converted_warning.severity, "warning");
+        assert_eq!(converted_warning.code, "runtime.warning");
+        assert_eq!(converted_info.severity, "info");
+        assert_eq!(converted_info.code, "runtime.info");
+    }
+
+    #[test]
+    fn paste_graph_fragment_applies_position_and_anchor_placement() {
+        let mut positioned = RuntimeSession::default();
+        positioned.load_project(sample_project());
+        let mut position_operation = paste_operation("1");
+        position_operation.request.placement =
+            Some(skenion_contracts::PastePlacement::Position { x: 300.0, y: 400.0 });
+
+        let position_response = positioned.apply_runtime_operation(position_operation);
+
+        assert!(position_response.ok);
+        let position_view = positioned.view_state().expect("view state should exist");
+        let pasted_value_view = position_view
+            .canvas
+            .nodes
+            .get("value_1_2")
+            .expect("pasted value view should exist");
+        let pasted_target_view = position_view
+            .canvas
+            .nodes
+            .get("pasted_target")
+            .expect("pasted target view should exist");
+        assert_eq!((pasted_value_view.x, pasted_value_view.y), (300.0, 400.0));
+        assert_eq!((pasted_target_view.x, pasted_target_view.y), (470.0, 400.0));
+
+        let mut anchored = RuntimeSession::default();
+        anchored.load_project(sample_project());
+        let mut anchor_operation = paste_operation("1");
+        anchor_operation.request.placement = Some(skenion_contracts::PastePlacement::Anchor {
+            node_id: "value_1".to_owned(),
+            offset_x: Some(16.0),
+            offset_y: Some(32.0),
+        });
+
+        let anchor_response = anchored.apply_runtime_operation(anchor_operation);
+
+        assert!(anchor_response.ok);
+        let anchor_view = anchored.view_state().expect("view state should exist");
+        let pasted_value_view = anchor_view
+            .canvas
+            .nodes
+            .get("value_1_2")
+            .expect("pasted value view should exist");
+        assert_eq!((pasted_value_view.x, pasted_value_view.y), (26.0, 52.0));
+    }
+
+    #[test]
     fn paste_graph_fragment_reports_base_revision_conflict() {
         let mut session = RuntimeSession::default();
         session.load_project(sample_project());
@@ -3093,6 +3417,76 @@ mod tests {
         assert_eq!(
             response.diagnostics[0].code,
             "paste.target.missing-help-working-copy"
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_allows_loaded_help_working_copy_target() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.target.path = skenion_contracts::PatchPath::HelpWorkingCopy {
+            working_copy_id: "minimal-value".to_owned(),
+            source_package_id: Some("skenion.core".to_owned()),
+            source_patch_id: Some("float-help".to_owned()),
+        };
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(response.ok);
+        assert!(response.applied);
+        assert_eq!(response.revision_after.as_deref(), Some("2"));
+        assert_eq!(
+            response
+                .id_remap
+                .node_id_map
+                .get("value_1")
+                .map(String::as_str),
+            Some("value_1_2")
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_rejects_project_patch_definition_target() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.target.path = skenion_contracts::PatchPath::ProjectPatchDefinition {
+            patch_id: "identity".to_owned(),
+        };
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.target.unsupported-project-patch-definition"
+        );
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("cannot be mutated by the current runtime session substrate")
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_rejects_embedded_patch_instance_target() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.target.path = skenion_contracts::PatchPath::EmbeddedPatchInstance {
+            owner_path: vec!["root".to_owned()],
+            node_id: "subpatch_1".to_owned(),
+        };
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.target.unsupported-embedded-patch-instance"
         );
     }
 
@@ -3163,6 +3557,62 @@ mod tests {
             response.diagnostics[0].code,
             "paste.target.immutable-help-source"
         );
+    }
+
+    #[test]
+    fn paste_graph_fragment_converts_v02_port_rates_for_lowered_v01_nodes() {
+        let cases = [
+            (
+                json!({ "id": "event", "direction": "input", "type": "message.any", "rate": "event", "triggerMode": "trigger" }),
+                crate::DataFlow::Event,
+                "message.any",
+                Some(crate::PortActivation::Trigger),
+            ),
+            (
+                json!({ "id": "audio", "direction": "output", "type": "signal.audio", "rate": "audio" }),
+                crate::DataFlow::Signal,
+                "signal.audio",
+                None,
+            ),
+            (
+                json!({ "id": "resource", "direction": "input", "type": "resource.buffer", "rate": "resource" }),
+                crate::DataFlow::Resource,
+                "resource.buffer",
+                None,
+            ),
+            (
+                json!({ "id": "io", "direction": "output", "type": "io.midi", "rate": "io" }),
+                crate::DataFlow::Resource,
+                "io.midi",
+                None,
+            ),
+            (
+                json!({ "id": "render", "direction": "input", "type": "value.number", "rate": "render", "triggerMode": "passive" }),
+                crate::DataFlow::Value,
+                "number.float",
+                Some(crate::PortActivation::Latched),
+            ),
+            (
+                json!({ "id": "gpu", "direction": "input", "type": "value.color", "rate": "gpu", "triggerMode": "latched" }),
+                crate::DataFlow::Value,
+                "color",
+                Some(crate::PortActivation::Latched),
+            ),
+            (
+                json!({ "id": "default", "direction": "input", "type": "message.any" }),
+                crate::DataFlow::Event,
+                "message.any",
+                None,
+            ),
+        ];
+
+        for (value, expected_flow, expected_kind, expected_activation) in cases {
+            let port: PortSpecV02 = serde_json::from_value(value).expect("port should parse");
+            let lowered = port_v02_to_v01(&port);
+            assert_eq!(lowered.data_type.flow, expected_flow);
+            assert_eq!(lowered.data_type.data_kind, expected_kind);
+            assert_eq!(lowered.activation, expected_activation);
+        }
     }
 
     fn graph_patch(value: Value) -> GraphPatch {

@@ -279,6 +279,7 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.plan",
             "session.run",
             "session.mutate",
+            "session.operation",
             "session.history",
             "session.undo",
             "session.redo",
@@ -1634,6 +1635,7 @@ mod tests {
             "dummy.run",
             "session.load",
             "session.mutate",
+            "session.operation",
             "session.history",
             "session.undo",
             "session.redo",
@@ -2671,6 +2673,27 @@ mod tests {
                         && edge["to"]["node"] == "pasted_target"
                         && edge["to"]["port"] == "cold"
                 })
+        );
+    }
+
+    #[tokio::test]
+    async fn session_operation_endpoint_rejects_invalid_envelope_json() {
+        let response = post_json(
+            "/v0/session/operation",
+            json!({
+              "schema": "skenion.runtime.operation",
+              "schemaVersion": "0.1.0",
+              "kind": "pasteGraphFragment"
+            }),
+        )
+        .await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["applied"], false);
+        assert_eq!(response["target"]["path"]["kind"], "root");
+        assert_eq!(
+            response["diagnostics"][0]["code"],
+            "paste.operation.invalid-json"
         );
     }
 
