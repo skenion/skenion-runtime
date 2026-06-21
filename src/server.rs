@@ -12,12 +12,31 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{HeaderMap, HeaderValue, Method, header::CONTENT_TYPE},
-    response::sse::{Event, KeepAlive, Sse},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use skenion_contracts::RuntimeSessionInfoResponse;
+use skenion_contracts::{
+    RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata, RuntimeCollaborationChange,
+    RuntimeCollaborationConflict, RuntimeCollaborationNack, RuntimeCollaborationNackReason,
+    RuntimeCollaborationOperationBatch, RuntimeCollaborationOperationBatchResult,
+    RuntimeCollaborationOperationDiagnostic, RuntimeCollaborationOperationEnvelope,
+    RuntimeCollaborationOperationPayload, RuntimeCollaborationOperationResult,
+    RuntimeCollaborationOperationStatus, RuntimeCollaborationPresenceEnvelope,
+    RuntimeCollaborationRebase, RuntimeCollaborationRebaseStrategy,
+    RuntimeCollaborationSelectionEnvelope, RuntimeCollaborationServerClock,
+    RuntimeCollaborationUndoRedoAction, RuntimeSessionInfoResponse,
+    validate_runtime_collaboration_operation_batch,
+    validate_runtime_collaboration_operation_batch_result,
+    validate_runtime_collaboration_operation_envelope,
+    validate_runtime_collaboration_operation_result,
+    validate_runtime_collaboration_presence_envelope,
+    validate_runtime_collaboration_selection_envelope,
+};
 use tokio_stream::{
     Stream, StreamExt,
     wrappers::{BroadcastStream, IntervalStream, errors::BroadcastStreamRecvError},
@@ -25,17 +44,20 @@ use tokio_stream::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, GraphDocument, NodeDefinition,
-    NodeDefinitionV02, NodeRegistry, PreviewDocument, ProjectDocumentV02, ProjectRequestV02,
-    RunProjectRequestV02, RuntimeControlEventRequest, RuntimeControlEventResponse,
-    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
-    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeIoDeviceListResponse,
-    RuntimeIoDeviceManager, RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest,
-    RuntimeOperationEnvelope, RuntimePreviewStartRequest, RuntimeTelemetrySnapshot,
-    SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource, ViewState,
-    build_execution_plan, build_execution_plan_request_v02, build_execution_plan_run_request_v02,
-    generated_shader_response_from_preview_document, run_dummy_execution,
+    CanvasNodeView, DummyExecutionReport, Edge, ExecutionPlan, GeneratedShaderResponse,
+    GraphDocument, GraphPatch, GraphPatchOperation, NodeDefinition, NodeDefinitionV02,
+    NodeRegistry, PreviewDocument, ProjectDocumentV02, ProjectRequestV02, RunProjectRequestV02,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
+    RuntimeControlReadResponse, RuntimeControlStateResponse, RuntimeExtensionListResponse,
+    RuntimeExtensionManager, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
+    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope,
+    RuntimePatchResponse, RuntimePreviewStartRequest, RuntimeTelemetrySnapshot, RuntimeViewPatch,
+    RuntimeViewPatchOperation, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
+    ShaderDiagnosticSource, ViewState, build_execution_plan, build_execution_plan_request_v02,
+    build_execution_plan_run_request_v02, collaboration_broadcast_event_after_high_water,
+    collaboration_event, generated_shader_response_from_preview_document, run_dummy_execution,
     runtime_time::created_at_now,
+    session::{edge_v02_to_v01, graph_node_v02_to_v01},
     session_registry::{
         DEFAULT_SESSION_ID, RuntimeSessionEventKind, RuntimeSessionRecord, RuntimeSessionRegistry,
         SessionEventsQuery, capture_session_replay, event_cursor_from_headers,
@@ -97,6 +119,28 @@ pub struct RuntimeApiResponse {
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
     pub report: Option<DummyExecutionReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum CollaborationOperationResponse {
+    Batch(Box<RuntimeCollaborationOperationBatchResult>),
+    Single(Box<RuntimeCollaborationOperationResult>),
+    Paste(Box<crate::PasteGraphFragmentResponse>),
+}
+
+#[derive(Debug)]
+struct LoweredCollaborationChangeSet {
+    mutation: RuntimeMutationRequest,
+    transformed_payload: RuntimeCollaborationOperationPayload,
+    edge_updates: Vec<CollaborationEdgeMapUpdate>,
+}
+
+#[derive(Debug)]
+enum CollaborationEdgeMapUpdate {
+    Remember { edge_id: String, edge: Edge },
+    Forget { edge_id: String },
+    ForgetIncident { node_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +291,22 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
             post(apply_session_operation_by_id),
         )
         .route(
+            "/v0/sessions/{session_id}/operations",
+            post(apply_session_collaboration_operations_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/collaboration/presence",
+            post(update_session_collaboration_presence_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/collaboration/selection",
+            post(update_session_collaboration_selection_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/collaboration/events/stream",
+            get(session_collaboration_events_stream_by_id),
+        )
+        .route(
             "/v0/sessions/{session_id}/history",
             get(session_history_by_id),
         )
@@ -301,6 +361,22 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/run", post(run_session))
         .route("/v0/session/mutate", post(mutate_session))
         .route("/v0/session/operation", post(apply_session_operation))
+        .route(
+            "/v0/session/operations",
+            post(apply_session_collaboration_operations),
+        )
+        .route(
+            "/v0/session/collaboration/presence",
+            post(update_session_collaboration_presence),
+        )
+        .route(
+            "/v0/session/collaboration/selection",
+            post(update_session_collaboration_selection),
+        )
+        .route(
+            "/v0/session/collaboration/events/stream",
+            get(session_collaboration_events_stream),
+        )
         .route("/v0/session/history", get(session_history))
         .route("/v0/session/undo", post(undo_session))
         .route("/v0/session/redo", post(redo_session))
@@ -355,6 +431,13 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.run",
             "session.mutate",
             "session.operation",
+            "session.collaboration.operations",
+            "session.collaboration.operationBatch",
+            "session.collaboration.events.stream",
+            "session.collaboration.presence",
+            "session.collaboration.selection",
+            "session.collaboration.idempotency",
+            "session.collaboration.rebase.crdtMerge",
             "session.history",
             "session.undo",
             "session.redo",
@@ -496,6 +579,49 @@ fn session_events_stream_for(
     let live = BroadcastStream::new(receiver).filter_map(move |result| {
         session_broadcast_event_after_high_water(result, live_record.clone(), high_water_sequence)
     });
+    Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
+}
+
+async fn session_collaboration_events_stream(
+    State(state): State<RuntimeServerState>,
+    Query(query): Query<SessionEventsQuery>,
+    headers: HeaderMap,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    session_collaboration_events_stream_for(state.sessions.default_record(), query, headers)
+}
+
+async fn session_collaboration_events_stream_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<SessionEventsQuery>,
+    headers: HeaderMap,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    session_collaboration_events_stream_for(
+        state.sessions.get_or_create(&session_id),
+        query,
+        headers,
+    )
+}
+
+fn session_collaboration_events_stream_for(
+    record: RuntimeSessionRecord,
+    query: SessionEventsQuery,
+    headers: HeaderMap,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let after = query.after.or_else(|| event_cursor_from_headers(&headers));
+    let replay = record.collaboration.capture_replay(after);
+    let high_water_sequence = replay.high_water_sequence;
+    let replay = tokio_stream::iter(replay.events.into_iter().map(collaboration_event));
+    let live_record = record.clone();
+    let live =
+        BroadcastStream::new(record.collaboration.events.subscribe()).filter_map(move |result| {
+            collaboration_broadcast_event_after_high_water(
+                result,
+                &live_record.collaboration,
+                &live_record.id,
+                high_water_sequence,
+            )
+        });
     Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
 }
 
@@ -771,6 +897,7 @@ fn load_session_for(
     record: RuntimeSessionRecord,
     request: ProjectRequest,
 ) -> Json<crate::RuntimeSessionResponse> {
+    let _coordination_guard = record.collaboration.operation_guard();
     let mut session = record
         .session
         .write()
@@ -885,6 +1012,7 @@ fn mutate_session_for(
     record: RuntimeSessionRecord,
     value: serde_json::Value,
 ) -> Json<crate::RuntimePatchResponse> {
+    let _coordination_guard = record.collaboration.operation_guard();
     let mut session = record
         .session
         .write()
@@ -934,6 +1062,7 @@ fn apply_session_operation_for(
     record: RuntimeSessionRecord,
     value: serde_json::Value,
 ) -> Json<crate::PasteGraphFragmentResponse> {
+    let _coordination_guard = record.collaboration.operation_guard();
     let mut session = record
         .session
         .write()
@@ -993,6 +1122,1045 @@ fn apply_session_operation_for(
     paste_operation_json(response)
 }
 
+async fn apply_session_collaboration_operations(
+    State(state): State<RuntimeServerState>,
+    Json(value): Json<serde_json::Value>,
+) -> Json<CollaborationOperationResponse> {
+    apply_session_collaboration_operations_for(&state, state.sessions.default_record(), value)
+}
+
+async fn apply_session_collaboration_operations_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(value): Json<serde_json::Value>,
+) -> Json<CollaborationOperationResponse> {
+    apply_session_collaboration_operations_for(
+        &state,
+        state.sessions.get_or_create(&session_id),
+        value,
+    )
+}
+
+fn apply_session_collaboration_operations_for(
+    _state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    value: serde_json::Value,
+) -> Json<CollaborationOperationResponse> {
+    let response = match value.get("schema").and_then(serde_json::Value::as_str) {
+        Some("skenion.runtime.operation") => {
+            match serde_json::from_value::<RuntimeOperationEnvelope>(value) {
+                Ok(operation) => {
+                    let _coordination_guard = record.collaboration.operation_guard();
+                    let mut session = record
+                        .session
+                        .write()
+                        .expect("runtime session lock should not be poisoned");
+                    let response = session.apply_runtime_operation(operation);
+                    if response.ok && response.applied {
+                        publish_session_event(
+                            &record,
+                            RuntimeSessionEventKind::Mutate,
+                            &session,
+                            Vec::new(),
+                        );
+                    }
+                    CollaborationOperationResponse::Paste(Box::new(response))
+                }
+                Err(error) => CollaborationOperationResponse::Paste(Box::new(
+                    invalid_paste_operation_response(
+                        &record,
+                        format!("invalid runtime operation: {error}"),
+                    ),
+                )),
+            }
+        }
+        Some("skenion.runtime.collaboration.operation-batch") => {
+            match serde_json::from_value::<RuntimeCollaborationOperationBatch>(value) {
+                Ok(batch) => CollaborationOperationResponse::Batch(Box::new(
+                    apply_collaboration_operation_batch(&record, batch),
+                )),
+                Err(error) => CollaborationOperationResponse::Batch(Box::new(
+                    invalid_collaboration_batch_result(
+                        &record.id,
+                        format!("invalid collaboration batch: {error}"),
+                    ),
+                )),
+            }
+        }
+        _ => match serde_json::from_value::<RuntimeCollaborationOperationEnvelope>(value) {
+            Ok(operation) => CollaborationOperationResponse::Single(Box::new(
+                apply_collaboration_operation(&record, operation),
+            )),
+            Err(error) => CollaborationOperationResponse::Single(Box::new(
+                invalid_collaboration_operation_result(
+                    &record,
+                    "invalid-operation",
+                    "unknown",
+                    "invalid-operation",
+                    RuntimeCollaborationCausalMetadata {
+                        base_revision: current_session_graph_revision(&record),
+                        base_sequence: 0,
+                        vector: BTreeMap::from([("runtime".to_owned(), 0)]),
+                        observed_operation_ids: None,
+                    },
+                    format!("invalid collaboration operation: {error}"),
+                ),
+            )),
+        },
+    };
+    Json(response)
+}
+
+async fn update_session_collaboration_presence(
+    State(state): State<RuntimeServerState>,
+    Json(presence): Json<RuntimeCollaborationPresenceEnvelope>,
+) -> Response {
+    update_session_collaboration_presence_for(state.sessions.default_record(), presence)
+}
+
+async fn update_session_collaboration_presence_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(presence): Json<RuntimeCollaborationPresenceEnvelope>,
+) -> Response {
+    update_session_collaboration_presence_for(state.sessions.get_or_create(&session_id), presence)
+}
+
+fn update_session_collaboration_presence_for(
+    record: RuntimeSessionRecord,
+    mut presence: RuntimeCollaborationPresenceEnvelope,
+) -> Response {
+    let _coordination_guard = record.collaboration.operation_guard();
+    presence.session_id = record.id.clone();
+    if let Err(report) = validate_runtime_collaboration_presence_envelope(&presence) {
+        return invalid_collaboration_metadata_response(
+            "collaboration.invalid-presence",
+            format!("invalid collaboration presence: {report}"),
+        );
+    }
+    let sequence = record.collaboration.reserve_sequence();
+    record
+        .collaboration
+        .publish_presence(sequence, presence.clone());
+    Json(presence).into_response()
+}
+
+async fn update_session_collaboration_selection(
+    State(state): State<RuntimeServerState>,
+    Json(selection): Json<RuntimeCollaborationSelectionEnvelope>,
+) -> Response {
+    update_session_collaboration_selection_for(state.sessions.default_record(), selection)
+}
+
+async fn update_session_collaboration_selection_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(selection): Json<RuntimeCollaborationSelectionEnvelope>,
+) -> Response {
+    update_session_collaboration_selection_for(state.sessions.get_or_create(&session_id), selection)
+}
+
+fn update_session_collaboration_selection_for(
+    record: RuntimeSessionRecord,
+    mut selection: RuntimeCollaborationSelectionEnvelope,
+) -> Response {
+    let _coordination_guard = record.collaboration.operation_guard();
+    selection.session_id = record.id.clone();
+    if let Err(report) = validate_runtime_collaboration_selection_envelope(&selection) {
+        return invalid_collaboration_metadata_response(
+            "collaboration.invalid-selection",
+            format!("invalid collaboration selection: {report}"),
+        );
+    }
+    let sequence = record.collaboration.reserve_sequence();
+    record
+        .collaboration
+        .publish_selection(sequence, selection.clone());
+    Json(selection).into_response()
+}
+
+fn invalid_collaboration_metadata_response(code: &str, message: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "ok": false,
+            "diagnostics": [{
+                "severity": "error",
+                "code": code,
+                "message": message
+            }]
+        })),
+    )
+        .into_response()
+}
+
+fn apply_collaboration_operation_batch(
+    record: &RuntimeSessionRecord,
+    batch: RuntimeCollaborationOperationBatch,
+) -> RuntimeCollaborationOperationBatchResult {
+    if let Err(report) = validate_runtime_collaboration_operation_batch(&batch) {
+        return invalid_collaboration_batch_result(
+            &record.id,
+            format!("invalid collaboration batch: {report}"),
+        );
+    }
+    if batch.session_id != record.id {
+        return invalid_collaboration_batch_result(
+            &record.id,
+            format!(
+                "collaboration batch sessionId {} does not match Runtime session {}",
+                batch.session_id, record.id
+            ),
+        );
+    }
+
+    let results = batch
+        .operations
+        .into_iter()
+        .map(|operation| apply_collaboration_operation(record, operation))
+        .collect();
+    let result = RuntimeCollaborationOperationBatchResult {
+        schema: "skenion.runtime.collaboration.operation-batch-result".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        session_id: record.id.clone(),
+        results,
+        diagnostics: Vec::new(),
+        created_at: created_at_now(),
+    };
+    validate_runtime_collaboration_operation_batch_result(&result)
+        .expect("runtime collaboration batch result should validate");
+    result
+}
+
+fn apply_collaboration_operation(
+    record: &RuntimeSessionRecord,
+    operation: RuntimeCollaborationOperationEnvelope,
+) -> RuntimeCollaborationOperationResult {
+    let _operation_guard = record.collaboration.operation_guard();
+    if let Err(report) = validate_runtime_collaboration_operation_envelope(&operation) {
+        return publish_collaboration_operation_result(
+            record,
+            invalid_collaboration_operation_result(
+                record,
+                &operation.operation_id,
+                &operation.participant_id,
+                &operation.idempotency_key,
+                operation.causal.clone(),
+                format!("invalid collaboration operation: {report}"),
+            ),
+        );
+    }
+    if operation.session_id != record.id {
+        return publish_collaboration_operation_result(
+            record,
+            invalid_collaboration_operation_result(
+                record,
+                &operation.operation_id,
+                &operation.participant_id,
+                &operation.idempotency_key,
+                operation.causal.clone(),
+                format!(
+                    "collaboration operation sessionId {} does not match Runtime session {}",
+                    operation.session_id, record.id
+                ),
+            ),
+        );
+    }
+    if record
+        .collaboration
+        .has_idempotency_key(&operation.idempotency_key)
+    {
+        return publish_collaboration_operation_result(
+            record,
+            duplicate_collaboration_operation_result(record, &operation),
+        );
+    }
+
+    let current_revision = current_session_graph_revision(record);
+    let payload_requires_rebase = collaboration_payload_base_revision(&operation.payload)
+        .is_some_and(|base_revision| base_revision != current_revision);
+    let requires_rebase =
+        operation.causal.base_revision != current_revision || payload_requires_rebase;
+    let transformed_payload =
+        transform_collaboration_payload_to_revision(&operation.payload, &current_revision);
+    let rebase = requires_rebase.then(|| {
+        collaboration_rebase(
+            record,
+            &operation,
+            current_revision.clone(),
+            RuntimeCollaborationRebaseStrategy::CrdtMerge,
+            Some(transformed_payload.clone()),
+            Vec::new(),
+        )
+    });
+
+    match &transformed_payload {
+        RuntimeCollaborationOperationPayload::PasteGraphFragment {
+            request,
+            description,
+            ..
+        } => {
+            let runtime_operation = RuntimeOperationEnvelope {
+                schema: "skenion.runtime.operation".to_owned(),
+                schema_version: "0.1.0".to_owned(),
+                id: operation.operation_id.clone(),
+                kind: "pasteGraphFragment".to_owned(),
+                request: (**request).clone(),
+                attribution: Some(crate::RuntimeOperationAttribution {
+                    actor_id: Some(operation.participant_id.clone()),
+                    client_id: operation.correlation_id.clone(),
+                    label: description.clone(),
+                }),
+                correlation_id: operation.correlation_id.clone(),
+                created_at: Some(operation.submitted_at.clone()),
+            };
+            apply_collaboration_paste_operation(record, operation, runtime_operation, rebase)
+        }
+        RuntimeCollaborationOperationPayload::ChangeSet { .. } => {
+            match lower_collaboration_change_set(record, &operation, &transformed_payload) {
+                Ok(lowered) => {
+                    apply_collaboration_change_set_operation(record, operation, lowered, rebase)
+                }
+                Err(message) => publish_collaboration_operation_result(
+                    record,
+                    invalid_collaboration_operation_result_with_rebase(
+                        record,
+                        &operation.operation_id,
+                        &operation.participant_id,
+                        &operation.idempotency_key,
+                        operation.causal.clone(),
+                        message,
+                        rebase,
+                    ),
+                ),
+            }
+        }
+        RuntimeCollaborationOperationPayload::UndoRedo { action, .. } => {
+            apply_collaboration_undo_redo_operation(record, operation, action.clone(), rebase)
+        }
+    }
+}
+
+fn collaboration_payload_base_revision(
+    payload: &RuntimeCollaborationOperationPayload,
+) -> Option<&str> {
+    match payload {
+        RuntimeCollaborationOperationPayload::ChangeSet { target, .. } => {
+            Some(target.base_revision.as_str())
+        }
+        RuntimeCollaborationOperationPayload::PasteGraphFragment { request, .. } => {
+            Some(request.target.base_revision.as_str())
+        }
+        RuntimeCollaborationOperationPayload::UndoRedo { .. } => None,
+    }
+}
+
+fn transform_collaboration_payload_to_revision(
+    payload: &RuntimeCollaborationOperationPayload,
+    revision: &str,
+) -> RuntimeCollaborationOperationPayload {
+    let mut payload = payload.clone();
+    match &mut payload {
+        RuntimeCollaborationOperationPayload::ChangeSet { target, .. } => {
+            target.base_revision = revision.to_owned();
+        }
+        RuntimeCollaborationOperationPayload::PasteGraphFragment { request, .. } => {
+            request.target.base_revision = revision.to_owned();
+        }
+        RuntimeCollaborationOperationPayload::UndoRedo { .. } => {}
+    }
+    payload
+}
+
+fn lower_collaboration_change_set(
+    record: &RuntimeSessionRecord,
+    operation: &RuntimeCollaborationOperationEnvelope,
+    payload: &RuntimeCollaborationOperationPayload,
+) -> Result<LoweredCollaborationChangeSet, String> {
+    let RuntimeCollaborationOperationPayload::ChangeSet {
+        target,
+        changes,
+        description,
+        ..
+    } = payload
+    else {
+        return Err("collaboration operation payload is not a changeSet".to_owned());
+    };
+    let snapshot = record
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned")
+        .snapshot();
+    let graph_revision = snapshot
+        .graph_revision()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| target.base_revision.clone());
+    let mut graph_ops = Vec::new();
+    let mut view_ops = Vec::new();
+    let mut edge_updates = Vec::new();
+
+    for change in changes {
+        match change {
+            RuntimeCollaborationChange::NodeAdd { node, view, .. } => {
+                graph_ops.push(GraphPatchOperation::AddNode {
+                    node: graph_node_v02_to_v01(node, &node.id),
+                });
+                if let Some(view) = view {
+                    view_ops.push(RuntimeViewPatchOperation::SetNodeView {
+                        node_id: node.id.clone(),
+                        view: CanvasNodeView {
+                            x: view.x,
+                            y: view.y,
+                            width: None,
+                            height: None,
+                            collapsed: None,
+                        },
+                    });
+                }
+            }
+            RuntimeCollaborationChange::NodeMove {
+                node_id, from, to, ..
+            } => {
+                view_ops.push(RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: node_id.clone(),
+                    from: from.as_ref().map(|position| CanvasNodeView {
+                        x: position.x,
+                        y: position.y,
+                        width: None,
+                        height: None,
+                        collapsed: None,
+                    }),
+                    to: CanvasNodeView {
+                        x: to.x,
+                        y: to.y,
+                        width: None,
+                        height: None,
+                        collapsed: None,
+                    },
+                });
+            }
+            RuntimeCollaborationChange::NodeDelete { node_id, .. } => {
+                graph_ops.push(GraphPatchOperation::RemoveNode {
+                    node_id: node_id.clone(),
+                });
+                edge_updates.push(CollaborationEdgeMapUpdate::ForgetIncident {
+                    node_id: node_id.clone(),
+                });
+            }
+            RuntimeCollaborationChange::EdgeConnect { edge, .. } => {
+                let runtime_edge = edge_v02_to_v01(edge);
+                graph_ops.push(GraphPatchOperation::AddEdge {
+                    edge: runtime_edge.clone(),
+                });
+                edge_updates.push(CollaborationEdgeMapUpdate::Remember {
+                    edge_id: edge.id.clone(),
+                    edge: runtime_edge,
+                });
+            }
+            RuntimeCollaborationChange::EdgeDisconnect { edge_id, .. } => {
+                let Some(edge) = record.collaboration.edge_by_id(edge_id) else {
+                    return Err(format!(
+                        "collaboration edge.disconnect cannot resolve edge id {edge_id}; only edges created through collaboration edge.connect have runtime edge ids"
+                    ));
+                };
+                graph_ops.push(GraphPatchOperation::RemoveEdge { edge });
+                edge_updates.push(CollaborationEdgeMapUpdate::Forget {
+                    edge_id: edge_id.clone(),
+                });
+            }
+        }
+    }
+
+    let graph_patch = (!graph_ops.is_empty()).then(|| GraphPatch {
+        schema: "skenion.graph.patch".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        id: format!("collaboration_{}", operation.operation_id),
+        base_revision: graph_revision,
+        client_id: operation.correlation_id.clone(),
+        created_at: Some(operation.submitted_at.clone()),
+        description: description.clone(),
+        ops: graph_ops,
+    });
+    let view_patch = (!view_ops.is_empty()).then_some(RuntimeViewPatch {
+        base_view_revision: snapshot.view_revision,
+        ops: view_ops,
+    });
+    Ok(LoweredCollaborationChangeSet {
+        mutation: RuntimeMutationRequest {
+            graph_patch,
+            view_patch,
+            actor_id: Some(operation.participant_id.clone()),
+            client_id: operation.correlation_id.clone(),
+            description: description.clone(),
+        },
+        transformed_payload: payload.clone(),
+        edge_updates,
+    })
+}
+
+fn apply_collaboration_edge_updates(
+    record: &RuntimeSessionRecord,
+    updates: Vec<CollaborationEdgeMapUpdate>,
+) {
+    for update in updates {
+        match update {
+            CollaborationEdgeMapUpdate::Remember { edge_id, edge } => {
+                record.collaboration.remember_edge_id(edge_id, edge);
+            }
+            CollaborationEdgeMapUpdate::Forget { edge_id } => {
+                record.collaboration.forget_edge_id(&edge_id);
+            }
+            CollaborationEdgeMapUpdate::ForgetIncident { node_id } => {
+                record.collaboration.forget_incident_edge_ids(&node_id);
+            }
+        }
+    }
+}
+
+fn apply_collaboration_paste_operation(
+    record: &RuntimeSessionRecord,
+    operation: RuntimeCollaborationOperationEnvelope,
+    runtime_operation: RuntimeOperationEnvelope,
+    rebase: Option<RuntimeCollaborationRebase>,
+) -> RuntimeCollaborationOperationResult {
+    let sequence = record.collaboration.reserve_sequence();
+    let mut session = record
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    let response = session.apply_runtime_operation(runtime_operation);
+    if response.ok && response.applied {
+        publish_session_event(
+            record,
+            RuntimeSessionEventKind::Mutate,
+            &session,
+            Vec::new(),
+        );
+    }
+    let revision = response
+        .revision_after
+        .clone()
+        .unwrap_or_else(|| response.revision_before.clone());
+    let diagnostics: Vec<_> = response
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            collaboration_diagnostic_from_operation_diagnostic(
+                diagnostic,
+                &operation.operation_id,
+                &operation.participant_id,
+                &operation.idempotency_key,
+            )
+        })
+        .collect();
+    let status = if response.ok && response.applied {
+        if rebase.is_some() {
+            RuntimeCollaborationOperationStatus::Rebased
+        } else {
+            RuntimeCollaborationOperationStatus::Accepted
+        }
+    } else {
+        RuntimeCollaborationOperationStatus::Rejected
+    };
+    let nack = if status == RuntimeCollaborationOperationStatus::Rejected {
+        Some(RuntimeCollaborationNack {
+            reason: RuntimeCollaborationNackReason::InvalidOperation,
+            retryable: Some(response.conflict),
+            diagnostics: Some(diagnostics.clone()),
+        })
+    } else {
+        None
+    };
+    let ack = if status != RuntimeCollaborationOperationStatus::Rejected {
+        Some(collaboration_ack(&operation, sequence, revision))
+    } else {
+        None
+    };
+
+    publish_collaboration_operation_result(
+        record,
+        RuntimeCollaborationOperationResult {
+            schema: "skenion.runtime.collaboration.operation-result".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            session_id: record.id.clone(),
+            operation_id: operation.operation_id,
+            participant_id: operation.participant_id,
+            idempotency_key: operation.idempotency_key,
+            status,
+            causal: operation.causal,
+            ack,
+            nack,
+            rebase,
+            diagnostics,
+            created_at: created_at_now(),
+        },
+    )
+}
+
+fn apply_collaboration_change_set_operation(
+    record: &RuntimeSessionRecord,
+    operation: RuntimeCollaborationOperationEnvelope,
+    lowered: LoweredCollaborationChangeSet,
+    rebase: Option<RuntimeCollaborationRebase>,
+) -> RuntimeCollaborationOperationResult {
+    let sequence = record.collaboration.reserve_sequence();
+    let mut session = record
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    let response = session.apply_mutation(lowered.mutation);
+    if response.ok && response.applied {
+        publish_session_event(
+            record,
+            RuntimeSessionEventKind::Mutate,
+            &session,
+            Vec::new(),
+        );
+        apply_collaboration_edge_updates(record, lowered.edge_updates);
+    }
+    collaboration_result_from_patch_response(
+        record,
+        operation,
+        response,
+        sequence,
+        rebase,
+        Some(lowered.transformed_payload),
+    )
+}
+
+fn apply_collaboration_undo_redo_operation(
+    record: &RuntimeSessionRecord,
+    operation: RuntimeCollaborationOperationEnvelope,
+    action: RuntimeCollaborationUndoRedoAction,
+    rebase: Option<RuntimeCollaborationRebase>,
+) -> RuntimeCollaborationOperationResult {
+    let sequence = record.collaboration.reserve_sequence();
+    let mut session = record
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    let response = match action {
+        RuntimeCollaborationUndoRedoAction::Undo => {
+            session.undo_for_actor(&operation.participant_id)
+        }
+        RuntimeCollaborationUndoRedoAction::Redo => {
+            session.redo_for_actor(&operation.participant_id)
+        }
+    };
+    if response.ok && response.applied {
+        publish_session_event(
+            record,
+            RuntimeSessionEventKind::Mutate,
+            &session,
+            Vec::new(),
+        );
+    }
+    collaboration_result_from_patch_response(record, operation, response, sequence, rebase, None)
+}
+
+fn collaboration_result_from_patch_response(
+    record: &RuntimeSessionRecord,
+    operation: RuntimeCollaborationOperationEnvelope,
+    response: RuntimePatchResponse,
+    sequence: u64,
+    rebase: Option<RuntimeCollaborationRebase>,
+    transformed_payload: Option<RuntimeCollaborationOperationPayload>,
+) -> RuntimeCollaborationOperationResult {
+    let revision = response
+        .snapshot
+        .graph_revision()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "0".to_owned());
+    let diagnostics: Vec<_> = response
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            collaboration_diagnostic_from_runtime_diagnostic(
+                diagnostic,
+                &operation.operation_id,
+                &operation.participant_id,
+                &operation.idempotency_key,
+            )
+        })
+        .collect();
+    let accepted = response.ok;
+    let status = if accepted && rebase.is_some() {
+        RuntimeCollaborationOperationStatus::Rebased
+    } else if accepted {
+        RuntimeCollaborationOperationStatus::Accepted
+    } else {
+        RuntimeCollaborationOperationStatus::Rejected
+    };
+    let nack = (!accepted).then(|| RuntimeCollaborationNack {
+        reason: RuntimeCollaborationNackReason::InvalidOperation,
+        retryable: Some(response.conflict),
+        diagnostics: Some(diagnostics.clone()),
+    });
+    let ack = accepted.then(|| collaboration_ack(&operation, sequence, revision));
+    let rebase = rebase.map(|mut rebase| {
+        if rebase.transformed_payload.is_none() {
+            rebase.transformed_payload = transformed_payload;
+        }
+        rebase
+    });
+
+    publish_collaboration_operation_result(
+        record,
+        RuntimeCollaborationOperationResult {
+            schema: "skenion.runtime.collaboration.operation-result".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            session_id: record.id.clone(),
+            operation_id: operation.operation_id,
+            participant_id: operation.participant_id,
+            idempotency_key: operation.idempotency_key,
+            status,
+            causal: operation.causal,
+            ack,
+            nack,
+            rebase,
+            diagnostics,
+            created_at: created_at_now(),
+        },
+    )
+}
+
+fn publish_collaboration_operation_result(
+    record: &RuntimeSessionRecord,
+    result: RuntimeCollaborationOperationResult,
+) -> RuntimeCollaborationOperationResult {
+    validate_runtime_collaboration_operation_result(&result)
+        .expect("runtime collaboration operation result should validate");
+    record.collaboration.remember_result(result.clone());
+    let sequence = match result.ack.as_ref() {
+        Some(ack) => ack.sequence,
+        None => record.collaboration.reserve_sequence(),
+    };
+    record
+        .collaboration
+        .publish_operation_result(&record.id, sequence, result.clone());
+    result
+}
+
+fn duplicate_collaboration_operation_result(
+    record: &RuntimeSessionRecord,
+    operation: &RuntimeCollaborationOperationEnvelope,
+) -> RuntimeCollaborationOperationResult {
+    RuntimeCollaborationOperationResult {
+        schema: "skenion.runtime.collaboration.operation-result".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        session_id: record.id.clone(),
+        operation_id: operation.operation_id.clone(),
+        participant_id: operation.participant_id.clone(),
+        idempotency_key: operation.idempotency_key.clone(),
+        status: RuntimeCollaborationOperationStatus::Duplicate,
+        causal: operation.causal.clone(),
+        ack: None,
+        nack: Some(RuntimeCollaborationNack {
+            reason: RuntimeCollaborationNackReason::DuplicateIdempotencyKey,
+            retryable: Some(false),
+            diagnostics: Some(vec![collaboration_diagnostic(
+                "warning",
+                "collaboration.duplicate-idempotency-key",
+                "collaboration operation idempotency key was already processed",
+                &operation.operation_id,
+                &operation.participant_id,
+                &operation.idempotency_key,
+            )]),
+        }),
+        rebase: None,
+        diagnostics: Vec::new(),
+        created_at: created_at_now(),
+    }
+}
+
+fn collaboration_rebase(
+    record: &RuntimeSessionRecord,
+    operation: &RuntimeCollaborationOperationEnvelope,
+    current_revision: String,
+    strategy: RuntimeCollaborationRebaseStrategy,
+    transformed_payload: Option<RuntimeCollaborationOperationPayload>,
+    conflicts: Vec<RuntimeCollaborationConflict>,
+) -> RuntimeCollaborationRebase {
+    let sequence = record.collaboration.current_sequence();
+    RuntimeCollaborationRebase {
+        from: operation.causal.clone(),
+        to: RuntimeCollaborationCausalMetadata {
+            base_revision: current_revision,
+            base_sequence: sequence,
+            vector: BTreeMap::from([("runtime".to_owned(), sequence)]),
+            observed_operation_ids: Some(vec![operation.operation_id.clone()]),
+        },
+        strategy,
+        transformed_payload,
+        conflicts,
+    }
+}
+
+fn invalid_collaboration_operation_result(
+    record: &RuntimeSessionRecord,
+    operation_id: &str,
+    participant_id: &str,
+    idempotency_key: &str,
+    causal: RuntimeCollaborationCausalMetadata,
+    message: String,
+) -> RuntimeCollaborationOperationResult {
+    RuntimeCollaborationOperationResult {
+        schema: "skenion.runtime.collaboration.operation-result".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        session_id: record.id.clone(),
+        operation_id: operation_id.to_owned(),
+        participant_id: participant_id.to_owned(),
+        idempotency_key: idempotency_key.to_owned(),
+        status: RuntimeCollaborationOperationStatus::Rejected,
+        causal,
+        ack: None,
+        nack: Some(RuntimeCollaborationNack {
+            reason: RuntimeCollaborationNackReason::InvalidOperation,
+            retryable: Some(false),
+            diagnostics: Some(vec![collaboration_diagnostic(
+                "error",
+                "collaboration.invalid-operation",
+                &message,
+                operation_id,
+                participant_id,
+                idempotency_key,
+            )]),
+        }),
+        rebase: None,
+        diagnostics: Vec::new(),
+        created_at: created_at_now(),
+    }
+}
+
+fn invalid_collaboration_operation_result_with_rebase(
+    record: &RuntimeSessionRecord,
+    operation_id: &str,
+    participant_id: &str,
+    idempotency_key: &str,
+    causal: RuntimeCollaborationCausalMetadata,
+    message: String,
+    rebase: Option<RuntimeCollaborationRebase>,
+) -> RuntimeCollaborationOperationResult {
+    let mut result = invalid_collaboration_operation_result(
+        record,
+        operation_id,
+        participant_id,
+        idempotency_key,
+        causal,
+        message,
+    );
+    result.rebase = rebase;
+    result
+}
+
+fn invalid_collaboration_batch_result(
+    session_id: &str,
+    message: String,
+) -> RuntimeCollaborationOperationBatchResult {
+    let result = RuntimeCollaborationOperationResult {
+        schema: "skenion.runtime.collaboration.operation-result".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        session_id: session_id.to_owned(),
+        operation_id: "invalid-batch".to_owned(),
+        participant_id: "runtime".to_owned(),
+        idempotency_key: "invalid-batch".to_owned(),
+        status: RuntimeCollaborationOperationStatus::Rejected,
+        causal: RuntimeCollaborationCausalMetadata {
+            base_revision: "0".to_owned(),
+            base_sequence: 0,
+            vector: BTreeMap::from([("runtime".to_owned(), 0)]),
+            observed_operation_ids: None,
+        },
+        ack: None,
+        nack: Some(RuntimeCollaborationNack {
+            reason: RuntimeCollaborationNackReason::InvalidOperation,
+            retryable: Some(false),
+            diagnostics: Some(vec![RuntimeCollaborationOperationDiagnostic {
+                severity: "error".to_owned(),
+                code: "collaboration.invalid-batch".to_owned(),
+                message: message.clone(),
+                path: None,
+                participant_id: Some("runtime".to_owned()),
+                operation_id: Some("invalid-batch".to_owned()),
+                idempotency_key: Some("invalid-batch".to_owned()),
+                expected_revision: None,
+                actual_revision: None,
+                expected_sequence: None,
+                actual_sequence: None,
+            }]),
+        }),
+        rebase: None,
+        diagnostics: Vec::new(),
+        created_at: created_at_now(),
+    };
+    let batch_result = RuntimeCollaborationOperationBatchResult {
+        schema: "skenion.runtime.collaboration.operation-batch-result".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        session_id: session_id.to_owned(),
+        results: vec![result],
+        diagnostics: vec![RuntimeCollaborationOperationDiagnostic {
+            severity: "error".to_owned(),
+            code: "collaboration.invalid-batch".to_owned(),
+            message,
+            path: None,
+            participant_id: Some("runtime".to_owned()),
+            operation_id: None,
+            idempotency_key: None,
+            expected_revision: None,
+            actual_revision: None,
+            expected_sequence: None,
+            actual_sequence: None,
+        }],
+        created_at: created_at_now(),
+    };
+    validate_runtime_collaboration_operation_batch_result(&batch_result)
+        .expect("invalid collaboration batch result should validate");
+    batch_result
+}
+
+fn invalid_paste_operation_response(
+    record: &RuntimeSessionRecord,
+    message: String,
+) -> crate::PasteGraphFragmentResponse {
+    let revision_before = current_session_graph_revision(record);
+    crate::PasteGraphFragmentResponse {
+        schema: "skenion.runtime.paste-graph-fragment.response".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        ok: false,
+        applied: false,
+        conflict: false,
+        target: crate::GraphTargetRef {
+            path: crate::PatchPath::Root,
+            base_revision: revision_before.clone(),
+            target_revision: None,
+        },
+        revision_before,
+        revision_after: None,
+        history_entry_id: None,
+        id_remap: crate::IdRemapResult {
+            node_id_map: BTreeMap::new(),
+            edge_id_map: BTreeMap::new(),
+            omitted_edge_ids: Vec::new(),
+        },
+        diagnostics: vec![crate::RuntimeOperationDiagnostic {
+            severity: "error".to_owned(),
+            code: "paste.operation.invalid-json".to_owned(),
+            message,
+            path: None,
+            target: None,
+            expected_revision: None,
+            actual_revision: None,
+            duplicates: None,
+            nodes: None,
+            edges: None,
+        }],
+    }
+}
+
+fn collaboration_ack(
+    operation: &RuntimeCollaborationOperationEnvelope,
+    sequence: u64,
+    revision: String,
+) -> RuntimeCollaborationAck {
+    let mut vector = operation.causal.vector.clone();
+    vector.insert("runtime".to_owned(), sequence);
+    vector.insert(operation.participant_id.clone(), sequence);
+    RuntimeCollaborationAck {
+        sequence,
+        revision: revision.clone(),
+        server_clock: RuntimeCollaborationServerClock {
+            revision,
+            sequence,
+            vector,
+        },
+        applied_at: created_at_now(),
+    }
+}
+
+fn collaboration_diagnostic_from_operation_diagnostic(
+    diagnostic: &crate::RuntimeOperationDiagnostic,
+    operation_id: &str,
+    participant_id: &str,
+    idempotency_key: &str,
+) -> RuntimeCollaborationOperationDiagnostic {
+    RuntimeCollaborationOperationDiagnostic {
+        severity: diagnostic.severity.clone(),
+        code: diagnostic.code.clone(),
+        message: diagnostic.message.clone(),
+        path: diagnostic.path.clone(),
+        participant_id: Some(participant_id.to_owned()),
+        operation_id: Some(operation_id.to_owned()),
+        idempotency_key: Some(idempotency_key.to_owned()),
+        expected_revision: diagnostic.expected_revision.clone(),
+        actual_revision: diagnostic.actual_revision.clone(),
+        expected_sequence: None,
+        actual_sequence: None,
+    }
+}
+
+fn collaboration_diagnostic_from_runtime_diagnostic(
+    diagnostic: &RuntimeDiagnostic,
+    operation_id: &str,
+    participant_id: &str,
+    idempotency_key: &str,
+) -> RuntimeCollaborationOperationDiagnostic {
+    RuntimeCollaborationOperationDiagnostic {
+        severity: match &diagnostic.severity {
+            DiagnosticSeverity::Error => "error",
+            DiagnosticSeverity::Warning => "warning",
+            DiagnosticSeverity::Info => "info",
+        }
+        .to_owned(),
+        code: diagnostic
+            .code
+            .clone()
+            .unwrap_or_else(|| "runtime.patch".to_owned()),
+        message: diagnostic.message.clone(),
+        path: None,
+        participant_id: Some(participant_id.to_owned()),
+        operation_id: Some(operation_id.to_owned()),
+        idempotency_key: Some(idempotency_key.to_owned()),
+        expected_revision: None,
+        actual_revision: None,
+        expected_sequence: None,
+        actual_sequence: None,
+    }
+}
+
+fn collaboration_diagnostic(
+    severity: &str,
+    code: &str,
+    message: &str,
+    operation_id: &str,
+    participant_id: &str,
+    idempotency_key: &str,
+) -> RuntimeCollaborationOperationDiagnostic {
+    RuntimeCollaborationOperationDiagnostic {
+        severity: severity.to_owned(),
+        code: code.to_owned(),
+        message: message.to_owned(),
+        path: None,
+        participant_id: Some(participant_id.to_owned()),
+        operation_id: Some(operation_id.to_owned()),
+        idempotency_key: Some(idempotency_key.to_owned()),
+        expected_revision: None,
+        actual_revision: None,
+        expected_sequence: None,
+        actual_sequence: None,
+    }
+}
+
+fn current_session_graph_revision(record: &RuntimeSessionRecord) -> String {
+    record
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned")
+        .snapshot()
+        .graph_revision()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "0".to_owned())
+}
+
 async fn session_history(State(state): State<RuntimeServerState>) -> Json<crate::RuntimeHistory> {
     session_history_for(state.sessions.default_record())
 }
@@ -1029,6 +2197,7 @@ fn undo_session_for(
     state: &RuntimeServerState,
     record: RuntimeSessionRecord,
 ) -> Json<crate::RuntimePatchResponse> {
+    let _coordination_guard = record.collaboration.operation_guard();
     let mut session = record
         .session
         .write()
@@ -1062,6 +2231,7 @@ fn redo_session_for(
     state: &RuntimeServerState,
     record: RuntimeSessionRecord,
 ) -> Json<crate::RuntimePatchResponse> {
+    let _coordination_guard = record.collaboration.operation_guard();
     let mut session = record
         .session
         .write()
@@ -1199,6 +2369,7 @@ fn clear_session_for(
     state: &RuntimeServerState,
     record: RuntimeSessionRecord,
 ) -> Json<crate::RuntimeSessionResponse> {
+    let _coordination_guard = record.collaboration.operation_guard();
     let snapshot = {
         let session = record
             .session
@@ -1968,7 +3139,13 @@ mod tests {
         },
     };
     use serde_json::{Value, json};
-    use skenion_contracts::validate_runtime_session_event;
+    use skenion_contracts::{
+        RuntimeCollaborationEventEnvelope, RuntimeCollaborationEventKind,
+        RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationResult,
+        validate_runtime_collaboration_event_envelope,
+        validate_runtime_collaboration_operation_batch_result,
+        validate_runtime_collaboration_operation_result, validate_runtime_session_event,
+    };
     use tower::ServiceExt;
 
     use crate::{
@@ -3545,6 +4722,931 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_operations_endpoint_accepts_runtime_paste_operation_alias() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let response =
+            post_json_with(app.clone(), "/v0/session/operations", paste_operation("1")).await;
+
+        assert_eq!(
+            response["schema"],
+            "skenion.runtime.paste-graph-fragment.response"
+        );
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["applied"], true);
+        assert_eq!(response["revisionBefore"], "1");
+        assert_eq!(response["revisionAfter"], "2");
+    }
+
+    #[tokio::test]
+    async fn collaboration_operations_apply_paste_and_publish_result_events() {
+        let state = runtime_state_with_dry_preview();
+        let app = runtime_router_with_state(state.clone());
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let response = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation("1", "op-collab-paste", "idem-collab-paste"),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(response).expect("collaboration result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("collaboration result should validate");
+
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
+        assert_eq!(
+            result.ack.as_ref().map(|ack| ack.revision.as_str()),
+            Some("2")
+        );
+        assert_eq!(result.operation_id, "op-collab-paste");
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
+
+        let replay = state
+            .sessions
+            .default_record()
+            .collaboration
+            .capture_replay(Some(0))
+            .events;
+        assert_eq!(replay.len(), 1);
+        let event: RuntimeCollaborationEventEnvelope = replay[0].clone();
+        validate_runtime_collaboration_event_envelope(&event)
+            .expect("collaboration event should validate");
+        assert_eq!(event.kind, RuntimeCollaborationEventKind::OperationResult);
+    }
+
+    #[tokio::test]
+    async fn collaboration_operations_report_duplicate_idempotency_without_reapplying() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation("1", "op-collab-paste", "idem-collab-paste"),
+        )
+        .await;
+
+        let duplicate = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation("2", "op-collab-paste-retry", "idem-collab-paste"),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(duplicate).expect("duplicate result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("duplicate result should validate");
+
+        assert_eq!(
+            result.status,
+            RuntimeCollaborationOperationStatus::Duplicate
+        );
+        assert_eq!(
+            result.nack.as_ref().map(|nack| nack.reason.clone()),
+            Some(RuntimeCollaborationNackReason::DuplicateIdempotencyKey)
+        );
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
+    }
+
+    #[tokio::test]
+    async fn collaboration_operations_serialize_concurrent_idempotency() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let first = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation("1", "op-concurrent-a", "idem-concurrent"),
+        );
+        let second = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation("1", "op-concurrent-b", "idem-concurrent"),
+        );
+        let (first, second) = tokio::join!(first, second);
+        let statuses = [first, second]
+            .into_iter()
+            .map(|value| {
+                let result: RuntimeCollaborationOperationResult =
+                    serde_json::from_value(value).expect("collaboration result should parse");
+                validate_runtime_collaboration_operation_result(&result)
+                    .expect("collaboration result should validate");
+                result.status
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == RuntimeCollaborationOperationStatus::Accepted)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == RuntimeCollaborationOperationStatus::Duplicate)
+                .count(),
+            1
+        );
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
+    }
+
+    #[tokio::test]
+    async fn collaboration_operations_transform_stale_paste_to_current_revision() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation("1", "op-fresh", "idem-fresh"),
+        )
+        .await;
+
+        let stale = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation("1", "op-stale", "idem-stale"),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(stale).expect("stale result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("stale result should validate");
+
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rebased);
+        assert_eq!(
+            result.rebase.as_ref().map(|rebase| rebase.strategy),
+            Some(RuntimeCollaborationRebaseStrategy::CrdtMerge)
+        );
+        let transformed_payload = result
+            .rebase
+            .as_ref()
+            .and_then(|rebase| rebase.transformed_payload.as_ref())
+            .expect("stale paste should expose transformed payload");
+        let transformed_payload_json = serde_json::to_value(transformed_payload)
+            .expect("transformed payload should serialize");
+        assert_eq!(transformed_payload_json["kind"], "pasteGraphFragment");
+        assert_eq!(
+            transformed_payload_json["request"]["target"]["baseRevision"],
+            "2"
+        );
+        assert_eq!(
+            result.ack.as_ref().map(|ack| ack.revision.as_str()),
+            Some("3")
+        );
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "3");
+    }
+
+    #[tokio::test]
+    async fn collaboration_operation_batches_report_mixed_accept_and_rebase_results() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let response = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            json!({
+              "schema": "skenion.runtime.collaboration.operation-batch",
+              "schemaVersion": "0.1.0",
+              "sessionId": "default",
+              "operations": [
+                collaboration_paste_operation("1", "op-batch-accepted", "idem-batch-accepted"),
+                collaboration_paste_operation("1", "op-batch-rebased", "idem-batch-rebased")
+              ],
+              "submittedAt": "2026-06-22T00:00:00.000Z"
+            }),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationBatchResult =
+            serde_json::from_value(response).expect("batch result should parse");
+        validate_runtime_collaboration_operation_batch_result(&result)
+            .expect("batch result should validate");
+
+        assert_eq!(result.results.len(), 2);
+        assert_eq!(
+            result.results[0].status,
+            RuntimeCollaborationOperationStatus::Accepted
+        );
+        assert_eq!(
+            result.results[1].status,
+            RuntimeCollaborationOperationStatus::Rebased
+        );
+        assert_eq!(
+            result.results[1]
+                .ack
+                .as_ref()
+                .map(|ack| ack.revision.as_str()),
+            Some("3")
+        );
+    }
+
+    #[tokio::test]
+    async fn collaboration_change_sets_apply_node_view_and_edge_operations() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let accepted = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_change_set_operation(
+                "1",
+                "op-change-add",
+                "idem-change-add",
+                "participant-a",
+                vec![
+                    json!({
+                      "op": "node.add",
+                      "changeId": "change-add-gain",
+                      "node": {
+                        "id": "gain",
+                        "kind": "core.float",
+                        "kindVersion": "0.1.0",
+                        "params": {},
+                        "ports": value_f32_ports_v02_json()
+                      },
+                      "view": { "x": 360.0, "y": 140.0 }
+                    }),
+                    json!({
+                      "op": "node.move",
+                      "changeId": "change-move-value",
+                      "nodeId": "value_1",
+                      "from": { "x": 96.0, "y": 96.0 },
+                      "to": { "x": 160.0, "y": 140.0 }
+                    }),
+                    json!({
+                      "op": "edge.connect",
+                      "changeId": "change-connect-value-gain",
+                      "edge": {
+                        "id": "edge-value-gain",
+                        "source": { "nodeId": "value_1", "portId": "value" },
+                        "target": { "nodeId": "gain", "portId": "cold" }
+                      }
+                    }),
+                    json!({
+                      "op": "node.delete",
+                      "changeId": "change-delete-target",
+                      "nodeId": "target_1"
+                    }),
+                ],
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(accepted).expect("change-set result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("change-set result should validate");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
+        assert_eq!(
+            result.ack.as_ref().map(|ack| ack.revision.as_str()),
+            Some("2")
+        );
+
+        let snapshot = get_json_with(app.clone(), "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
+        assert!(
+            snapshot["snapshot"]["project"]["graph"]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["id"] == "gain")
+        );
+        assert!(
+            snapshot["snapshot"]["project"]["graph"]["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["to"]["node"] == "gain" && edge["to"]["port"] == "cold")
+        );
+        assert_eq!(
+            snapshot["snapshot"]["project"]["viewState"]["canvas"]["nodes"]["value_1"]["x"],
+            160.0
+        );
+
+        let stale_move = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_change_set_operation(
+                "1",
+                "op-change-stale-move",
+                "idem-change-stale-move",
+                "participant-a",
+                vec![json!({
+                  "op": "node.move",
+                  "changeId": "change-stale-move-value",
+                  "nodeId": "value_1",
+                  "from": { "x": 160.0, "y": 140.0 },
+                  "to": { "x": 220.0, "y": 180.0 }
+                })],
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(stale_move).expect("stale move result should parse");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rebased);
+        assert_eq!(
+            result
+                .rebase
+                .as_ref()
+                .and_then(|rebase| rebase.transformed_payload.as_ref())
+                .and_then(collaboration_payload_base_revision),
+            Some("2")
+        );
+
+        let disconnected = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_change_set_operation(
+                "2",
+                "op-change-disconnect",
+                "idem-change-disconnect",
+                "participant-a",
+                vec![json!({
+                  "op": "edge.disconnect",
+                  "changeId": "change-disconnect-value-gain",
+                  "edgeId": "edge-value-gain"
+                })],
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(disconnected).expect("disconnect result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("disconnect result should validate");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "3");
+        assert!(
+            snapshot["snapshot"]["project"]["graph"]["edges"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn collaboration_undo_redo_uses_participant_scoped_history() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation_for("1", "op-a-paste", "idem-a-paste", "participant-a"),
+        )
+        .await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation_for("2", "op-b-paste", "idem-b-paste", "participant-b"),
+        )
+        .await;
+
+        let undone = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_undo_redo_operation(
+                "3",
+                "op-a-undo",
+                "idem-a-undo",
+                "participant-a",
+                "undo",
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(undone).expect("undo result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("undo result should validate");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
+        assert_eq!(
+            result.ack.as_ref().map(|ack| ack.revision.as_str()),
+            Some("4")
+        );
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        let nodes = snapshot["snapshot"]["project"]["graph"]["nodes"]
+            .as_array()
+            .unwrap();
+        assert!(!nodes.iter().any(|node| node["id"] == "pasted_target"));
+        assert!(nodes.iter().any(|node| node["id"] == "pasted_target_2"));
+
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation_for(
+                "1",
+                "op-redo-paste",
+                "idem-redo-paste",
+                "participant-a",
+            ),
+        )
+        .await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_undo_redo_operation(
+                "2",
+                "op-redo-undo",
+                "idem-redo-undo",
+                "participant-a",
+                "undo",
+            ),
+        )
+        .await;
+        let redone = post_json_with(
+            app,
+            "/v0/session/operations",
+            collaboration_undo_redo_operation(
+                "3",
+                "op-redo-redo",
+                "idem-redo-redo",
+                "participant-a",
+                "redo",
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(redone).expect("redo result should parse");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
+        assert_eq!(
+            result.ack.as_ref().map(|ack| ack.revision.as_str()),
+            Some("4")
+        );
+    }
+
+    #[tokio::test]
+    async fn collaboration_presence_selection_and_stream_routes_publish_events() {
+        let state = runtime_state_with_dry_preview();
+        let app = runtime_router_with_state(state.clone());
+
+        let presence = post_json_with(
+            app.clone(),
+            "/v0/sessions/beta/collaboration/presence",
+            collaboration_presence("wrong-session", "participant-a"),
+        )
+        .await;
+        assert_eq!(presence["sessionId"], "beta");
+        assert_eq!(presence["participantId"], "participant-a");
+
+        let live_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/session/collaboration/events/stream?after=0")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(live_response.status(), StatusCode::OK);
+        let live_presence = post_json_with(
+            app.clone(),
+            "/v0/session/collaboration/presence",
+            collaboration_presence("wrong-session", "participant-live"),
+        )
+        .await;
+        assert_eq!(live_presence["sessionId"], "default");
+        let mut live_stream = live_response.into_body().into_data_stream();
+        let live_chunk = tokio::time::timeout(Duration::from_secs(1), live_stream.next())
+            .await
+            .expect("default collaboration stream should emit")
+            .expect("default collaboration stream should have a chunk")
+            .expect("default collaboration stream chunk should be ok");
+        let live_text =
+            std::str::from_utf8(&live_chunk).expect("collaboration stream should be utf8");
+        assert!(live_text.contains("\"participantId\":\"participant-live\""));
+
+        let selection = post_json_with(
+            app.clone(),
+            "/v0/sessions/beta/collaboration/selection",
+            collaboration_selection("wrong-session", "participant-a"),
+        )
+        .await;
+        assert_eq!(selection["sessionId"], "beta");
+
+        let default_selection = post_json_with(
+            app.clone(),
+            "/v0/session/collaboration/selection",
+            collaboration_selection("wrong-session", "participant-live"),
+        )
+        .await;
+        assert_eq!(default_selection["sessionId"], "default");
+
+        let beta_replay = state
+            .sessions
+            .get_or_create("beta")
+            .collaboration
+            .capture_replay(Some(0));
+        assert_eq!(beta_replay.events.len(), 2);
+        assert_eq!(
+            beta_replay.events[0].kind,
+            RuntimeCollaborationEventKind::Presence
+        );
+        assert_eq!(
+            beta_replay.events[1].kind,
+            RuntimeCollaborationEventKind::Selection
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/beta/collaboration/events/stream?after=0")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("collaboration event stream should emit")
+            .expect("collaboration event stream should have a chunk")
+            .expect("collaboration event stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("collaboration stream should be utf8");
+        assert!(text.contains("event: collaboration"));
+        assert!(text.contains("\"kind\":\"presence\""));
+
+        let header_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/beta/collaboration/events/stream")
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(header_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn collaboration_presence_and_selection_reject_invalid_metadata() {
+        let app = runtime_router();
+        let mut invalid_presence = collaboration_presence("default", "participant-invalid");
+        invalid_presence["expiresAt"] = invalid_presence["updatedAt"].clone();
+        let (presence_status, presence_body) = post_json_status_with(
+            app.clone(),
+            "/v0/session/collaboration/presence",
+            invalid_presence,
+        )
+        .await;
+        assert_eq!(presence_status, StatusCode::BAD_REQUEST);
+        assert_eq!(presence_body["ok"], false);
+        assert_eq!(
+            presence_body["diagnostics"][0]["code"],
+            "collaboration.invalid-presence"
+        );
+
+        let mut invalid_selection = collaboration_selection("default", "participant-invalid");
+        invalid_selection["expiresAt"] = invalid_selection["updatedAt"].clone();
+        let (selection_status, selection_body) = post_json_status_with(
+            app,
+            "/v0/session/collaboration/selection",
+            invalid_selection,
+        )
+        .await;
+        assert_eq!(selection_status, StatusCode::BAD_REQUEST);
+        assert_eq!(selection_body["ok"], false);
+        assert_eq!(
+            selection_body["diagnostics"][0]["code"],
+            "collaboration.invalid-selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn collaboration_operations_report_structured_invalid_inputs() {
+        let app = runtime_router();
+
+        let invalid_runtime_operation = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            json!({
+              "schema": "skenion.runtime.operation",
+              "schemaVersion": "0.1.0",
+              "kind": "pasteGraphFragment"
+            }),
+        )
+        .await;
+        assert_eq!(invalid_runtime_operation["ok"], false);
+        assert_eq!(
+            invalid_runtime_operation["diagnostics"][0]["code"],
+            "paste.operation.invalid-json"
+        );
+
+        let invalid_batch = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            json!({
+              "schema": "skenion.runtime.collaboration.operation-batch",
+              "schemaVersion": "0.1.0",
+              "sessionId": "default"
+            }),
+        )
+        .await;
+        let batch: RuntimeCollaborationOperationBatchResult =
+            serde_json::from_value(invalid_batch).expect("invalid batch result should parse");
+        validate_runtime_collaboration_operation_batch_result(&batch)
+            .expect("invalid batch result should validate");
+        assert_eq!(
+            batch.results[0].status,
+            RuntimeCollaborationOperationStatus::Rejected
+        );
+
+        let duplicate_batch = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            json!({
+              "schema": "skenion.runtime.collaboration.operation-batch",
+              "schemaVersion": "0.1.0",
+              "sessionId": "default",
+              "operations": [
+                collaboration_undo_redo_operation("0", "op-dup-a", "same-idem", "participant-a", "undo"),
+                collaboration_undo_redo_operation("0", "op-dup-b", "same-idem", "participant-a", "undo")
+              ],
+              "submittedAt": "2026-06-22T00:00:00.000Z"
+            }),
+        )
+        .await;
+        let batch: RuntimeCollaborationOperationBatchResult =
+            serde_json::from_value(duplicate_batch).expect("duplicate batch result should parse");
+        assert_eq!(batch.results[0].operation_id, "invalid-batch");
+
+        let invalid_single = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            json!({ "schema": "not-a-runtime-collaboration-operation" }),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(invalid_single).expect("invalid single result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("invalid single result should validate");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
+
+        let session_mismatch_batch = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            json!({
+              "schema": "skenion.runtime.collaboration.operation-batch",
+              "schemaVersion": "0.1.0",
+              "sessionId": "other",
+              "operations": [],
+              "submittedAt": "2026-06-22T00:00:00.000Z"
+            }),
+        )
+        .await;
+        let batch: RuntimeCollaborationOperationBatchResult =
+            serde_json::from_value(session_mismatch_batch)
+                .expect("session mismatch batch result should parse");
+        assert_eq!(batch.results[0].operation_id, "invalid-batch");
+
+        let mut invalid_operation =
+            collaboration_paste_operation("1", "op-invalid", "idem-invalid");
+        invalid_operation["schemaVersion"] = json!("bogus");
+        let invalid_operation =
+            post_json_with(app.clone(), "/v0/session/operations", invalid_operation).await;
+        let result: RuntimeCollaborationOperationResult = serde_json::from_value(invalid_operation)
+            .expect("invalid operation result should parse");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
+
+        let mut mismatch = collaboration_paste_operation("1", "op-mismatch", "idem-mismatch");
+        mismatch["sessionId"] = json!("other");
+        let mismatch = post_json_with(app.clone(), "/v0/session/operations", mismatch).await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(mismatch).expect("mismatch result should parse");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
+
+        post_json_with(app.clone(), "/v0/sessions/gamma/load", sample_project()).await;
+        let mut by_id_operation =
+            collaboration_paste_operation_for("1", "op-by-id", "idem-by-id", "participant-a");
+        by_id_operation["sessionId"] = json!("gamma");
+        let by_id = post_json_with(app, "/v0/sessions/gamma/operations", by_id_operation).await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(by_id).expect("by-id result should parse");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn collaboration_change_set_and_undo_failures_are_nacked() {
+        let app = runtime_router();
+
+        let no_project = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_change_set_operation(
+                "0",
+                "op-no-project-change",
+                "idem-no-project-change",
+                "participant-a",
+                vec![json!({
+                  "op": "node.add",
+                  "changeId": "change-add-without-project",
+                  "node": {
+                    "id": "gain",
+                    "kind": "core.float",
+                    "kindVersion": "0.1.0",
+                    "params": {},
+                    "ports": value_f32_ports_v02_json()
+                  }
+                })],
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(no_project).expect("no-project result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("no-project result should validate");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
+        assert_eq!(
+            result.nack.as_ref().map(|nack| nack.reason.clone()),
+            Some(RuntimeCollaborationNackReason::InvalidOperation)
+        );
+
+        let no_project_paste = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_paste_operation("0", "op-no-project-paste", "idem-no-project-paste"),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(no_project_paste).expect("no-project paste result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("no-project paste result should validate");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
+        assert!(result.ack.is_none());
+        assert!(
+            result
+                .nack
+                .as_ref()
+                .and_then(|nack| nack.diagnostics.as_ref())
+                .unwrap()[0]
+                .code
+                .contains("paste.target.no-project")
+        );
+
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        let unknown_edge = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_change_set_operation(
+                "1",
+                "op-unknown-edge",
+                "idem-unknown-edge",
+                "participant-a",
+                vec![json!({
+                  "op": "edge.disconnect",
+                  "changeId": "change-disconnect-missing",
+                  "edgeId": "missing-edge-id"
+                })],
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(unknown_edge).expect("unknown-edge result should parse");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
+        assert!(
+            result
+                .nack
+                .as_ref()
+                .and_then(|nack| nack.diagnostics.as_ref())
+                .unwrap()[0]
+                .message
+                .contains("cannot resolve edge id")
+        );
+
+        let empty_undo = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_undo_redo_operation(
+                "1",
+                "op-empty-undo",
+                "idem-empty-undo",
+                "participant-a",
+                "undo",
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(empty_undo).expect("empty undo result should parse");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
+
+        let empty_redo = post_json_with(
+            app,
+            "/v0/session/operations",
+            collaboration_undo_redo_operation(
+                "1",
+                "op-empty-redo",
+                "idem-empty-redo",
+                "participant-a",
+                "redo",
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(empty_redo).expect("empty redo result should parse");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
+    }
+
+    #[test]
+    fn collaboration_private_helpers_cover_direct_branch_shapes() {
+        let state = RuntimeServerState::default();
+        let record = state.sessions.default_record();
+        let operation: RuntimeCollaborationOperationEnvelope =
+            serde_json::from_value(collaboration_undo_redo_operation(
+                "1",
+                "op-helper",
+                "idem-helper",
+                "participant-a",
+                "undo",
+            ))
+            .expect("operation should parse");
+
+        let err = lower_collaboration_change_set(&record, &operation, &operation.payload)
+            .expect_err("undoRedo payload should not lower as changeSet");
+        assert!(err.contains("not a changeSet"));
+
+        let project: ProjectRequest =
+            serde_json::from_value(sample_project()).expect("sample project should parse");
+        let patch: GraphPatch =
+            serde_json::from_value(set_value_patch("1")).expect("patch should parse");
+        let response = {
+            let mut session = record
+                .session
+                .write()
+                .expect("runtime session lock should not be poisoned");
+            assert!(session.load_project(project).ok);
+            session.apply_patch(patch)
+        };
+        let rebase = collaboration_rebase(
+            &record,
+            &operation,
+            "2".to_owned(),
+            RuntimeCollaborationRebaseStrategy::CrdtMerge,
+            None,
+            Vec::new(),
+        );
+        let result = collaboration_result_from_patch_response(
+            &record,
+            operation.clone(),
+            response,
+            record.collaboration.reserve_sequence(),
+            Some(rebase),
+            Some(operation.payload.clone()),
+        );
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rebased);
+        assert!(result.rebase.unwrap().transformed_payload.is_some());
+
+        let warning = collaboration_diagnostic_from_runtime_diagnostic(
+            &RuntimeDiagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: "warning".to_owned(),
+                code: None,
+                details: None,
+            },
+            "op-helper",
+            "participant-a",
+            "idem-helper",
+        );
+        assert_eq!(warning.severity, "warning");
+        assert_eq!(warning.code, "runtime.patch");
+
+        let info = collaboration_diagnostic_from_runtime_diagnostic(
+            &RuntimeDiagnostic {
+                severity: DiagnosticSeverity::Info,
+                message: "info".to_owned(),
+                code: Some("custom.info".to_owned()),
+                details: None,
+            },
+            "op-helper",
+            "participant-a",
+            "idem-helper",
+        );
+        assert_eq!(info.severity, "info");
+        assert_eq!(info.code, "custom.info");
+    }
+
+    #[tokio::test]
     async fn session_mutate_endpoint_reports_errors_without_loaded_session() {
         let response = post_json("/v0/session/mutate", graph_mutation(set_value_patch("1"))).await;
 
@@ -4204,6 +6306,22 @@ mod tests {
         body_json(response.into_body()).await
     }
 
+    async fn post_json_status_with(app: Router, path: &str, payload: Value) -> (StatusCode, Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let status = response.status();
+        (status, body_json(response.into_body()).await)
+    }
+
     async fn post_raw_with(app: Router, path: &str, payload: Vec<u8>) -> Value {
         let response = app
             .oneshot(
@@ -4822,6 +6940,188 @@ mod tests {
             "clientId": "studio-test",
             "label": "Paste test fragment"
           }
+        })
+    }
+
+    fn collaboration_paste_operation(
+        base_revision: &str,
+        operation_id: &str,
+        idempotency_key: &str,
+    ) -> Value {
+        collaboration_paste_operation_for(
+            base_revision,
+            operation_id,
+            idempotency_key,
+            "participant-a",
+        )
+    }
+
+    fn collaboration_paste_operation_for(
+        base_revision: &str,
+        operation_id: &str,
+        idempotency_key: &str,
+        participant_id: &str,
+    ) -> Value {
+        json!({
+          "schema": "skenion.runtime.collaboration.operation",
+          "schemaVersion": "0.1.0",
+          "operationId": operation_id,
+          "sessionId": "default",
+          "participantId": participant_id,
+          "idempotencyKey": idempotency_key,
+          "causal": {
+            "baseRevision": base_revision,
+            "baseSequence": 0,
+            "vector": { participant_id: 0 }
+          },
+          "payload": {
+            "kind": "pasteGraphFragment",
+            "request": {
+              "target": {
+                "path": { "kind": "root" },
+                "baseRevision": base_revision
+              },
+              "fragment": {
+                "schema": "skenion.graph.fragment",
+                "schemaVersion": "0.2.0",
+                "nodes": [
+                  {
+                    "id": "value_1",
+                    "kind": "core.float",
+                    "kindVersion": "0.1.0",
+                    "params": {},
+                    "ports": value_f32_ports_v02_json()
+                  },
+                  {
+                    "id": "pasted_target",
+                    "kind": "core.float",
+                    "kindVersion": "0.1.0",
+                    "params": {},
+                    "ports": value_f32_ports_v02_json()
+                  }
+                ],
+                "edges": [
+                  {
+                    "id": "edge_value_to_pasted",
+                    "source": { "nodeId": "value_1", "portId": "value" },
+                    "target": { "nodeId": "pasted_target", "portId": "cold" }
+                  }
+                ]
+              },
+              "options": {
+                "idConflictPolicy": "remap"
+              }
+            },
+            "description": "Collaborative paste test fragment"
+          },
+          "correlationId": "studio-test",
+          "submittedAt": "2026-06-22T00:00:00.000Z"
+        })
+    }
+
+    fn collaboration_change_set_operation(
+        base_revision: &str,
+        operation_id: &str,
+        idempotency_key: &str,
+        participant_id: &str,
+        changes: Vec<Value>,
+    ) -> Value {
+        json!({
+          "schema": "skenion.runtime.collaboration.operation",
+          "schemaVersion": "0.1.0",
+          "operationId": operation_id,
+          "sessionId": "default",
+          "participantId": participant_id,
+          "idempotencyKey": idempotency_key,
+          "causal": {
+            "baseRevision": base_revision,
+            "baseSequence": 0,
+            "vector": { participant_id: 0 }
+          },
+          "payload": {
+            "kind": "changeSet",
+            "target": {
+              "path": { "kind": "root" },
+              "baseRevision": base_revision
+            },
+            "changes": changes,
+            "description": "Collaborative change-set test"
+          },
+          "correlationId": "studio-test",
+          "submittedAt": "2026-06-22T00:00:00.000Z"
+        })
+    }
+
+    fn collaboration_undo_redo_operation(
+        base_revision: &str,
+        operation_id: &str,
+        idempotency_key: &str,
+        participant_id: &str,
+        action: &str,
+    ) -> Value {
+        json!({
+          "schema": "skenion.runtime.collaboration.operation",
+          "schemaVersion": "0.1.0",
+          "operationId": operation_id,
+          "sessionId": "default",
+          "participantId": participant_id,
+          "idempotencyKey": idempotency_key,
+          "causal": {
+            "baseRevision": base_revision,
+            "baseSequence": 0,
+            "vector": { participant_id: 0 }
+          },
+          "payload": {
+            "kind": "undoRedo",
+            "action": action,
+            "scope": {
+              "kind": "participant",
+              "participantId": participant_id
+            }
+          },
+          "correlationId": "studio-test",
+          "submittedAt": "2026-06-22T00:00:00.000Z"
+        })
+    }
+
+    fn collaboration_presence(session_id: &str, participant_id: &str) -> Value {
+        json!({
+          "schema": "skenion.runtime.collaboration.presence",
+          "schemaVersion": "0.1.0",
+          "sessionId": session_id,
+          "participantId": participant_id,
+          "presence": {
+            "state": "active",
+            "displayName": "Participant A"
+          },
+          "updatedAt": "2026-06-22T00:00:00.000Z",
+          "expiresAt": "2026-06-22T00:05:00.000Z"
+        })
+    }
+
+    fn collaboration_selection(session_id: &str, participant_id: &str) -> Value {
+        json!({
+          "schema": "skenion.runtime.collaboration.selection",
+          "schemaVersion": "0.1.0",
+          "sessionId": session_id,
+          "participantId": participant_id,
+          "target": {
+            "path": { "kind": "root" },
+            "baseRevision": "1"
+          },
+          "selection": {
+            "ranges": [
+              { "kind": "nodes", "nodeIds": ["value_1"] }
+            ],
+            "activeRangeIndex": 0
+          },
+          "cursor": {
+            "kind": "canvas",
+            "x": 12.0,
+            "y": 34.0
+          },
+          "updatedAt": "2026-06-22T00:00:01.000Z",
+          "expiresAt": "2026-06-22T00:05:01.000Z"
         })
     }
 

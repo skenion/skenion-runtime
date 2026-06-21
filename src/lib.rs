@@ -1,5 +1,6 @@
 mod audio_backend;
 mod clock;
+mod collaboration;
 mod contract;
 mod control_state;
 mod control_value;
@@ -42,6 +43,10 @@ pub use clock::{
     TimestampedMidiMessage, format_midi_clock_fixture_report_text, run_midi_clock_fixture,
     run_midi_clock_fixture_file,
 };
+pub use collaboration::{
+    COLLABORATION_EVENT_REPLAY_LIMIT, RuntimeCollaborationLog, RuntimeCollaborationReplay,
+    collaboration_broadcast_event_after_high_water, collaboration_event,
+};
 pub use contract::{
     ApplyPatchError, AudioClockBridgeMethod, AudioClockBridgePlan, AudioClockDomain,
     AudioClockDomainAuthority, AudioDeviceDescriptor, AudioDevicePreference, AudioEndpoint,
@@ -60,12 +65,29 @@ pub use contract::{
     NodeState, NumberRange, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement,
     PatchContractPortV02, PatchContractV02, PatchDefinitionV02, PatchPath, Port, PortActivation,
     PortDirection, PortDirectionV02, PortRateV02, PortRef, PortSpecV02, ProjectDocumentV02,
-    ProjectMetadataV02, ReplaceNodeInterfaceEdgePolicy, RuntimeOperationAttribution,
+    ProjectMetadataV02, ReplaceNodeInterfaceEdgePolicy, RuntimeCollaborationAck,
+    RuntimeCollaborationAuthSubject, RuntimeCollaborationCausalMetadata,
+    RuntimeCollaborationChange, RuntimeCollaborationConflict, RuntimeCollaborationEventEnvelope,
+    RuntimeCollaborationEventKind, RuntimeCollaborationEventPayload, RuntimeCollaborationNack,
+    RuntimeCollaborationNackReason, RuntimeCollaborationOperationBatch,
+    RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationDiagnostic,
+    RuntimeCollaborationOperationEnvelope, RuntimeCollaborationOperationPayload,
+    RuntimeCollaborationOperationResult, RuntimeCollaborationOperationStatus,
+    RuntimeCollaborationPresenceEnvelope, RuntimeCollaborationRebase,
+    RuntimeCollaborationRebaseStrategy, RuntimeCollaborationSelectionEnvelope,
+    RuntimeCollaborationServerClock, RuntimeCollaborationUndoRedoAction,
+    RuntimeCollaborationUndoScope, RuntimeCollaborationUndoScopeKind, RuntimeOperationAttribution,
     RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ShaderInterface,
     ShaderInterfaceDiagnostic, ShaderUniform, StringOrStrings, ViewState,
     analyze_shader_interface_v01, apply_midi_clock_message, create_default_view_state_for_graph,
     midi_clock_snapshot_to_clock_state, parse_midi_clock_message, plan_audio_clock_bridge,
-    shader_interface_to_ports_v01,
+    shader_interface_to_ports_v01, validate_runtime_collaboration_event_envelope,
+    validate_runtime_collaboration_operation_batch,
+    validate_runtime_collaboration_operation_batch_result,
+    validate_runtime_collaboration_operation_envelope,
+    validate_runtime_collaboration_operation_result,
+    validate_runtime_collaboration_presence_envelope,
+    validate_runtime_collaboration_selection_envelope,
 };
 pub use control_state::{
     ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,

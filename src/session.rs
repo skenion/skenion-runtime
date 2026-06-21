@@ -94,12 +94,18 @@ pub struct SessionRunRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeMutationRequest {
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_patch: Option<GraphPatch>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub view_patch: Option<RuntimeViewPatch>,
+    #[serde(skip)]
+    pub actor_id: Option<String>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
@@ -151,6 +157,8 @@ pub struct RuntimeHistoryEntry {
     pub inverse_mutation: RuntimeMutationRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject_event_id: Option<String>,
+    #[serde(skip)]
+    pub actor_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,9 +215,18 @@ impl Default for RuntimeSession {
 enum HistoryEntry {
     Mutation {
         event_id: String,
+        actor_id: Option<String>,
         mutation: RuntimeMutationRequest,
         inverse_mutation: RuntimeMutationRequest,
     },
+}
+
+impl HistoryEntry {
+    fn actor_id(&self) -> Option<&str> {
+        match self {
+            Self::Mutation { actor_id, .. } => actor_id.as_deref(),
+        }
+    }
 }
 
 struct HistoryApplyOutcome {
@@ -384,6 +401,7 @@ impl RuntimeSession {
         self.apply_mutation(RuntimeMutationRequest {
             graph_patch: Some(patch),
             view_patch: None,
+            actor_id: None,
             client_id: None,
             description: None,
         })
@@ -443,6 +461,34 @@ impl RuntimeSession {
         }
     }
 
+    pub fn undo_for_actor(&mut self, actor_id: &str) -> RuntimePatchResponse {
+        let Some(index) = self
+            .undo_stack
+            .iter()
+            .rposition(|entry| entry.actor_id() == Some(actor_id))
+        else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::error(format!(
+                    "no patch event available to undo for actor {actor_id}"
+                ))],
+            );
+        };
+        let entry = self.undo_stack.remove(index);
+        let outcome = self.apply_history_entry(entry.clone(), HistoryDirection::Undo);
+        if outcome.applied {
+            let response = outcome.response;
+            self.redo_stack.push(entry);
+            self.patch_response(true, true, false, response.diagnostics)
+        } else {
+            let response = outcome.response;
+            self.undo_stack.insert(index, entry);
+            self.patch_response(false, false, response.conflict, response.diagnostics)
+        }
+    }
+
     pub fn redo(&mut self) -> RuntimePatchResponse {
         let Some(entry) = self.redo_stack.pop() else {
             return self.patch_response(
@@ -460,6 +506,34 @@ impl RuntimeSession {
         } else {
             let response = outcome.response;
             self.redo_stack.push(entry);
+            self.patch_response(false, false, response.conflict, response.diagnostics)
+        }
+    }
+
+    pub fn redo_for_actor(&mut self, actor_id: &str) -> RuntimePatchResponse {
+        let Some(index) = self
+            .redo_stack
+            .iter()
+            .rposition(|entry| entry.actor_id() == Some(actor_id))
+        else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::error(format!(
+                    "no patch event available to redo for actor {actor_id}"
+                ))],
+            );
+        };
+        let entry = self.redo_stack.remove(index);
+        let outcome = self.apply_history_entry(entry.clone(), HistoryDirection::Redo);
+        if outcome.applied {
+            let response = outcome.response;
+            self.undo_stack.push(entry);
+            self.patch_response(true, true, false, response.diagnostics)
+        } else {
+            let response = outcome.response;
+            self.redo_stack.insert(index, entry);
             self.patch_response(false, false, response.conflict, response.diagnostics)
         }
     }
@@ -757,6 +831,7 @@ impl RuntimeSession {
         let mut inverse_mutation = RuntimeMutationRequest {
             graph_patch: inverse_graph_patch,
             view_patch: inverse_view_patch,
+            actor_id: mutation.actor_id.clone(),
             client_id: mutation.client_id.clone(),
             description: mutation
                 .description
@@ -786,6 +861,7 @@ impl RuntimeSession {
         );
         let history_stack_entry = HistoryEntry::Mutation {
             event_id: history_entry.id.clone(),
+            actor_id: history_entry.actor_id.clone(),
             mutation,
             inverse_mutation,
         };
@@ -870,6 +946,10 @@ impl RuntimeSession {
         let mutation = RuntimeMutationRequest {
             graph_patch: Some(lowered.graph_patch),
             view_patch: lowered.view_patch,
+            actor_id: envelope
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.actor_id.clone()),
             client_id: envelope
                 .attribution
                 .as_ref()
@@ -1049,6 +1129,7 @@ impl RuntimeSession {
                 id,
                 sequence,
                 kind,
+                actor_id: mutation.actor_id.clone(),
                 client_id: mutation.client_id.clone().or(client_id),
                 description: mutation.description.clone().or(description),
                 mutation,
@@ -1064,6 +1145,7 @@ impl RuntimeSession {
             id: format!("runtime_event_{sequence:06}"),
             sequence,
             kind,
+            actor_id: mutation.actor_id.clone(),
             client_id: mutation.client_id.clone(),
             description: mutation.description.clone(),
             mutation,
@@ -1367,7 +1449,7 @@ fn next_available_node_id(base: &str, used_node_ids: &HashSet<String>) -> String
     }
 }
 
-fn graph_node_v02_to_v01(node: &GraphNodeV02, pasted_id: &str) -> GraphNode {
+pub(crate) fn graph_node_v02_to_v01(node: &GraphNodeV02, pasted_id: &str) -> GraphNode {
     GraphNode {
         id: pasted_id.to_owned(),
         kind: node.kind.clone(),
@@ -1451,6 +1533,10 @@ fn remap_edge(edge: &EdgeSpecV02, node_id_map: &BTreeMap<String, String>) -> Edg
             port: edge.target.port_id.clone(),
         },
     }
+}
+
+pub(crate) fn edge_v02_to_v01(edge: &EdgeSpecV02) -> Edge {
+    remap_edge(edge, &BTreeMap::new())
 }
 
 fn lower_fragment_view_patch(
@@ -2594,6 +2680,7 @@ mod tests {
                     to: moved.canvas.nodes["value_1"].clone(),
                 }],
             }),
+            actor_id: None,
             client_id: Some("studio-a".to_owned()),
             description: Some("drag value_1".to_owned()),
         });
@@ -2643,6 +2730,7 @@ mod tests {
         let empty = session.apply_mutation(RuntimeMutationRequest {
             graph_patch: None,
             view_patch: None,
+            actor_id: None,
             client_id: None,
             description: None,
         });
@@ -2652,6 +2740,7 @@ mod tests {
                 base_view_revision: 99,
                 ops: Vec::new(),
             }),
+            actor_id: None,
             client_id: None,
             description: None,
         });
@@ -2688,6 +2777,7 @@ mod tests {
                     view: moved_view.clone(),
                 }],
             }),
+            actor_id: None,
             client_id: None,
             description: Some("set node view".to_owned()),
         });
@@ -2704,6 +2794,7 @@ mod tests {
                     view: moved_view.clone(),
                 }],
             }),
+            actor_id: None,
             client_id: None,
             description: None,
         });
@@ -2719,6 +2810,7 @@ mod tests {
                     view: value_view.clone(),
                 }],
             }),
+            actor_id: None,
             client_id: None,
             description: None,
         });
@@ -2847,6 +2939,7 @@ mod tests {
                     view: value_view,
                 }],
             }),
+            actor_id: None,
             client_id: None,
             description: Some("set graph without moving view".to_owned()),
         });
@@ -2989,6 +3082,7 @@ mod tests {
         let mut no_loaded = RuntimeSession::default();
         no_loaded.undo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad".to_owned(),
+            actor_id: None,
             mutation: graph_mutation(set_value_patch("1", 0.75)),
             inverse_mutation: graph_mutation(set_value_patch("1", 0.5)),
         });
@@ -3005,6 +3099,7 @@ mod tests {
         invalid_inverse.load_project(sample_project());
         invalid_inverse.undo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad_inverse".to_owned(),
+            actor_id: None,
             mutation: graph_mutation(set_value_patch("1", 0.75)),
             inverse_mutation: graph_mutation(missing_node_patch()),
         });
@@ -3020,6 +3115,7 @@ mod tests {
         invalid_redo.load_project(sample_project());
         invalid_redo.redo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad_redo".to_owned(),
+            actor_id: None,
             mutation: graph_mutation(missing_definition_node_patch()),
             inverse_mutation: graph_mutation(set_value_patch("1", 0.5)),
         });
@@ -3031,6 +3127,41 @@ mod tests {
                 .message
                 .contains("missing node definition")
         );
+
+        let mut no_actor_history = RuntimeSession::default();
+        no_actor_history.load_project(sample_project());
+        let no_actor_undo = no_actor_history.undo_for_actor("participant-a");
+        let no_actor_redo = no_actor_history.redo_for_actor("participant-a");
+        assert!(!no_actor_undo.ok);
+        assert!(no_actor_undo.diagnostics[0].message.contains("actor"));
+        assert!(!no_actor_redo.ok);
+        assert!(no_actor_redo.diagnostics[0].message.contains("actor"));
+
+        let mut invalid_actor_inverse = RuntimeSession::default();
+        invalid_actor_inverse.load_project(sample_project());
+        invalid_actor_inverse
+            .undo_stack
+            .push(HistoryEntry::Mutation {
+                event_id: "event_bad_actor_inverse".to_owned(),
+                actor_id: Some("participant-a".to_owned()),
+                mutation: graph_mutation(set_value_patch("1", 0.75)),
+                inverse_mutation: graph_mutation(missing_node_patch()),
+            });
+        let invalid_actor_inverse_response = invalid_actor_inverse.undo_for_actor("participant-a");
+        assert!(!invalid_actor_inverse_response.ok);
+        assert_eq!(invalid_actor_inverse_response.history.undo_depth, 1);
+
+        let mut invalid_actor_redo = RuntimeSession::default();
+        invalid_actor_redo.load_project(sample_project());
+        invalid_actor_redo.redo_stack.push(HistoryEntry::Mutation {
+            event_id: "event_bad_actor_redo".to_owned(),
+            actor_id: Some("participant-a".to_owned()),
+            mutation: graph_mutation(missing_definition_node_patch()),
+            inverse_mutation: graph_mutation(set_value_patch("1", 0.5)),
+        });
+        let invalid_actor_redo_response = invalid_actor_redo.redo_for_actor("participant-a");
+        assert!(!invalid_actor_redo_response.ok);
+        assert_eq!(invalid_actor_redo_response.history.redo_depth, 1);
     }
 
     #[test]
@@ -3647,6 +3778,7 @@ mod tests {
         RuntimeMutationRequest {
             graph_patch: Some(patch),
             view_patch: None,
+            actor_id: None,
             client_id: None,
             description: None,
         }
