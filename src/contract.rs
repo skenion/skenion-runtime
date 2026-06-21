@@ -42,5 +42,6 @@ pub use skenion_contracts::{
 pub use skenion_contracts::{
     CycleValidationV02, EdgeSpecV02, ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02,
     FeedbackPolicyV02, GraphDocumentV02, GraphNodeV02, GraphValidationResultV02, MergePolicyV02,
-    NodeDefinitionManifestV02 as NodeDefinitionV02, PortDirectionV02, PortSpecV02,
+    NodeDefinitionManifestV02 as NodeDefinitionV02, PatchContractPortV02, PatchContractV02,
+    PatchDefinitionV02, PortDirectionV02, PortSpecV02, ProjectDocumentV02, ProjectMetadataV02,
 };

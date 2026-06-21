@@ -213,6 +213,8 @@ mod tests {
         store.record_runtime_diagnostics(&[RuntimeDiagnostic {
             severity: DiagnosticSeverity::Info,
             message: "connected".to_owned(),
+            code: None,
+            details: None,
         }]);
         store.record_runtime_diagnostics(&[RuntimeDiagnostic::warning("first warning")]);
         store.record_runtime_diagnostics(&[RuntimeDiagnostic::error("first error")]);

@@ -391,7 +391,12 @@ fn relative_package_path(package_dir: &Path, relative_path: &str) -> Result<Path
 }
 
 fn diagnostic(severity: DiagnosticSeverity, message: String) -> RuntimeDiagnostic {
-    RuntimeDiagnostic { severity, message }
+    RuntimeDiagnostic {
+        severity,
+        message,
+        code: None,
+        details: None,
+    }
 }
 
 #[cfg(test)]

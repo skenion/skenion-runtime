@@ -26,16 +26,16 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, GraphDocument, NodeDefinition,
-    NodeRegistry, PreviewDocument, PreviewManager, ProjectRequestV02, RunProjectRequestV02,
-    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
-    RuntimeControlReadResponse, RuntimeControlStateResponse, RuntimeExtensionListResponse,
-    RuntimeExtensionManager, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
-    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest,
-    RuntimePreviewStartRequest, RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest,
-    ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource, ViewState,
-    build_execution_plan, build_execution_plan_v02,
-    generated_shader_response_from_preview_document, run_dummy_execution, validate_project,
-    validate_project_v02,
+    NodeDefinitionV02, NodeRegistry, PreviewDocument, PreviewManager, ProjectDocumentV02,
+    ProjectRequestV02, RunProjectRequestV02, RuntimeControlEventRequest,
+    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
+    RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeExtensionManager,
+    RuntimeIoDeviceListResponse, RuntimeIoDeviceManager, RuntimeLogSnapshotResponse,
+    RuntimeLogStore, RuntimeMutationRequest, RuntimePreviewStartRequest, RuntimeSession,
+    RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
+    ShaderDiagnosticSource, ViewState, build_execution_plan, build_execution_plan_request_v02,
+    build_execution_plan_run_request_v02, generated_shader_response_from_preview_document,
+    run_dummy_execution, validate_project, validate_project_request_v02,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -118,6 +118,10 @@ pub enum RuntimeSessionEventKind {
 pub struct RuntimeDiagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,17 +518,15 @@ async fn validate_project_endpoint(
                 Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
             }
         }
-        Ok(ProjectPayload::V02(request)) => {
-            match validate_project_v02(&request.graph, &request.nodes) {
-                Ok((diagnostics, _)) => RuntimeApiResponse {
-                    ok: true,
-                    diagnostics,
-                    plan: None,
-                    report: None,
-                },
-                Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
-            }
-        }
+        Ok(ProjectPayload::V02(request)) => match validate_project_request_v02(&request) {
+            Ok((diagnostics, _)) => RuntimeApiResponse {
+                ok: true,
+                diagnostics,
+                plan: None,
+                report: None,
+            },
+            Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
+        },
         Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
     };
     runtime_api_json(&state, response)
@@ -559,22 +561,20 @@ async fn plan_project_endpoint(
                 },
             )
         }
-        Ok(ProjectPayload::V02(request)) => {
-            match build_execution_plan_v02(&request.graph, &request.nodes) {
-                Ok((plan, diagnostics)) => runtime_api_json(
-                    &state,
-                    RuntimeApiResponse {
-                        ok: true,
-                        diagnostics,
-                        plan: Some(plan),
-                        report: None,
-                    },
-                ),
-                Err(diagnostics) => {
-                    runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics))
-                }
+        Ok(ProjectPayload::V02(request)) => match build_execution_plan_request_v02(&request) {
+            Ok((plan, diagnostics)) => runtime_api_json(
+                &state,
+                RuntimeApiResponse {
+                    ok: true,
+                    diagnostics,
+                    plan: Some(plan),
+                    report: None,
+                },
+            ),
+            Err(diagnostics) => {
+                runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics))
             }
-        }
+        },
         Err(diagnostics) => runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics)),
     }
 }
@@ -610,7 +610,7 @@ async fn run_project_endpoint(
             )
         }
         Ok(RunProjectPayload::V02(request)) => {
-            match build_execution_plan_v02(&request.graph, &request.nodes) {
+            match build_execution_plan_run_request_v02(&request) {
                 Ok((plan, diagnostics)) => {
                     let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
                     runtime_api_json(
@@ -1254,6 +1254,8 @@ impl RuntimeDiagnostic {
         Self {
             severity: DiagnosticSeverity::Error,
             message: message.into(),
+            code: None,
+            details: None,
         }
     }
 
@@ -1261,6 +1263,21 @@ impl RuntimeDiagnostic {
         Self {
             severity: DiagnosticSeverity::Warning,
             message: message.into(),
+            code: None,
+            details: None,
+        }
+    }
+
+    pub(crate) fn structured_error(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Error,
+            message: message.into(),
+            code: Some(code.into()),
+            details: Some(details),
         }
     }
 }
@@ -1287,9 +1304,7 @@ fn decode_project_payload(
     value: serde_json::Value,
 ) -> Result<ProjectPayload, Vec<RuntimeDiagnostic>> {
     match project_schema_version(&value).as_deref() {
-        Some("0.2.0") => serde_json::from_value(value)
-            .map(ProjectPayload::V02)
-            .map_err(invalid_project_payload),
+        Some("0.2.0") => decode_project_payload_v02(value).map(ProjectPayload::V02),
         Some("0.1.0") => serde_json::from_value(value)
             .map(ProjectPayload::V01)
             .map_err(invalid_project_payload),
@@ -1306,9 +1321,7 @@ fn decode_run_project_payload(
     value: serde_json::Value,
 ) -> Result<RunProjectPayload, Vec<RuntimeDiagnostic>> {
     match project_schema_version(&value).as_deref() {
-        Some("0.2.0") => serde_json::from_value(value)
-            .map(RunProjectPayload::V02)
-            .map_err(invalid_project_payload),
+        Some("0.2.0") => decode_run_project_payload_v02(value).map(RunProjectPayload::V02),
         Some("0.1.0") => serde_json::from_value(value)
             .map(RunProjectPayload::V01)
             .map_err(invalid_project_payload),
@@ -1321,12 +1334,108 @@ fn decode_run_project_payload(
     }
 }
 
+fn decode_project_payload_v02(
+    value: serde_json::Value,
+) -> Result<ProjectRequestV02, Vec<RuntimeDiagnostic>> {
+    if is_project_document_v02(&value) {
+        return decode_project_document_request_v02(value);
+    }
+
+    serde_json::from_value(value).map_err(invalid_project_payload)
+}
+
+fn decode_run_project_payload_v02(
+    value: serde_json::Value,
+) -> Result<RunProjectRequestV02, Vec<RuntimeDiagnostic>> {
+    if is_project_document_v02(&value) {
+        return decode_run_project_document_request_v02(value);
+    }
+
+    serde_json::from_value(value).map_err(invalid_project_payload)
+}
+
+fn decode_project_document_request_v02(
+    mut value: serde_json::Value,
+) -> Result<ProjectRequestV02, Vec<RuntimeDiagnostic>> {
+    let nodes = take_node_definitions_v02(&mut value)?;
+    let _ = take_frames_v02(&mut value)?;
+    let document = decode_project_document_v02(value)?;
+    Ok(ProjectRequestV02::from_project_document(document, nodes))
+}
+
+fn decode_run_project_document_request_v02(
+    mut value: serde_json::Value,
+) -> Result<RunProjectRequestV02, Vec<RuntimeDiagnostic>> {
+    let nodes = take_node_definitions_v02(&mut value)?;
+    let frames = take_frames_v02(&mut value)?;
+    let document = decode_project_document_v02(value)?;
+    Ok(RunProjectRequestV02::from_project_document(
+        document, nodes, frames,
+    ))
+}
+
+fn decode_project_document_v02(
+    value: serde_json::Value,
+) -> Result<ProjectDocumentV02, Vec<RuntimeDiagnostic>> {
+    let document =
+        serde_json::from_value::<ProjectDocumentV02>(value).map_err(invalid_project_payload)?;
+    if let Err(report) = skenion_contracts::validate_project_document_v02(&document) {
+        return Err(report
+            .errors()
+            .iter()
+            .map(|error| {
+                RuntimeDiagnostic::structured_error(
+                    "project.invalid-v0.2",
+                    error.message.clone(),
+                    serde_json::json!({ "projectId": document.id }),
+                )
+            })
+            .collect());
+    }
+    Ok(document)
+}
+
+fn take_node_definitions_v02(
+    value: &mut serde_json::Value,
+) -> Result<Vec<NodeDefinitionV02>, Vec<RuntimeDiagnostic>> {
+    let nodes = value
+        .as_object_mut()
+        .and_then(|object| object.remove("nodes"))
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    serde_json::from_value(nodes).map_err(invalid_project_payload)
+}
+
+fn take_frames_v02(value: &mut serde_json::Value) -> Result<Option<usize>, Vec<RuntimeDiagnostic>> {
+    let frames = value
+        .as_object_mut()
+        .and_then(|object| object.remove("frames"))
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::from_value(frames).map_err(invalid_project_payload)
+}
+
 fn project_schema_version(value: &serde_json::Value) -> Option<String> {
     value
         .get("graph")
         .and_then(|graph| graph.get("schemaVersion"))
         .and_then(|version| version.as_str())
+        .or_else(|| {
+            (value.get("schema").and_then(|schema| schema.as_str()) == Some("skenion.project"))
+                .then(|| {
+                    value
+                        .get("schemaVersion")
+                        .and_then(|version| version.as_str())
+                })
+                .flatten()
+        })
         .map(str::to_owned)
+}
+
+fn is_project_document_v02(value: &serde_json::Value) -> bool {
+    value.get("schema").and_then(|schema| schema.as_str()) == Some("skenion.project")
+        && value
+            .get("schemaVersion")
+            .and_then(|version| version.as_str())
+            == Some("0.2.0")
 }
 
 fn invalid_project_payload(error: serde_json::Error) -> Vec<RuntimeDiagnostic> {
@@ -2116,6 +2225,41 @@ mod tests {
             run["report"]["frames"][0]["executedNodes"][0]["status"],
             "simulated"
         );
+    }
+
+    #[tokio::test]
+    async fn v02_project_document_payload_expands_patch_library_before_plan_and_run() {
+        let validation = post_json("/v0/validate", sample_subpatch_project_document_v02()).await;
+        assert_eq!(validation["ok"], true);
+        assert_eq!(validation["diagnostics"].as_array().unwrap().len(), 0);
+
+        let plan = post_json("/v0/plan", sample_subpatch_project_document_v02()).await;
+        assert_eq!(plan["ok"], true);
+        assert_eq!(plan["plan"]["graphId"], "subpatch-project-root");
+        assert!(
+            plan["plan"]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["nodeId"] == "fx::pass")
+        );
+        assert!(
+            plan["plan"]["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| {
+                    edge["fromNode"] == "clear_color"
+                        && edge["toNode"] == "fx::pass"
+                        && edge["toPort"] == "in"
+                })
+        );
+
+        let mut run_request = sample_subpatch_project_document_v02();
+        run_request["frames"] = json!(2);
+        let run = post_json("/v0/run", run_request).await;
+        assert_eq!(run["ok"], true);
+        assert_eq!(run["report"]["frameCount"], 2);
     }
 
     #[tokio::test]
@@ -3377,6 +3521,175 @@ mod tests {
               "state": { "persistent": false },
               "permissions": [],
               "capabilities": ["render.output.v0.2"]
+            }
+          ]
+        })
+    }
+
+    fn sample_subpatch_project_document_v02() -> Value {
+        json!({
+          "schema": "skenion.project",
+          "schemaVersion": "0.2.0",
+          "id": "subpatch-project",
+          "revision": "1",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.2.0",
+            "id": "subpatch-project-root",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "clear_color",
+                "kind": "render.clear-color",
+                "kindVersion": "0.2.0",
+                "params": { "color": [0.12, 0.2, 0.34, 1] },
+                "ports": [
+                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                ]
+              },
+              {
+                "id": "fx",
+                "kind": "core.subpatch",
+                "kindVersion": "0.2.0",
+                "params": { "patchRef": "identity" },
+                "ports": [
+                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
+                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                ]
+              },
+              {
+                "id": "output",
+                "kind": "render.output",
+                "kindVersion": "0.2.0",
+                "params": {},
+                "ports": [
+                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "id": "edge_clear_fx",
+                "source": { "nodeId": "clear_color", "portId": "out" },
+                "target": { "nodeId": "fx", "portId": "in" },
+                "resolvedType": "render.frame"
+              },
+              {
+                "id": "edge_fx_output",
+                "source": { "nodeId": "fx", "portId": "out" },
+                "target": { "nodeId": "output", "portId": "in" },
+                "resolvedType": "render.frame"
+              }
+            ]
+          },
+          "viewState": {
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": { "nodes": {} }
+          },
+          "patchLibrary": [
+            {
+              "id": "identity",
+              "revision": "1",
+              "metadata": { "title": "Identity Frame" },
+              "graph": {
+                "schema": "skenion.graph",
+                "schemaVersion": "0.2.0",
+                "id": "identity-frame-patch",
+                "revision": "1",
+                "nodes": [
+                  {
+                    "id": "patch_in",
+                    "kind": "core.inlet",
+                    "kindVersion": "0.2.0",
+                    "params": { "portId": "in", "label": "Input" },
+                    "ports": [
+                      { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "description": "Frame entering the patch" }
+                    ]
+                  },
+                  {
+                    "id": "pass",
+                    "kind": "test.pass",
+                    "kindVersion": "0.2.0",
+                    "params": {},
+                    "ports": [
+                      { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
+                      { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                    ]
+                  },
+                  {
+                    "id": "patch_out",
+                    "kind": "core.outlet",
+                    "kindVersion": "0.2.0",
+                    "params": { "portId": "out", "label": "Output" },
+                    "ports": [
+                      { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true, "description": "Frame leaving the patch" }
+                    ]
+                  }
+                ],
+                "edges": [
+                  {
+                    "id": "edge_in_pass",
+                    "source": { "nodeId": "patch_in", "portId": "out" },
+                    "target": { "nodeId": "pass", "portId": "in" },
+                    "resolvedType": "render.frame"
+                  },
+                  {
+                    "id": "edge_pass_out",
+                    "source": { "nodeId": "pass", "portId": "out" },
+                    "target": { "nodeId": "patch_out", "portId": "in" },
+                    "resolvedType": "render.frame"
+                  }
+                ]
+              }
+            }
+          ],
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.2.0",
+              "id": "render.clear-color",
+              "version": "0.2.0",
+              "displayName": "Clear Color",
+              "category": "Render",
+              "ports": [
+                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+              ],
+              "execution": { "model": "gpu_pass", "clock": "frame" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": ["render.frame.v0.2"]
+            },
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.2.0",
+              "id": "render.output",
+              "version": "0.2.0",
+              "displayName": "Render Output",
+              "category": "Render",
+              "ports": [
+                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+              ],
+              "execution": { "model": "gpu_pass", "clock": "frame" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": ["render.output.v0.2"]
+            },
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.2.0",
+              "id": "test.pass",
+              "version": "0.2.0",
+              "displayName": "Pass",
+              "category": "Test",
+              "ports": [
+                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
+                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+              ],
+              "execution": { "model": "gpu_pass", "clock": "frame" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": []
             }
           ]
         })

@@ -52,8 +52,9 @@ pub use contract::{
     GraphPatchOperation, GraphValidationResultV02, InvertPatchError, MIDI_CLOCK_TICKS_PER_QUARTER,
     MIDI_CLOCK_TICKS_PER_SIXTEENTH, MergePolicyV02, MidiClockApplyResult, MidiClockDiagnostic,
     MidiClockDiagnosticSeverity, MidiClockMessage, MidiClockMessageKind, MidiClockSnapshot,
-    NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState, NumberRange, Port, PortActivation,
-    PortDirection, PortDirectionV02, PortRef, PortSpecV02, ReplaceNodeInterfaceEdgePolicy,
+    NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState, NumberRange, PatchContractPortV02,
+    PatchContractV02, PatchDefinitionV02, Port, PortActivation, PortDirection, PortDirectionV02,
+    PortRef, PortSpecV02, ProjectDocumentV02, ProjectMetadataV02, ReplaceNodeInterfaceEdgePolicy,
     ShaderInterface, ShaderInterfaceDiagnostic, ShaderUniform, StringOrStrings, ViewState,
     analyze_shader_interface_v01, apply_midi_clock_message, create_default_view_state_for_graph,
     midi_clock_snapshot_to_clock_state, parse_midi_clock_message, plan_audio_clock_bridge,
@@ -104,7 +105,9 @@ pub use preview_manager::{
 };
 pub use project::{ProjectValidationError, ProjectValidationReport, validate_project};
 pub use project_v02::{
-    ProjectRequestV02, RunProjectRequestV02, build_execution_plan_v02, validate_project_v02,
+    ProjectRequestV02, RunProjectRequestV02, build_execution_plan_request_v02,
+    build_execution_plan_run_request_v02, build_execution_plan_v02, expand_project_graph_v02,
+    validate_project_request_v02, validate_project_v02,
 };
 pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadError};
 pub use render::{

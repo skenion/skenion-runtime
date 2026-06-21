@@ -718,6 +718,8 @@ mod tests {
         let diagnostic = RuntimeDiagnostic {
             severity: DiagnosticSeverity::Warning,
             message: "invalid preview telemetry heartbeat: expected value".to_owned(),
+            code: None,
+            details: None,
         };
         let snapshot = RuntimeTelemetrySnapshot::from_parts(
             session_snapshot(false),
