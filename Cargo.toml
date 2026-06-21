@@ -14,10 +14,10 @@ midir = "0.11"
 pollster = "0.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-skenion-contracts = { git = "https://github.com/echovisionlab/skenion-contracts", tag = "skenion-contracts-v0.32.0" }
+skenion-contracts = { path = "../Skenion-contracts/packages/rust" }
 thiserror = "2.0.17"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
-tokio-stream = "0.1.17"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
 wgpu = "29.0.3"
 winit = "0.30.12"

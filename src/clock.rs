@@ -15,9 +15,9 @@ pub const RUNTIME_MIDI_CLOCK_FIXTURE_SCHEMA_VERSION: &str = "0.1.0";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(transparent)]
-pub struct RuntimeClockSourceId(pub String);
+pub struct RuntimeMidiClockSourceId(pub String);
 
-impl RuntimeClockSourceId {
+impl RuntimeMidiClockSourceId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -27,7 +27,7 @@ impl RuntimeClockSourceId {
     }
 }
 
-impl fmt::Display for RuntimeClockSourceId {
+impl fmt::Display for RuntimeMidiClockSourceId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
@@ -35,12 +35,8 @@ impl fmt::Display for RuntimeClockSourceId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum RuntimeClockSourceKind {
+pub enum RuntimeMidiClockSourceKind {
     MidiClock,
-    Link,
-    Mtc,
-    HostTransport,
-    Local,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -88,9 +84,9 @@ pub struct RuntimeClockDiagnostic {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeClockSnapshot {
-    pub source_id: RuntimeClockSourceId,
-    pub source_kind: RuntimeClockSourceKind,
+pub struct RuntimeMidiClockStateSnapshot {
+    pub source_id: RuntimeMidiClockSourceId,
+    pub source_kind: RuntimeMidiClockSourceKind,
     pub clock_state: ClockState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub received_host_time_ns: Option<u64>,
@@ -100,33 +96,36 @@ pub struct RuntimeClockSnapshot {
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ClockSourceStore {
-    sources: BTreeMap<RuntimeClockSourceId, RuntimeClockSnapshot>,
+pub struct RuntimeMidiClockTimeline {
+    snapshots: BTreeMap<RuntimeMidiClockSourceId, RuntimeMidiClockStateSnapshot>,
 }
 
-impl ClockSourceStore {
+impl RuntimeMidiClockTimeline {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert_or_update(&mut self, snapshot: RuntimeClockSnapshot) {
-        self.sources.insert(snapshot.source_id.clone(), snapshot);
+    pub fn record(&mut self, snapshot: RuntimeMidiClockStateSnapshot) {
+        self.snapshots.insert(snapshot.source_id.clone(), snapshot);
     }
 
-    pub fn get(&self, source_id: &RuntimeClockSourceId) -> Option<&RuntimeClockSnapshot> {
-        self.sources.get(source_id)
+    pub fn get(
+        &self,
+        source_id: &RuntimeMidiClockSourceId,
+    ) -> Option<&RuntimeMidiClockStateSnapshot> {
+        self.snapshots.get(source_id)
     }
 
-    pub fn list(&self) -> Vec<&RuntimeClockSnapshot> {
-        self.sources.values().collect()
+    pub fn list(&self) -> Vec<&RuntimeMidiClockStateSnapshot> {
+        self.snapshots.values().collect()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sources.is_empty()
+        self.snapshots.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.sources.len()
+        self.snapshots.len()
     }
 }
 
@@ -160,10 +159,10 @@ pub struct RuntimeMidiClockFixtureEvent {
 pub struct RuntimeMidiClockFixtureReport {
     pub schema: String,
     pub schema_version: String,
-    pub source_id: RuntimeClockSourceId,
+    pub source_id: RuntimeMidiClockSourceId,
     pub event_count: usize,
-    pub store: ClockSourceStore,
-    pub latest_snapshot: RuntimeClockSnapshot,
+    pub timeline: RuntimeMidiClockTimeline,
+    pub latest_snapshot: RuntimeMidiClockStateSnapshot,
     pub diagnostics: Vec<RuntimeClockDiagnostic>,
 }
 
@@ -186,7 +185,7 @@ pub enum MidiClockFixtureError {
 }
 
 pub struct MidiClockAdapter {
-    source_id: RuntimeClockSourceId,
+    source_id: RuntimeMidiClockSourceId,
     snapshot: MidiClockSnapshot,
     song_position_source: MidiSongPositionSource,
     last_received_host_time_ns: Option<u64>,
@@ -194,7 +193,7 @@ pub struct MidiClockAdapter {
 
 impl MidiClockAdapter {
     pub fn new(source_id: impl Into<String>, time_signature: Option<ClockTimeSignature>) -> Self {
-        let source_id = RuntimeClockSourceId::new(source_id);
+        let source_id = RuntimeMidiClockSourceId::new(source_id);
         let mut snapshot = MidiClockSnapshot::new(source_id.as_str());
         snapshot.time_signature = time_signature;
         Self {
@@ -205,14 +204,14 @@ impl MidiClockAdapter {
         }
     }
 
-    pub fn current_snapshot(&self) -> RuntimeClockSnapshot {
+    pub fn current_snapshot(&self) -> RuntimeMidiClockStateSnapshot {
         self.runtime_snapshot(Vec::new(), self.last_received_host_time_ns)
     }
 
     pub fn apply_timestamped_message(
         &mut self,
         timestamped: TimestampedMidiMessage,
-    ) -> RuntimeClockSnapshot {
+    ) -> RuntimeMidiClockStateSnapshot {
         let received_host_time_ns = timestamped.received_host_time_ns;
         self.last_received_host_time_ns = Some(received_host_time_ns);
 
@@ -263,10 +262,10 @@ impl MidiClockAdapter {
         &self,
         diagnostics: Vec<RuntimeClockDiagnostic>,
         received_host_time_ns: Option<u64>,
-    ) -> RuntimeClockSnapshot {
-        RuntimeClockSnapshot {
+    ) -> RuntimeMidiClockStateSnapshot {
+        RuntimeMidiClockStateSnapshot {
             source_id: self.source_id.clone(),
-            source_kind: RuntimeClockSourceKind::MidiClock,
+            source_kind: RuntimeMidiClockSourceKind::MidiClock,
             clock_state: self.corrected_clock_state(),
             received_host_time_ns,
             song_position_source: self.song_position_source,
@@ -324,7 +323,7 @@ pub fn run_midi_clock_fixture(
     validate_midi_clock_fixture(&fixture, &path)?;
 
     let mut adapter = MidiClockAdapter::new(fixture.source_id.clone(), fixture.time_signature);
-    let mut store = ClockSourceStore::new();
+    let mut timeline = RuntimeMidiClockTimeline::new();
     let mut diagnostics = Vec::new();
     let mut latest_snapshot = adapter.current_snapshot();
 
@@ -334,19 +333,19 @@ pub fn run_midi_clock_fixture(
             received_host_time_ns: event.at_ns,
         });
         diagnostics.extend(latest_snapshot.diagnostics.clone());
-        store.insert_or_update(latest_snapshot.clone());
+        timeline.record(latest_snapshot.clone());
     }
 
-    if store.is_empty() {
-        store.insert_or_update(latest_snapshot.clone());
+    if timeline.is_empty() {
+        timeline.record(latest_snapshot.clone());
     }
 
     Ok(RuntimeMidiClockFixtureReport {
         schema: "skenion.runtime.clock-midi.report".to_owned(),
         schema_version: "0.1.0".to_owned(),
-        source_id: RuntimeClockSourceId::new(fixture.source_id),
+        source_id: RuntimeMidiClockSourceId::new(fixture.source_id),
         event_count: fixture.events.len(),
-        store,
+        timeline,
         latest_snapshot,
         diagnostics,
     })
@@ -519,7 +518,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simulated_start_ticks_and_stop_update_store_snapshot() {
+    fn simulated_start_ticks_and_stop_update_timeline_snapshot() {
         let fixture = RuntimeMidiClockFixture {
             schema: RUNTIME_MIDI_CLOCK_FIXTURE_SCHEMA.to_owned(),
             schema_version: RUNTIME_MIDI_CLOCK_FIXTURE_SCHEMA_VERSION.to_owned(),
@@ -539,7 +538,7 @@ mod tests {
         let snapshot = &report.latest_snapshot;
 
         assert_eq!(report.event_count, 3);
-        assert_eq!(report.store.len(), 1);
+        assert_eq!(report.timeline.len(), 1);
         assert!(snapshot.clock_state.running.as_ref().unwrap().value == Some(false));
         assert_eq!(
             snapshot.song_position_source,
@@ -686,20 +685,20 @@ mod tests {
     }
 
     #[test]
-    fn clock_source_store_gets_and_lists_snapshots() {
-        let adapter = MidiClockAdapter::new("midi-clock-store", None);
+    fn midi_clock_timeline_gets_and_lists_snapshots() {
+        let adapter = MidiClockAdapter::new("midi-clock-timeline", None);
         let snapshot = adapter.current_snapshot();
         let source_id = snapshot.source_id.clone();
-        let mut store = ClockSourceStore::new();
+        let mut timeline = RuntimeMidiClockTimeline::new();
 
-        assert!(store.is_empty());
-        store.insert_or_update(snapshot);
+        assert!(timeline.is_empty());
+        timeline.record(snapshot);
 
-        assert_eq!(source_id.as_str(), "midi-clock-store");
-        assert_eq!(source_id.to_string(), "midi-clock-store");
-        assert_eq!(store.len(), 1);
-        assert_eq!(store.get(&source_id).unwrap().source_id, source_id);
-        assert_eq!(store.list().len(), 1);
+        assert_eq!(source_id.as_str(), "midi-clock-timeline");
+        assert_eq!(source_id.to_string(), "midi-clock-timeline");
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline.get(&source_id).unwrap().source_id, source_id);
+        assert_eq!(timeline.list().len(), 1);
     }
 
     #[test]
@@ -721,7 +720,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
 
         assert_eq!(report.event_count, 0);
-        assert_eq!(report.store.len(), 1);
+        assert_eq!(report.timeline.len(), 1);
         assert!(text.contains("runtime midi clock: midi-clock-empty"));
         assert!(text.contains("songPositionSource: Unknown"));
         assert!(text.contains("tempoBpm: unavailable authority=Unavailable"));
@@ -737,7 +736,7 @@ mod tests {
             "inline-empty",
         )
         .unwrap();
-        assert_eq!(inline_empty.store.len(), 1);
+        assert_eq!(inline_empty.timeline.len(), 1);
 
         let string_label_report = run_midi_clock_fixture(
             RuntimeMidiClockFixture {

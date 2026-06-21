@@ -243,9 +243,9 @@ impl RuntimeTelemetrySnapshot {
             ok: true,
             timestamp: unix_ms_timestamp(),
             session: RuntimeTelemetrySession {
-                loaded: session.loaded,
-                graph_id: session.graph_id,
-                graph_revision: session.graph_revision,
+                loaded: session.loaded(),
+                graph_id: session.graph_id().map(ToOwned::to_owned),
+                graph_revision: session.graph_revision().map(ToOwned::to_owned),
                 session_revision: session.session_revision,
                 control_revision: session.control_revision,
             },
@@ -572,7 +572,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{DiagnosticSeverity, RuntimeDiagnostic};
+    use crate::{
+        DiagnosticSeverity, GraphDocument, GraphNode, RuntimeDiagnostic, RuntimeProjectSnapshot,
+        create_default_view_state_for_graph,
+    };
 
     #[test]
     fn writes_and_reads_preview_heartbeat_atomically() {
@@ -945,12 +948,30 @@ mod tests {
     }
 
     fn session_snapshot(loaded: bool) -> RuntimeSessionSnapshot {
+        let graph = loaded.then(|| GraphDocument {
+            schema: "skenion.graph".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: "clear-color-render".to_owned(),
+            revision: "2".to_owned(),
+            nodes: vec![GraphNode {
+                id: "clear_1".to_owned(),
+                kind: "render.clear-color".to_owned(),
+                kind_version: "0.1.0".to_owned(),
+                params: serde_json::Map::new(),
+                ports: Vec::new(),
+            }],
+            edges: Vec::new(),
+        });
+        let project = graph.map(|graph| RuntimeProjectSnapshot {
+            view_state: create_default_view_state_for_graph(&graph),
+            graph,
+            nodes: Vec::new(),
+        });
         RuntimeSessionSnapshot {
-            loaded,
-            graph_id: loaded.then(|| "clear-color-render".to_owned()),
-            graph_revision: loaded.then(|| "2".to_owned()),
             session_revision: if loaded { 5 } else { 0 },
+            view_revision: if loaded { 1 } else { 0 },
             control_revision: if loaded { 7 } else { 0 },
+            project,
             diagnostics: Vec::new(),
             plan: None,
         }

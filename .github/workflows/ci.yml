@@ -187,8 +187,8 @@ jobs:
 
           curl --fail --silent \
             -H "content-type: application/json" \
-            --data '{"schema":"skenion.graph.patch","schemaVersion":"0.1.0","id":"ci_preview_stale_patch","baseRevision":"1","ops":[{"op":"setNodeParam","nodeId":"value_1","key":"value","value":0.875}]}' \
-            http://127.0.0.1:3761/v0/session/patch >/dev/null
+            --data '{"graphPatch":{"schema":"skenion.graph.patch","schemaVersion":"0.1.0","id":"ci_preview_stale_patch","baseRevision":"1","ops":[{"op":"setNodeParam","nodeId":"value_1","key":"value","value":0.875}]}}' \
+            http://127.0.0.1:3761/v0/session/mutate >/dev/null
 
           PREVIEW_STALE="$(curl --fail --silent http://127.0.0.1:3761/v0/session/preview)"
           python3 -c 'import json, sys; r=json.loads(sys.argv[1]); assert r["ok"] is True; assert r["state"] == "running"; assert r["stale"] is True' "${PREVIEW_STALE}"

@@ -4,12 +4,10 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
     AudioBackendConfig, AudioDspPlan, AudioDspPlanOptions, DEFAULT_HOST, DEFAULT_PORT,
-    ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit, RuntimeMidiClockInputRequest,
-    build_audio_dsp_plan, build_execution_plan, format_dummy_execution_text,
-    format_midi_clock_fixture_report_text, format_midi_clock_input_report_text,
-    format_midi_input_list_report_text, format_plan_text, list_midi_input_ports,
-    load_graph_document, load_node_definition, run_dummy_execution, run_midi_clock_fixture_file,
-    run_midi_clock_input, run_preview_window, run_render_preview_window, serve_runtime,
+    ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit, build_audio_dsp_plan,
+    build_execution_plan, format_dummy_execution_text, format_midi_clock_fixture_report_text,
+    format_plan_text, load_graph_document, load_node_definition, run_dummy_execution,
+    run_midi_clock_fixture_file, run_preview_window, run_render_preview_window, serve_runtime,
     start_default_audio_output_backend, validate_project,
 };
 
@@ -143,23 +141,11 @@ enum Command {
         #[arg(long, default_value_t = 1000)]
         duration_ms: u64,
     },
-    /// Run the Runtime MIDI Clock adapter against a fixture or MIDI input port.
+    /// Run the Runtime MIDI Clock fixture parser.
     ClockMidi {
         /// Path to a simulated MIDI Clock fixture.
         #[arg(long)]
         simulate: Option<PathBuf>,
-        /// List MIDI input ports without opening one.
-        #[arg(long)]
-        list_inputs: bool,
-        /// MIDI input port index from --list-inputs. This is not a stable device identity.
-        #[arg(long)]
-        input_port: Option<usize>,
-        /// Runtime clock source id used for live MIDI Clock capture.
-        #[arg(long, default_value = "midi-clock-input")]
-        source_id: String,
-        /// How long to keep the MIDI input port open.
-        #[arg(long, default_value_t = 1000)]
-        duration_ms: u64,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
@@ -329,21 +315,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             backend.keep_alive_for(Duration::from_millis(duration_ms));
             Ok(())
         }
-        Command::ClockMidi {
-            simulate,
-            list_inputs,
-            input_port,
-            source_id,
-            duration_ms,
-            format,
-        } => run_clock_midi(
-            simulate,
-            list_inputs,
-            input_port,
-            source_id,
-            duration_ms,
-            format,
-        ),
+        Command::ClockMidi { simulate, format } => run_clock_midi(simulate, format),
         Command::Serve { host, port } => serve_runtime(&host, port).await,
     }
 }
@@ -390,57 +362,15 @@ fn format_audio_dsp_plan_text(plan: &AudioDspPlan) -> String {
 
 fn run_clock_midi(
     simulate: Option<PathBuf>,
-    list_inputs: bool,
-    input_port: Option<usize>,
-    source_id: String,
-    duration_ms: u64,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let selected_modes = usize::from(simulate.is_some())
-        + usize::from(list_inputs)
-        + usize::from(input_port.is_some());
-    if selected_modes != 1 {
-        return Err(
-            "select exactly one clock-midi mode: --simulate <path>, --list-inputs, or --input-port <index>"
-                .into(),
-        );
-    }
-
-    if let Some(simulate) = simulate {
-        let report = run_midi_clock_fixture_file(&simulate)?;
-        match format {
-            OutputFormat::Text => {
-                print!("{}", format_midi_clock_fixture_report_text(&report));
-            }
-            OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            }
-        }
-        return Ok(());
-    }
-
-    if list_inputs {
-        let report = list_midi_input_ports();
-        match format {
-            OutputFormat::Text => {
-                print!("{}", format_midi_input_list_report_text(&report));
-            }
-            OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            }
-        }
-        return Ok(());
-    }
-
-    let port_index = input_port.expect("input_port is present when selected_modes is 1");
-    let report = run_midi_clock_input(RuntimeMidiClockInputRequest {
-        source_id,
-        port_index,
-        duration_ms,
-    });
+    let Some(simulate) = simulate else {
+        return Err("clock-midi requires --simulate <path>".into());
+    };
+    let report = run_midi_clock_fixture_file(&simulate)?;
     match format {
         OutputFormat::Text => {
-            print!("{}", format_midi_clock_input_report_text(&report));
+            print!("{}", format_midi_clock_fixture_report_text(&report));
         }
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report)?);

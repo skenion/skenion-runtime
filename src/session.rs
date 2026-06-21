@@ -3,39 +3,65 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ControlState, DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, GraphPatchEvent,
-    GraphPatchEventKind, GraphPatchHistory, NodeRegistry, PreviewContext,
+    CanvasNodeView, ControlState, DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch,
+    GraphPatchEvent, GraphPatchEventKind, NodeDefinition, NodeRegistry, PreviewContext,
     PreviewControlStateSnapshot, ProjectRequest, RuntimeControlEventRequest,
     RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic, apply_graph_patch,
-    build_execution_plan, invert_graph_patch, read_graph_param, read_graph_port,
-    run_dummy_execution,
+    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic, ViewState,
+    apply_graph_patch, build_execution_plan, create_default_view_state_for_graph,
+    invert_graph_patch, read_graph_param, read_graph_port, run_dummy_execution,
     server::{registry_from_nodes, validate_graph_with_registry},
 };
+
+const UNRESOLVED_OBJECT_NODE_KIND: &str = "core.unresolved-object";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSessionSnapshot {
-    pub loaded: bool,
-    pub graph_id: Option<String>,
-    pub graph_revision: Option<String>,
     pub session_revision: u64,
+    pub view_revision: u64,
     pub control_revision: u64,
+    pub project: Option<RuntimeProjectSnapshot>,
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeProjectSnapshot {
+    pub graph: GraphDocument,
+    pub view_state: ViewState,
+    pub nodes: Vec<NodeDefinition>,
+}
+
+impl RuntimeSessionSnapshot {
+    pub fn loaded(&self) -> bool {
+        self.project.is_some()
+    }
+
+    pub fn graph_id(&self) -> Option<&str> {
+        self.project
+            .as_ref()
+            .map(|project| project.graph.id.as_str())
+    }
+
+    pub fn graph_revision(&self) -> Option<&str> {
+        self.project
+            .as_ref()
+            .map(|project| project.graph.revision.as_str())
+    }
+
+    pub fn view_state(&self) -> Option<&ViewState> {
+        self.project.as_ref().map(|project| &project.view_state)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeSessionResponse {
     pub ok: bool,
-    pub loaded: bool,
-    pub graph_id: Option<String>,
-    pub graph_revision: Option<String>,
-    pub session_revision: u64,
-    pub control_revision: u64,
+    pub snapshot: RuntimeSessionSnapshot,
     pub diagnostics: Vec<RuntimeDiagnostic>,
-    pub plan: Option<ExecutionPlan>,
     pub report: Option<DummyExecutionReport>,
 }
 
@@ -45,20 +71,8 @@ pub struct RuntimePatchResponse {
     pub ok: bool,
     pub applied: bool,
     pub conflict: bool,
-    pub graph: Option<GraphDocument>,
-    pub session: RuntimeSessionResponse,
-    pub event: Option<GraphPatchEvent>,
-    pub history: GraphPatchHistory,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeSessionProjectResponse {
-    pub ok: bool,
-    pub loaded: bool,
-    pub project: Option<ProjectRequest>,
-    pub session: RuntimeSessionResponse,
+    pub snapshot: RuntimeSessionSnapshot,
+    pub history: RuntimeHistory,
     pub diagnostics: Vec<RuntimeDiagnostic>,
 }
 
@@ -68,16 +82,94 @@ pub struct SessionRunRequest {
     pub frames: Option<usize>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeMutationRequest {
+    #[serde(default)]
+    pub graph_patch: Option<GraphPatch>,
+    #[serde(default)]
+    pub view_patch: Option<RuntimeViewPatch>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeViewPatch {
+    pub base_view_revision: u64,
+    pub ops: Vec<RuntimeViewPatchOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "op")]
+pub enum RuntimeViewPatchOperation {
+    #[serde(rename = "setNodeView")]
+    SetNodeView {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        view: CanvasNodeView,
+    },
+    #[serde(rename = "moveNodeView")]
+    MoveNodeView {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        #[serde(default)]
+        from: Option<CanvasNodeView>,
+        to: CanvasNodeView,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHistory {
+    pub schema: &'static str,
+    pub schema_version: &'static str,
+    pub entries: Vec<RuntimeHistoryEntry>,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub undo_depth: u64,
+    pub redo_depth: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHistoryEntry {
+    pub id: String,
+    pub sequence: u64,
+    pub kind: RuntimeHistoryEntryKind,
+    pub mutation: RuntimeMutationRequest,
+    pub inverse_mutation: RuntimeMutationRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeHistoryEntryKind {
+    Apply,
+    Undo,
+    Redo,
+}
+
 #[derive(Debug)]
 pub struct RuntimeSession {
     graph: Option<GraphDocument>,
     registry: Option<NodeRegistry>,
     plan: Option<ExecutionPlan>,
+    view_state: Option<ViewState>,
     control_state: ControlState,
     diagnostics: Vec<RuntimeDiagnostic>,
     revision: u64,
+    view_revision: u64,
     control_revision: u64,
-    event_log: Vec<GraphPatchEvent>,
+    history_entries: Vec<RuntimeHistoryEntry>,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
     next_event_sequence: u64,
@@ -89,11 +181,13 @@ impl Default for RuntimeSession {
             graph: None,
             registry: None,
             plan: None,
+            view_state: None,
             control_state: ControlState::default(),
             diagnostics: Vec::new(),
             revision: 0,
+            view_revision: 0,
             control_revision: 0,
-            event_log: Vec::new(),
+            history_entries: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             next_event_sequence: 1,
@@ -102,10 +196,12 @@ impl Default for RuntimeSession {
 }
 
 #[derive(Debug, Clone)]
-struct HistoryEntry {
-    event_id: String,
-    patch: GraphPatch,
-    inverse_patch: GraphPatch,
+enum HistoryEntry {
+    Mutation {
+        event_id: String,
+        mutation: RuntimeMutationRequest,
+        inverse_mutation: RuntimeMutationRequest,
+    },
 }
 
 struct HistoryApplyOutcome {
@@ -131,12 +227,23 @@ impl HistoryApplyOutcome {
 
 impl RuntimeSession {
     pub fn snapshot(&self) -> RuntimeSessionSnapshot {
+        let project = match (
+            self.graph.clone(),
+            self.view_state.clone(),
+            self.registry.clone(),
+        ) {
+            (Some(graph), Some(view_state), Some(registry)) => Some(RuntimeProjectSnapshot {
+                graph,
+                view_state: runtime_owned_view_state(view_state),
+                nodes: registry.definitions().cloned().collect(),
+            }),
+            _ => None,
+        };
         RuntimeSessionSnapshot {
-            loaded: self.graph.is_some(),
-            graph_id: self.graph.as_ref().map(|graph| graph.id.clone()),
-            graph_revision: self.graph.as_ref().map(|graph| graph.revision.clone()),
             session_revision: self.revision,
+            view_revision: self.view_revision,
             control_revision: self.control_revision,
+            project,
             diagnostics: self.diagnostics.clone(),
             plan: self.plan.clone(),
         }
@@ -166,7 +273,11 @@ impl RuntimeSession {
     }
 
     pub fn load_project(&mut self, request: ProjectRequest) -> RuntimeSessionResponse {
-        let ProjectRequest { graph, nodes } = request;
+        let ProjectRequest {
+            graph,
+            nodes,
+            view_state,
+        } = request;
         let registry = match registry_from_nodes(nodes) {
             Ok(registry) => registry,
             Err(diagnostics) => return self.response(false, diagnostics, None),
@@ -176,51 +287,30 @@ impl RuntimeSession {
             return self.response(false, diagnostics, None);
         }
 
+        let diagnostics = unresolved_object_diagnostics(&graph);
         let plan = build_execution_plan(&graph, &registry).expect("validated project should plan");
         let control_state = ControlState::from_graph(&graph);
+        let view_state = reconcile_view_state_with_graph(&graph, view_state);
         self.graph = Some(graph);
         self.registry = Some(registry);
         self.plan = Some(plan);
+        self.view_state = Some(view_state);
         self.control_state = control_state;
+        self.view_revision = 1;
         self.control_revision = 0;
-        self.diagnostics = Vec::new();
+        self.diagnostics = diagnostics.clone();
         self.clear_history();
         self.revision += 1;
 
-        self.response(true, Vec::new(), None)
-    }
-
-    pub fn project_response(&self) -> RuntimeSessionProjectResponse {
-        let diagnostics = if self.graph.is_some() && self.registry.is_some() {
-            Vec::new()
-        } else {
-            vec![RuntimeDiagnostic::error(
-                "no project loaded in runtime session",
-            )]
-        };
-        let project = match (self.graph.clone(), self.registry.clone()) {
-            (Some(graph), Some(registry)) => Some(ProjectRequest {
-                graph,
-                nodes: registry.definitions().cloned().collect(),
-            }),
-            _ => None,
-        };
-        let ok = project.is_some();
-
-        RuntimeSessionProjectResponse {
-            ok,
-            loaded: ok,
-            project,
-            session: self.response(ok, diagnostics.clone(), None),
-            diagnostics,
-        }
+        self.response(true, diagnostics, None)
     }
 
     pub fn validate_current(&mut self) -> RuntimeSessionResponse {
         let diagnostics = match self.loaded_project() {
-            Some((graph, registry)) => validate_graph_with_registry(graph, registry)
-                .err()
-                .unwrap_or_default(),
+            Some((graph, registry)) => match validate_graph_with_registry(graph, registry) {
+                Ok(()) => unresolved_object_diagnostics(graph),
+                Err(diagnostics) => diagnostics,
+            },
             None => vec![RuntimeDiagnostic::error(
                 "no project loaded in runtime session",
             )],
@@ -248,10 +338,11 @@ impl RuntimeSession {
             return self.response(false, diagnostics, None);
         }
 
+        let diagnostics = unresolved_object_diagnostics(graph);
         let plan = build_execution_plan(graph, registry).expect("validated project should plan");
         self.plan = Some(plan);
-        self.diagnostics = Vec::new();
-        self.response(true, Vec::new(), None)
+        self.diagnostics = diagnostics.clone();
+        self.response(true, diagnostics, None)
     }
 
     pub fn run_current(&mut self, frames: usize) -> RuntimeSessionResponse {
@@ -277,108 +368,24 @@ impl RuntimeSession {
         self.response(true, self.diagnostics.clone(), report)
     }
 
-    pub fn apply_patch(&mut self, patch: GraphPatch) -> RuntimePatchResponse {
-        let (graph, registry) = match (self.graph.clone(), self.registry.clone()) {
-            (Some(graph), Some(registry)) => (graph, registry),
-            _ => {
-                return self.patch_response(
-                    false,
-                    false,
-                    false,
-                    None,
-                    None,
-                    vec![RuntimeDiagnostic::error(
-                        "no project loaded in runtime session",
-                    )],
-                );
-            }
-        };
-
-        if patch.base_revision != graph.revision {
-            return self.patch_response(
-                false,
-                false,
-                true,
-                Some(graph.clone()),
-                None,
-                vec![RuntimeDiagnostic::error(format!(
-                    "patch baseRevision {} does not match session graph revision {}",
-                    patch.base_revision, graph.revision
-                ))],
-            );
-        }
-
-        let next_revision = next_graph_revision(&graph.revision);
-        let mut inverse_patch = match invert_graph_patch(&graph, &patch) {
-            Ok(inverse_patch) => inverse_patch,
-            Err(error) => {
-                return self.patch_response(
-                    false,
-                    false,
-                    false,
-                    Some(graph.clone()),
-                    None,
-                    vec![RuntimeDiagnostic::error(error.to_string())],
-                );
-            }
-        };
-        let patched_graph = apply_graph_patch(&graph, &patch, Some(&next_revision))
-            .expect("patch inversion preflight should make graph patch application infallible");
-
-        if let Err(diagnostics) = validate_graph_with_registry(&patched_graph, &registry) {
-            return self.patch_response(
-                false,
-                false,
-                false,
-                Some(graph.clone()),
-                None,
-                diagnostics,
-            );
-        }
-
-        let plan =
-            build_execution_plan(&patched_graph, &registry).expect("validated project should plan");
-        let control_state = ControlState::from_graph(&patched_graph);
-        inverse_patch.base_revision = next_revision.clone();
-        let event = self.create_patch_event(
-            GraphPatchEventKind::Apply,
-            patch.clone(),
-            inverse_patch.clone(),
-            graph.revision.clone(),
-            next_revision,
-            None,
-        );
-        let history_entry = HistoryEntry {
-            event_id: event.id.clone(),
-            patch,
-            inverse_patch,
-        };
-        self.graph = Some(patched_graph.clone());
-        self.registry = Some(registry);
-        self.plan = Some(plan);
-        self.control_state = control_state;
-        self.control_revision = 0;
-        self.diagnostics = Vec::new();
-        self.revision += 1;
-        self.event_log.push(event.clone());
-        self.undo_stack.push(history_entry);
-        self.redo_stack.clear();
-
-        self.patch_response(
-            true,
-            true,
-            false,
-            Some(patched_graph),
-            Some(event),
-            Vec::new(),
-        )
+    pub fn apply_mutation(&mut self, mutation: RuntimeMutationRequest) -> RuntimePatchResponse {
+        self.apply_mutation_with_history(mutation, RuntimeHistoryEntryKind::Apply, None)
     }
 
-    pub fn history(&self) -> GraphPatchHistory {
-        GraphPatchHistory {
-            schema: "skenion.graph.patch.history".to_owned(),
-            schema_version: "0.1.0".to_owned(),
-            events: self.event_log.clone(),
+    pub fn apply_patch(&mut self, patch: GraphPatch) -> RuntimePatchResponse {
+        self.apply_mutation(RuntimeMutationRequest {
+            graph_patch: Some(patch),
+            view_patch: None,
+            client_id: None,
+            description: None,
+        })
+    }
+
+    pub fn history(&self) -> RuntimeHistory {
+        RuntimeHistory {
+            schema: "skenion.runtime.history",
+            schema_version: "0.1.0",
+            entries: self.history_entries.clone(),
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
             undo_depth: self.undo_stack.len() as u64,
@@ -392,8 +399,6 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                self.graph.clone(),
-                None,
                 vec![RuntimeDiagnostic::error("no patch event available to undo")],
             );
         };
@@ -401,25 +406,11 @@ impl RuntimeSession {
         if outcome.applied {
             let response = outcome.response;
             self.redo_stack.push(entry);
-            self.patch_response(
-                true,
-                true,
-                false,
-                response.graph,
-                response.event,
-                response.diagnostics,
-            )
+            self.patch_response(true, true, false, response.diagnostics)
         } else {
             let response = outcome.response;
             self.undo_stack.push(entry);
-            self.patch_response(
-                false,
-                false,
-                response.conflict,
-                response.graph,
-                None,
-                response.diagnostics,
-            )
+            self.patch_response(false, false, response.conflict, response.diagnostics)
         }
     }
 
@@ -429,8 +420,6 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                self.graph.clone(),
-                None,
                 vec![RuntimeDiagnostic::error("no patch event available to redo")],
             );
         };
@@ -438,25 +427,11 @@ impl RuntimeSession {
         if outcome.applied {
             let response = outcome.response;
             self.undo_stack.push(entry);
-            self.patch_response(
-                true,
-                true,
-                false,
-                response.graph,
-                response.event,
-                response.diagnostics,
-            )
+            self.patch_response(true, true, false, response.diagnostics)
         } else {
             let response = outcome.response;
             self.redo_stack.push(entry);
-            self.patch_response(
-                false,
-                false,
-                response.conflict,
-                response.graph,
-                None,
-                response.diagnostics,
-            )
+            self.patch_response(false, false, response.conflict, response.diagnostics)
         }
     }
 
@@ -465,21 +440,16 @@ impl RuntimeSession {
         conflict: bool,
         diagnostics: Vec<RuntimeDiagnostic>,
     ) -> RuntimePatchResponse {
-        self.patch_response(
-            false,
-            false,
-            conflict,
-            self.graph.clone(),
-            None,
-            diagnostics,
-        )
+        self.patch_response(false, false, conflict, diagnostics)
     }
 
     pub fn clear(&mut self) -> RuntimeSessionResponse {
         self.graph = None;
         self.registry = None;
         self.plan = None;
+        self.view_state = None;
         self.control_state = ControlState::default();
+        self.view_revision = 0;
         self.control_revision = 0;
         self.diagnostics = Vec::new();
         self.clear_history();
@@ -617,15 +587,200 @@ impl RuntimeSession {
         let snapshot = self.snapshot();
         RuntimeSessionResponse {
             ok,
-            loaded: snapshot.loaded,
-            graph_id: snapshot.graph_id,
-            graph_revision: snapshot.graph_revision,
-            session_revision: snapshot.session_revision,
-            control_revision: snapshot.control_revision,
+            snapshot,
             diagnostics,
-            plan: snapshot.plan,
             report,
         }
+    }
+
+    pub fn graph(&self) -> Option<GraphDocument> {
+        self.graph.clone()
+    }
+
+    pub fn view_state(&self) -> Option<ViewState> {
+        self.view_state.clone()
+    }
+
+    fn apply_mutation_with_history(
+        &mut self,
+        mut mutation: RuntimeMutationRequest,
+        kind: RuntimeHistoryEntryKind,
+        subject_event_id: Option<String>,
+    ) -> RuntimePatchResponse {
+        let (graph, registry) = match (self.graph.clone(), self.registry.clone()) {
+            (Some(graph), Some(registry)) => (graph, registry),
+            _ => {
+                return self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![RuntimeDiagnostic::error(
+                        "no project loaded in runtime session",
+                    )],
+                );
+            }
+        };
+
+        if mutation.graph_patch.is_none() && mutation.view_patch.is_none() {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::error(
+                    "runtime mutation did not include graphPatch or viewPatch",
+                )],
+            );
+        }
+
+        let mut next_graph = graph.clone();
+        let mut inverse_graph_patch = None;
+        let mut graph_event = None;
+        let mut graph_changed = false;
+        if let Some(graph_patch) = mutation.graph_patch.as_mut() {
+            if graph_patch.base_revision != graph.revision {
+                return self.patch_response(
+                    false,
+                    false,
+                    true,
+                    vec![RuntimeDiagnostic::error(format!(
+                        "patch baseRevision {} does not match session graph revision {}",
+                        graph_patch.base_revision, graph.revision
+                    ))],
+                );
+            }
+            let next_revision = next_graph_revision(&graph.revision);
+            let mut inverse_patch = match invert_graph_patch(&graph, graph_patch) {
+                Ok(inverse_patch) => inverse_patch,
+                Err(error) => {
+                    return self.patch_response(
+                        false,
+                        false,
+                        false,
+                        vec![RuntimeDiagnostic::error(error.to_string())],
+                    );
+                }
+            };
+            next_graph = apply_graph_patch(&graph, graph_patch, Some(&next_revision))
+                .expect("patch inversion preflight should make graph patch application infallible");
+            if let Err(diagnostics) = validate_graph_with_registry(&next_graph, &registry) {
+                return self.patch_response(false, false, false, diagnostics);
+            }
+            inverse_patch.base_revision = next_revision.clone();
+            graph_event = Some(self.create_patch_event(
+                match kind {
+                    RuntimeHistoryEntryKind::Apply => GraphPatchEventKind::Apply,
+                    RuntimeHistoryEntryKind::Undo => GraphPatchEventKind::Undo,
+                    RuntimeHistoryEntryKind::Redo => GraphPatchEventKind::Redo,
+                },
+                graph_patch.clone(),
+                inverse_patch.clone(),
+                graph.revision.clone(),
+                next_revision,
+                subject_event_id.clone(),
+            ));
+            inverse_graph_patch = Some(inverse_patch);
+            graph_changed = true;
+        }
+
+        if let Some(view_patch) = &mutation.view_patch
+            && view_patch.base_view_revision != self.view_revision
+        {
+            return self.patch_response(
+                false,
+                false,
+                true,
+                vec![RuntimeDiagnostic::error(format!(
+                    "view patch baseViewRevision {} does not match session view revision {}",
+                    view_patch.base_view_revision, self.view_revision
+                ))],
+            );
+        }
+
+        let previous_view_state = runtime_owned_view_state(reconcile_view_state_with_graph(
+            &graph,
+            self.view_state.clone(),
+        ));
+        let mut next_view_state =
+            reconcile_view_state_with_graph(&next_graph, Some(previous_view_state.clone()));
+        let mut inverse_view_patch = None;
+        if let Some(view_patch) = &mutation.view_patch {
+            match apply_view_patch_to_view_state(&next_graph, next_view_state, view_patch) {
+                Ok((patched_view_state, inverse_patch)) => {
+                    next_view_state = patched_view_state;
+                    inverse_view_patch = Some(inverse_patch);
+                }
+                Err(diagnostics) => {
+                    return self.patch_response(false, false, false, diagnostics);
+                }
+            }
+        }
+        next_view_state = runtime_owned_view_state(next_view_state);
+        let view_changed = previous_view_state != next_view_state;
+
+        if !graph_changed && !view_changed {
+            return self.patch_response(true, false, false, Vec::new());
+        }
+
+        let diagnostics = unresolved_object_diagnostics(&next_graph);
+        let plan =
+            build_execution_plan(&next_graph, &registry).expect("validated project should plan");
+        let control_state = ControlState::from_graph(&next_graph);
+        let mut inverse_mutation = RuntimeMutationRequest {
+            graph_patch: inverse_graph_patch,
+            view_patch: inverse_view_patch,
+            client_id: mutation.client_id.clone(),
+            description: mutation
+                .description
+                .as_ref()
+                .map(|description| format!("Inverse of {description}")),
+        };
+        normalize_mutation_base_revisions(
+            &mut mutation,
+            graph.revision.clone(),
+            self.view_revision,
+        );
+        normalize_mutation_base_revisions(
+            &mut inverse_mutation,
+            next_graph.revision.clone(),
+            if view_changed {
+                self.view_revision + 1
+            } else {
+                self.view_revision
+            },
+        );
+        let history_entry = self.create_runtime_history_entry(
+            kind,
+            mutation.clone(),
+            inverse_mutation.clone(),
+            subject_event_id,
+            graph_event.clone(),
+        );
+        let history_stack_entry = HistoryEntry::Mutation {
+            event_id: history_entry.id.clone(),
+            mutation,
+            inverse_mutation,
+        };
+
+        self.graph = Some(next_graph.clone());
+        self.registry = Some(registry);
+        self.plan = Some(plan);
+        self.view_state = Some(next_view_state);
+        if view_changed {
+            self.view_revision += 1;
+        }
+        self.control_state = control_state;
+        if graph_changed {
+            self.control_revision = 0;
+        }
+        self.diagnostics = diagnostics.clone();
+        self.revision += 1;
+        self.history_entries.push(history_entry);
+        if matches!(kind, RuntimeHistoryEntryKind::Apply) {
+            self.undo_stack.push(history_stack_entry);
+            self.redo_stack.clear();
+        }
+
+        self.patch_response(true, true, false, diagnostics)
     }
 
     fn patch_response(
@@ -633,17 +788,14 @@ impl RuntimeSession {
         ok: bool,
         applied: bool,
         conflict: bool,
-        graph: Option<GraphDocument>,
-        event: Option<GraphPatchEvent>,
         diagnostics: Vec<RuntimeDiagnostic>,
     ) -> RuntimePatchResponse {
+        let snapshot = self.snapshot();
         RuntimePatchResponse {
             ok,
             applied,
             conflict,
-            graph,
-            session: self.response(ok, diagnostics.clone(), None),
-            event,
+            snapshot,
             history: self.history(),
             diagnostics,
         }
@@ -658,96 +810,33 @@ impl RuntimeSession {
         entry: HistoryEntry,
         direction: HistoryDirection,
     ) -> HistoryApplyOutcome {
-        let (graph, registry) = match (self.graph.clone(), self.registry.clone()) {
-            (Some(graph), Some(registry)) => (graph, registry),
-            _ => {
-                return HistoryApplyOutcome::rejected(self.patch_response(
-                    false,
-                    false,
-                    false,
-                    None,
-                    None,
-                    vec![RuntimeDiagnostic::error(
-                        "no project loaded in runtime session",
-                    )],
-                ));
+        match entry {
+            HistoryEntry::Mutation {
+                event_id,
+                mutation,
+                inverse_mutation,
+                ..
+            } => {
+                let mut mutation_to_apply = match direction {
+                    HistoryDirection::Undo => inverse_mutation,
+                    HistoryDirection::Redo => mutation,
+                };
+                self.rebase_mutation_to_current_revisions(&mut mutation_to_apply);
+                let response = self.apply_mutation_with_history(
+                    mutation_to_apply,
+                    match direction {
+                        HistoryDirection::Undo => RuntimeHistoryEntryKind::Undo,
+                        HistoryDirection::Redo => RuntimeHistoryEntryKind::Redo,
+                    },
+                    Some(event_id),
+                );
+                if response.applied {
+                    HistoryApplyOutcome::applied(response)
+                } else {
+                    HistoryApplyOutcome::rejected(response)
+                }
             }
-        };
-
-        let revision_before = graph.revision.clone();
-        let next_revision = next_graph_revision(&revision_before);
-        let mut patch = match direction {
-            HistoryDirection::Undo => entry.inverse_patch.clone(),
-            HistoryDirection::Redo => entry.patch.clone(),
-        };
-        patch.id = match direction {
-            HistoryDirection::Undo => format!("undo_{}", entry.event_id),
-            HistoryDirection::Redo => format!("redo_{}", entry.event_id),
-        };
-        patch.base_revision = revision_before.clone();
-        let patched_graph = match apply_graph_patch(&graph, &patch, Some(&next_revision)) {
-            Ok(patched_graph) => patched_graph,
-            Err(error) => {
-                return HistoryApplyOutcome::rejected(self.patch_response(
-                    false,
-                    false,
-                    false,
-                    Some(graph.clone()),
-                    None,
-                    vec![RuntimeDiagnostic::error(error.to_string())],
-                ));
-            }
-        };
-
-        if let Err(diagnostics) = validate_graph_with_registry(&patched_graph, &registry) {
-            return HistoryApplyOutcome::rejected(self.patch_response(
-                false,
-                false,
-                false,
-                Some(graph.clone()),
-                None,
-                diagnostics,
-            ));
         }
-
-        let plan =
-            build_execution_plan(&patched_graph, &registry).expect("validated project should plan");
-        let control_state = ControlState::from_graph(&patched_graph);
-        let mut inverse_patch = match direction {
-            HistoryDirection::Undo => entry.patch.clone(),
-            HistoryDirection::Redo => entry.inverse_patch.clone(),
-        };
-        inverse_patch.id = match direction {
-            HistoryDirection::Undo => format!("redo_{}", entry.event_id),
-            HistoryDirection::Redo => format!("undo_{}", entry.event_id),
-        };
-        inverse_patch.base_revision = next_revision.clone();
-        let event = self.create_patch_event(
-            direction.event_kind(),
-            patch,
-            inverse_patch,
-            revision_before,
-            next_revision,
-            Some(entry.event_id),
-        );
-
-        self.graph = Some(patched_graph.clone());
-        self.registry = Some(registry);
-        self.plan = Some(plan);
-        self.control_state = control_state;
-        self.control_revision = 0;
-        self.diagnostics = Vec::new();
-        self.revision += 1;
-        self.event_log.push(event.clone());
-
-        HistoryApplyOutcome::applied(self.patch_response(
-            true,
-            true,
-            false,
-            Some(patched_graph),
-            Some(event),
-            Vec::new(),
-        ))
     }
 
     fn create_patch_event(
@@ -778,8 +867,64 @@ impl RuntimeSession {
         }
     }
 
+    fn create_runtime_history_entry(
+        &mut self,
+        kind: RuntimeHistoryEntryKind,
+        mutation: RuntimeMutationRequest,
+        inverse_mutation: RuntimeMutationRequest,
+        subject_event_id: Option<String>,
+        graph_event: Option<GraphPatchEvent>,
+    ) -> RuntimeHistoryEntry {
+        if let Some(event) = graph_event {
+            let GraphPatchEvent {
+                id,
+                sequence,
+                client_id,
+                description,
+                created_at,
+                ..
+            } = event;
+            return RuntimeHistoryEntry {
+                id,
+                sequence,
+                kind,
+                client_id: mutation.client_id.clone().or(client_id),
+                description: mutation.description.clone().or(description),
+                mutation,
+                inverse_mutation,
+                subject_event_id,
+                created_at,
+            };
+        }
+
+        let sequence = self.next_event_sequence;
+        self.next_event_sequence += 1;
+        RuntimeHistoryEntry {
+            id: format!("runtime_event_{sequence:06}"),
+            sequence,
+            kind,
+            client_id: mutation.client_id.clone(),
+            description: mutation.description.clone(),
+            mutation,
+            inverse_mutation,
+            subject_event_id,
+            created_at: created_at_now(),
+        }
+    }
+
+    fn rebase_mutation_to_current_revisions(&self, mutation: &mut RuntimeMutationRequest) {
+        if let (Some(graph), Some(graph_patch)) =
+            (self.graph.as_ref(), mutation.graph_patch.as_mut())
+        {
+            graph_patch.base_revision = graph.revision.clone();
+        }
+        if let Some(view_patch) = mutation.view_patch.as_mut() {
+            view_patch.base_view_revision = self.view_revision;
+        }
+    }
+
     fn clear_history(&mut self) {
-        self.event_log.clear();
+        self.history_entries.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.next_event_sequence = 1;
@@ -792,20 +937,147 @@ enum HistoryDirection {
     Redo,
 }
 
-impl HistoryDirection {
-    fn event_kind(self) -> GraphPatchEventKind {
-        match self {
-            Self::Undo => GraphPatchEventKind::Undo,
-            Self::Redo => GraphPatchEventKind::Redo,
-        }
-    }
-}
-
 fn next_graph_revision(current: &str) -> String {
     current
         .parse::<u64>()
         .map(|revision| (revision + 1).to_string())
         .unwrap_or_else(|_| format!("{current}+1"))
+}
+
+fn reconcile_view_state_with_graph(
+    graph: &GraphDocument,
+    view_state: Option<ViewState>,
+) -> ViewState {
+    let mut reconciled = create_default_view_state_for_graph(graph);
+    let Some(view_state) = view_state else {
+        return reconciled;
+    };
+
+    for node in &graph.nodes {
+        if let Some(node_view) = view_state.canvas.nodes.get(&node.id) {
+            reconciled
+                .canvas
+                .nodes
+                .insert(node.id.clone(), node_view.clone());
+        }
+    }
+    if view_state.canvas.viewport.is_some() {
+        reconciled.canvas.viewport = view_state.canvas.viewport;
+    }
+
+    reconciled
+}
+
+fn runtime_owned_view_state(mut view_state: ViewState) -> ViewState {
+    view_state.canvas.viewport = None;
+    view_state
+}
+
+fn normalize_mutation_base_revisions(
+    mutation: &mut RuntimeMutationRequest,
+    graph_revision: String,
+    view_revision: u64,
+) {
+    if let Some(graph_patch) = mutation.graph_patch.as_mut() {
+        graph_patch.base_revision = graph_revision;
+    }
+    if let Some(view_patch) = mutation.view_patch.as_mut() {
+        view_patch.base_view_revision = view_revision;
+    }
+}
+
+fn apply_view_patch_to_view_state(
+    graph: &GraphDocument,
+    mut view_state: ViewState,
+    patch: &RuntimeViewPatch,
+) -> Result<(ViewState, RuntimeViewPatch), Vec<RuntimeDiagnostic>> {
+    let mut inverse_ops = Vec::new();
+    for op in &patch.ops {
+        match op {
+            RuntimeViewPatchOperation::SetNodeView { node_id, view } => {
+                if !graph.nodes.iter().any(|node| node.id == *node_id) {
+                    return Err(vec![RuntimeDiagnostic::error(format!(
+                        "view patch node {node_id} does not exist"
+                    ))]);
+                }
+                let Some(previous) = view_state.canvas.nodes.get(node_id).cloned() else {
+                    return Err(vec![RuntimeDiagnostic::error(format!(
+                        "view patch node {node_id} has no view state"
+                    ))]);
+                };
+                view_state
+                    .canvas
+                    .nodes
+                    .insert(node_id.clone(), view.clone());
+                inverse_ops.insert(
+                    0,
+                    RuntimeViewPatchOperation::SetNodeView {
+                        node_id: node_id.clone(),
+                        view: previous,
+                    },
+                );
+            }
+            RuntimeViewPatchOperation::MoveNodeView { node_id, from, to } => {
+                if !graph.nodes.iter().any(|node| node.id == *node_id) {
+                    return Err(vec![RuntimeDiagnostic::error(format!(
+                        "view patch node {node_id} does not exist"
+                    ))]);
+                }
+                let Some(previous) = view_state.canvas.nodes.get(node_id).cloned() else {
+                    return Err(vec![RuntimeDiagnostic::error(format!(
+                        "view patch node {node_id} has no view state"
+                    ))]);
+                };
+                if let Some(from) = from
+                    && from != &previous
+                {
+                    return Err(vec![RuntimeDiagnostic::error(format!(
+                        "view patch node {node_id} from view does not match current view"
+                    ))]);
+                }
+                view_state.canvas.nodes.insert(node_id.clone(), to.clone());
+                inverse_ops.insert(
+                    0,
+                    RuntimeViewPatchOperation::MoveNodeView {
+                        node_id: node_id.clone(),
+                        from: Some(to.clone()),
+                        to: previous,
+                    },
+                );
+            }
+        }
+    }
+
+    Ok((
+        runtime_owned_view_state(view_state),
+        RuntimeViewPatch {
+            base_view_revision: patch.base_view_revision,
+            ops: inverse_ops,
+        },
+    ))
+}
+
+fn unresolved_object_diagnostics(graph: &GraphDocument) -> Vec<RuntimeDiagnostic> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == UNRESOLVED_OBJECT_NODE_KIND)
+        .map(|node| {
+            let object_text = node
+                .params
+                .get("objectText")
+                .and_then(|value| value.as_str())
+                .unwrap_or(node.id.as_str());
+            let diagnostic_message = node
+                .params
+                .get("diagnosticMessage")
+                .and_then(|value| value.as_str())
+                .unwrap_or("object text could not be resolved");
+            RuntimeDiagnostic::error(format!(
+                "unresolved object {object_text}: {diagnostic_message}"
+            ))
+        })
+        .collect()
 }
 
 fn created_at_now() -> String {
@@ -821,12 +1093,15 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::{
-        ControlMessage, ControlValue, Edge, GraphPatch, GraphPatchEventKind, NodeRegistry, PortRef,
+        ControlMessage, ControlValue, Edge, GraphDocument, GraphPatch, NodeRegistry, PortRef,
         ProjectRequest, RuntimeControlEmission, RuntimeControlEventRequest,
-        RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeDiagnostic,
+        RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeDiagnostic, ViewState,
     };
 
-    use super::{HistoryEntry, RuntimeSession};
+    use super::{
+        HistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest, RuntimePatchResponse,
+        RuntimeSession, RuntimeViewPatch, RuntimeViewPatchOperation,
+    };
 
     #[test]
     fn invalid_registry_load_returns_diagnostics_without_revision_change() {
@@ -837,8 +1112,8 @@ mod tests {
         let response = session.load_project(request);
 
         assert!(!response.ok);
-        assert!(!response.loaded);
-        assert_eq!(response.session_revision, 0);
+        assert!(!response.snapshot.loaded());
+        assert_eq!(response.snapshot.session_revision, 0);
         assert!(
             response.diagnostics[0]
                 .message
@@ -876,7 +1151,28 @@ mod tests {
         let response = session.plan_current();
 
         assert!(!response.ok);
-        assert!(response.plan.is_none());
+        assert!(response.snapshot.plan.is_none());
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("missing node definition")
+        );
+    }
+
+    #[test]
+    fn validate_current_reports_invalid_stored_project() {
+        let mut session = RuntimeSession {
+            graph: Some(sample_project().graph),
+            registry: Some(NodeRegistry::new()),
+            plan: None,
+            diagnostics: Vec::new(),
+            revision: 1,
+            ..RuntimeSession::default()
+        };
+
+        let response = session.validate_current();
+
+        assert!(!response.ok);
         assert!(
             response.diagnostics[0]
                 .message
@@ -894,7 +1190,7 @@ mod tests {
         let response = session.run_current(2);
 
         assert!(response.ok);
-        assert!(response.plan.is_some());
+        assert!(response.snapshot.plan.is_some());
         assert_eq!(response.report.unwrap().frame_count, 2);
     }
 
@@ -1289,6 +1585,23 @@ mod tests {
     }
 
     #[test]
+    fn graph_and_view_state_accessors_return_loaded_project_copies() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+
+        assert!(loaded.ok);
+        assert_eq!(session.graph().unwrap().id, "minimal-value");
+        assert!(
+            session
+                .view_state()
+                .unwrap()
+                .canvas
+                .nodes
+                .contains_key("value_1")
+        );
+    }
+
+    #[test]
     fn patch_without_loaded_session_returns_error() {
         let mut session = RuntimeSession::default();
 
@@ -1297,8 +1610,8 @@ mod tests {
         assert!(!response.ok);
         assert!(!response.applied);
         assert!(!response.conflict);
-        assert!(response.graph.is_none());
-        assert!(!response.session.loaded);
+        assert!(response.snapshot.project.is_none());
+        assert!(!response.snapshot.loaded());
         assert!(
             response.diagnostics[0]
                 .message
@@ -1317,32 +1630,93 @@ mod tests {
         assert!(response.ok);
         assert!(response.applied);
         assert!(!response.conflict);
+        let entry = latest_history_entry(&response).unwrap();
+        assert_eq!(entry.kind, RuntimeHistoryEntryKind::Apply);
+        assert_eq!(entry.sequence, 1);
         assert_eq!(
-            response.event.as_ref().unwrap().kind,
-            GraphPatchEventKind::Apply
+            entry.mutation.graph_patch.as_ref().unwrap().base_revision,
+            "1"
         );
-        assert_eq!(response.event.as_ref().unwrap().sequence, 1);
-        assert_eq!(response.event.as_ref().unwrap().revision_before, "1");
-        assert_eq!(response.event.as_ref().unwrap().revision_after, "2");
         assert_eq!(
-            response.event.as_ref().unwrap().inverse_patch.base_revision,
+            entry
+                .inverse_mutation
+                .graph_patch
+                .as_ref()
+                .unwrap()
+                .base_revision,
             "2"
         );
-        assert_eq!(response.history.events.len(), 1);
+        assert_eq!((response.history.entries).len(), 1);
         assert_eq!(response.history.undo_depth, 1);
         assert_eq!(response.history.redo_depth, 0);
-        assert_eq!(response.graph.as_ref().unwrap().revision, "2");
-        assert_eq!(response.session.graph_revision.as_deref(), Some("2"));
-        assert_eq!(response.session.session_revision, 2);
-        assert_eq!(response.session.plan.as_ref().unwrap().graph_revision, "2");
+        assert_eq!(patch_graph(&response).revision, "2");
+        assert_eq!(response.snapshot.graph_revision(), Some("2"));
+        assert_eq!(response.snapshot.session_revision, 2);
+        assert_eq!(response.snapshot.plan.as_ref().unwrap().graph_revision, "2");
         assert_eq!(
-            response.graph.as_ref().unwrap().nodes[0].params["value"],
+            patch_graph(&response).nodes[0].params["value"],
             Value::from(0.75)
         );
         assert_eq!(
             session.control_state.value_for_node("value_1"),
             Some(&ControlValue::float(0.75))
         );
+    }
+
+    #[test]
+    fn unresolved_object_loads_session_with_error_diagnostic() {
+        let mut session = RuntimeSession::default();
+
+        let response = session.load_project(unresolved_project());
+
+        assert!(response.ok);
+        assert!(response.snapshot.loaded());
+        assert_eq!(response.diagnostics.len(), 1);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("unresolved object user.manipulator")
+        );
+        assert_eq!(session.snapshot().diagnostics, response.diagnostics);
+
+        let plan = session.plan_current();
+        assert!(plan.ok);
+        assert_eq!(plan.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn replace_node_with_unresolved_object_applies_with_error_diagnostic() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project_with_unresolved_definition());
+        assert!(loaded.ok);
+
+        let response = session.apply_patch(graph_patch(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "replace-target-unresolved",
+          "baseRevision": "1",
+          "ops": [
+            {
+              "op": "replaceNode",
+              "nodeId": "target_1",
+              "node": unresolved_node_json("target_1", "user.manipulator"),
+              "edgePolicy": "removeInvalidEdges"
+            }
+          ]
+        })));
+
+        assert!(response.ok);
+        assert!(response.applied);
+        assert!(response.snapshot.loaded());
+        assert_eq!(patch_graph(&response).revision, "2");
+        assert!(patch_graph(&response).edges.is_empty());
+        assert_eq!(response.diagnostics.len(), 1);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("unresolved object user.manipulator")
+        );
+        assert_eq!(session.snapshot().diagnostics, response.diagnostics);
     }
 
     #[test]
@@ -1356,10 +1730,10 @@ mod tests {
         assert!(!response.ok);
         assert!(!response.applied);
         assert!(response.conflict);
-        assert!(response.event.is_none());
-        assert!(response.history.events.is_empty());
-        assert_eq!(response.graph.as_ref().unwrap().revision, "1");
-        assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
+        assert!(latest_history_entry(&response).is_none());
+        assert!((response.history.entries).is_empty());
+        assert_eq!(patch_graph(&response).revision, "1");
+        assert_eq!(snapshot.graph_revision(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
         assert!(
             response.diagnostics[0]
@@ -1380,12 +1754,12 @@ mod tests {
         assert!(!duplicate.ok);
         assert!(!duplicate.applied);
         assert!(!duplicate.conflict);
-        assert!(duplicate.event.is_none());
-        assert!(duplicate.history.events.is_empty());
+        assert!(latest_history_entry(&duplicate).is_none());
+        assert!((duplicate.history.entries).is_empty());
         assert!(duplicate.diagnostics[0].message.contains("already exists"));
         assert!(!missing.ok);
         assert!(missing.diagnostics[0].message.contains("does not exist"));
-        assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
+        assert_eq!(snapshot.graph_revision(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
     }
 
@@ -1412,7 +1786,7 @@ mod tests {
                 || diagnostics.contains("not an input port"),
             "{diagnostics}"
         );
-        assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
+        assert_eq!(snapshot.graph_revision(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
     }
 
@@ -1432,7 +1806,7 @@ mod tests {
                 .message
                 .contains("missing node definition")
         );
-        assert_eq!(snapshot.graph_revision.as_deref(), Some("1"));
+        assert_eq!(snapshot.graph_revision(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
     }
 
@@ -1452,7 +1826,7 @@ mod tests {
         })));
 
         assert!(response.ok);
-        let graph = response.graph.as_ref().unwrap();
+        let graph = patch_graph(&response);
         assert_eq!(graph.revision, "2");
         assert!(graph.nodes.iter().all(|node| node.id != "value_1"));
         assert!(graph.edges.is_empty());
@@ -1468,7 +1842,7 @@ mod tests {
         let response = session.apply_patch(set_value_patch("rev_0001", 0.75));
 
         assert!(response.ok);
-        assert_eq!(response.graph.as_ref().unwrap().revision, "rev_0001+1");
+        assert_eq!(patch_graph(&response).revision, "rev_0001+1");
     }
 
     #[test]
@@ -1479,54 +1853,64 @@ mod tests {
         let undo = session.undo();
         let redo = session.redo();
 
-        assert_eq!(history.schema, "skenion.graph.patch.history");
+        assert_eq!(history.schema, "skenion.runtime.history");
         assert!(!history.can_undo);
         assert!(!history.can_redo);
         assert!(!undo.ok);
         assert!(!undo.applied);
-        assert!(undo.event.is_none());
+        assert!(latest_history_entry(&undo).is_none());
         assert!(undo.diagnostics[0].message.contains("available to undo"));
         assert!(!redo.ok);
         assert!(!redo.applied);
-        assert!(redo.event.is_none());
+        assert!(latest_history_entry(&redo).is_none());
         assert!(redo.diagnostics[0].message.contains("available to redo"));
     }
 
     #[test]
-    fn undo_after_patch_restores_graph_and_creates_event() {
+    fn undo_after_patch_restores_graph_and_records_history_entry() {
         let mut session = RuntimeSession::default();
         session.load_project(sample_project());
         let applied = session.apply_patch(set_value_patch("1", 0.75));
-        let apply_event_id = applied.event.as_ref().unwrap().id.clone();
+        let apply_event_id = latest_history_entry(&applied).unwrap().id.clone();
 
         let undone = session.undo();
 
         assert!(undone.ok);
         assert!(undone.applied);
-        assert_eq!(undone.graph.as_ref().unwrap().revision, "3");
-        assert!(
-            !undone.graph.as_ref().unwrap().nodes[0]
-                .params
-                .contains_key("value")
-        );
-        assert_eq!(undone.session.session_revision, 3);
+        assert_eq!(patch_graph(&undone).revision, "3");
+        assert!(!patch_graph(&undone).nodes[0].params.contains_key("value"));
+        assert_eq!(undone.snapshot.session_revision, 3);
+        let undo_entry = latest_history_entry(&undone).unwrap();
+        assert_eq!(undo_entry.kind, RuntimeHistoryEntryKind::Undo);
         assert_eq!(
-            undone.event.as_ref().unwrap().kind,
-            GraphPatchEventKind::Undo
-        );
-        assert_eq!(
-            undone.event.as_ref().unwrap().subject_event_id.as_deref(),
+            undo_entry.subject_event_id.as_deref(),
             Some(apply_event_id.as_str())
         );
-        assert_eq!(undone.event.as_ref().unwrap().revision_before, "2");
-        assert_eq!(undone.event.as_ref().unwrap().revision_after, "3");
-        assert_eq!(undone.history.events.len(), 2);
+        assert_eq!(
+            undo_entry
+                .mutation
+                .graph_patch
+                .as_ref()
+                .unwrap()
+                .base_revision,
+            "2"
+        );
+        assert_eq!(
+            undo_entry
+                .inverse_mutation
+                .graph_patch
+                .as_ref()
+                .unwrap()
+                .base_revision,
+            "3"
+        );
+        assert_eq!((undone.history.entries).len(), 2);
         assert_eq!(undone.history.undo_depth, 0);
         assert_eq!(undone.history.redo_depth, 1);
     }
 
     #[test]
-    fn redo_after_undo_reapplies_graph_and_creates_event() {
+    fn redo_after_undo_reapplies_graph_and_records_history_entry() {
         let mut session = RuntimeSession::default();
         session.load_project(sample_project());
         session.apply_patch(set_value_patch("1", 0.75));
@@ -1536,21 +1920,332 @@ mod tests {
 
         assert!(redone.ok);
         assert!(redone.applied);
-        assert_eq!(redone.graph.as_ref().unwrap().revision, "4");
+        assert_eq!(patch_graph(&redone).revision, "4");
         assert_eq!(
-            redone.graph.as_ref().unwrap().nodes[0].params["value"],
+            patch_graph(&redone).nodes[0].params["value"],
             Value::from(0.75)
         );
-        assert_eq!(redone.session.session_revision, 4);
+        assert_eq!(redone.snapshot.session_revision, 4);
+        let redo_entry = latest_history_entry(&redone).unwrap();
+        assert_eq!(redo_entry.kind, RuntimeHistoryEntryKind::Redo);
         assert_eq!(
-            redone.event.as_ref().unwrap().kind,
-            GraphPatchEventKind::Redo
+            redo_entry
+                .mutation
+                .graph_patch
+                .as_ref()
+                .unwrap()
+                .base_revision,
+            "3"
         );
-        assert_eq!(redone.event.as_ref().unwrap().revision_before, "3");
-        assert_eq!(redone.event.as_ref().unwrap().revision_after, "4");
-        assert_eq!(redone.history.events.len(), 3);
+        assert_eq!(
+            redo_entry
+                .inverse_mutation
+                .graph_patch
+                .as_ref()
+                .unwrap()
+                .base_revision,
+            "4"
+        );
+        assert_eq!((redone.history.entries).len(), 3);
         assert_eq!(redone.history.undo_depth, 1);
         assert_eq!(redone.history.redo_depth, 0);
+    }
+
+    #[test]
+    fn view_state_patch_undo_redo_moves_once_from_start_to_end() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+        assert!(loaded.ok);
+        let start = loaded
+            .snapshot
+            .view_state()
+            .cloned()
+            .expect("loaded view state");
+        let mut moved = start.clone();
+        moved.canvas.nodes.get_mut("value_1").unwrap().x += 240.0;
+        moved.canvas.nodes.get_mut("value_1").unwrap().y += 120.0;
+
+        let applied = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: "value_1".to_owned(),
+                    from: Some(start.canvas.nodes["value_1"].clone()),
+                    to: moved.canvas.nodes["value_1"].clone(),
+                }],
+            }),
+            client_id: Some("studio-a".to_owned()),
+            description: Some("drag value_1".to_owned()),
+        });
+
+        assert!(applied.ok);
+        assert!(applied.applied);
+        let apply_entry = latest_history_entry(&applied).unwrap();
+        assert_eq!(apply_entry.kind, RuntimeHistoryEntryKind::Apply);
+        assert!(apply_entry.mutation.graph_patch.is_none());
+        assert!(apply_entry.mutation.view_patch.is_some());
+        assert_eq!(applied.history.undo_depth, 1);
+        assert_eq!(applied.snapshot.view_revision, 2);
+        assert_eq!(patch_view_state(&applied), &moved);
+
+        let undone = session.undo();
+
+        assert!(undone.ok);
+        assert!(undone.applied);
+        let undo_entry = latest_history_entry(&undone).unwrap();
+        assert_eq!(undo_entry.kind, RuntimeHistoryEntryKind::Undo);
+        assert!(undo_entry.mutation.graph_patch.is_none());
+        assert!(undo_entry.mutation.view_patch.is_some());
+        assert_eq!(undone.history.undo_depth, 0);
+        assert_eq!(undone.history.redo_depth, 1);
+        assert_eq!(undone.snapshot.view_revision, 3);
+        assert_eq!(patch_view_state(&undone), &start);
+
+        let redone = session.redo();
+
+        assert!(redone.ok);
+        assert!(redone.applied);
+        let redo_entry = latest_history_entry(&redone).unwrap();
+        assert_eq!(redo_entry.kind, RuntimeHistoryEntryKind::Redo);
+        assert!(redo_entry.mutation.graph_patch.is_none());
+        assert!(redo_entry.mutation.view_patch.is_some());
+        assert_eq!(redone.history.undo_depth, 1);
+        assert_eq!(redone.history.redo_depth, 0);
+        assert_eq!(redone.snapshot.view_revision, 4);
+        assert_eq!(patch_view_state(&redone), &moved);
+    }
+
+    #[test]
+    fn empty_and_conflicting_view_mutations_are_rejected_without_history() {
+        let mut session = RuntimeSession::default();
+        assert!(session.load_project(sample_project()).ok);
+
+        let empty = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: None,
+            client_id: None,
+            description: None,
+        });
+        let conflict = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 99,
+                ops: Vec::new(),
+            }),
+            client_id: None,
+            description: None,
+        });
+
+        assert!(!empty.ok);
+        assert!(!empty.applied);
+        assert!(empty.diagnostics[0].message.contains("did not include"));
+        assert!(!conflict.ok);
+        assert!(conflict.conflict);
+        assert!(conflict.diagnostics[0].message.contains("baseViewRevision"));
+        assert_eq!(conflict.history.entries.len(), 0);
+    }
+
+    #[test]
+    fn view_patch_set_node_view_success_errors_and_noop_paths() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+        assert!(loaded.ok);
+        let start = loaded
+            .snapshot
+            .view_state()
+            .cloned()
+            .expect("loaded view state");
+        let value_view = start.canvas.nodes["value_1"].clone();
+        let mut moved_view = value_view.clone();
+        moved_view.x += 80.0;
+
+        let set = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "value_1".to_owned(),
+                    view: moved_view.clone(),
+                }],
+            }),
+            client_id: None,
+            description: Some("set node view".to_owned()),
+        });
+        assert!(set.ok);
+        assert!(set.applied);
+        assert_eq!(patch_view_state(&set).canvas.nodes["value_1"], moved_view);
+
+        let noop = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 2,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "value_1".to_owned(),
+                    view: moved_view.clone(),
+                }],
+            }),
+            client_id: None,
+            description: None,
+        });
+        assert!(noop.ok);
+        assert!(!noop.applied);
+
+        let missing_node = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 2,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "missing".to_owned(),
+                    view: value_view.clone(),
+                }],
+            }),
+            client_id: None,
+            description: None,
+        });
+        assert!(!missing_node.ok);
+        assert!(
+            missing_node.diagnostics[0]
+                .message
+                .contains("does not exist")
+        );
+    }
+
+    #[test]
+    fn view_patch_helper_reports_missing_view_and_from_mismatch() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+        assert!(loaded.ok);
+        let graph = session.graph().expect("loaded graph");
+        let mut view_state = loaded
+            .snapshot
+            .view_state()
+            .cloned()
+            .expect("loaded view state");
+        let value_view = view_state.canvas.nodes["value_1"].clone();
+        let mut moved_view = value_view.clone();
+        moved_view.y += 80.0;
+
+        view_state.canvas.nodes.remove("value_1");
+        let missing_set_view = super::apply_view_patch_to_view_state(
+            &graph,
+            view_state.clone(),
+            &RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "value_1".to_owned(),
+                    view: moved_view.clone(),
+                }],
+            },
+        );
+        let missing_move_view = super::apply_view_patch_to_view_state(
+            &graph,
+            view_state,
+            &RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: "value_1".to_owned(),
+                    from: None,
+                    to: moved_view.clone(),
+                }],
+            },
+        );
+        let missing_move_node = super::apply_view_patch_to_view_state(
+            &graph,
+            loaded.snapshot.view_state().cloned().unwrap(),
+            &RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: "missing".to_owned(),
+                    from: None,
+                    to: moved_view.clone(),
+                }],
+            },
+        );
+
+        let mut mismatched_from = value_view.clone();
+        mismatched_from.x += 1.0;
+        let from_mismatch = super::apply_view_patch_to_view_state(
+            &graph,
+            loaded.snapshot.view_state().cloned().unwrap(),
+            &RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: "value_1".to_owned(),
+                    from: Some(mismatched_from),
+                    to: moved_view,
+                }],
+            },
+        );
+
+        assert!(
+            missing_set_view
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("has no view state")
+        );
+        assert!(
+            missing_move_view
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("has no view state")
+        );
+        assert!(
+            missing_move_node
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("does not exist")
+        );
+        assert!(
+            from_mismatch
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("from view does not match")
+        );
+    }
+
+    #[test]
+    fn combined_graph_and_noop_view_mutation_keeps_view_revision_stable() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+        assert!(loaded.ok);
+        let value_view = loaded.snapshot.view_state().unwrap().canvas.nodes["value_1"].clone();
+
+        let response = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: Some(set_value_patch("1", 0.5)),
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "value_1".to_owned(),
+                    view: value_view,
+                }],
+            }),
+            client_id: None,
+            description: Some("set graph without moving view".to_owned()),
+        });
+
+        assert!(response.ok);
+        assert!(response.applied);
+        assert_eq!(response.snapshot.graph_revision(), Some("2"));
+        assert_eq!(response.snapshot.view_revision, 1);
+        assert_eq!(
+            latest_history_entry(&response)
+                .unwrap()
+                .inverse_mutation
+                .view_patch
+                .as_ref()
+                .unwrap()
+                .base_view_revision,
+            1
+        );
     }
 
     #[test]
@@ -1564,8 +2259,8 @@ mod tests {
         let applied = session.apply_patch(set_value_patch("3", 0.25));
 
         assert!(applied.ok);
-        assert_eq!(applied.graph.as_ref().unwrap().revision, "4");
-        assert_eq!(applied.history.events.len(), 3);
+        assert_eq!(patch_graph(&applied).revision, "4");
+        assert_eq!((applied.history.entries).len(), 3);
         assert_eq!(applied.history.undo_depth, 1);
         assert_eq!(applied.history.redo_depth, 0);
         assert!(!applied.history.can_redo);
@@ -1584,22 +2279,63 @@ mod tests {
             { "op": "removeNode", "nodeId": "value_1" }
           ]
         })));
-        assert!(removed.graph.as_ref().unwrap().edges.is_empty());
+        assert!(patch_graph(&removed).edges.is_empty());
 
         let undone = session.undo();
 
         assert!(undone.ok);
-        assert_eq!(undone.graph.as_ref().unwrap().revision, "3");
+        assert_eq!(patch_graph(&undone).revision, "3");
         assert!(
-            undone
-                .graph
-                .as_ref()
-                .unwrap()
+            patch_graph(&undone)
                 .nodes
                 .iter()
                 .any(|node| node.id == "value_1")
         );
-        assert_eq!(undone.graph.as_ref().unwrap().edges.len(), 1);
+        assert_eq!(patch_graph(&undone).edges.len(), 1);
+    }
+
+    #[test]
+    fn global_undo_after_remote_node_delete_restores_delete_before_connection_undo() {
+        let mut project = sample_project();
+        project.graph.edges.clear();
+        let mut session = RuntimeSession::default();
+        assert!(session.load_project(project).ok);
+        let connected = session.apply_patch(duplicate_edge_patch());
+        assert!(connected.ok);
+        assert_eq!(patch_graph(&connected).edges.len(), 1);
+        let deleted = session.apply_patch(graph_patch(json!({
+          "schema": "skenion.graph.patch",
+          "schemaVersion": "0.1.0",
+          "id": "delete-target",
+          "baseRevision": "2",
+          "ops": [
+            { "op": "removeNode", "nodeId": "target_1" }
+          ]
+        })));
+        assert!(deleted.ok);
+        assert!(patch_graph(&deleted).edges.is_empty());
+
+        let undo_delete = session.undo();
+
+        assert!(undo_delete.ok);
+        assert!(
+            patch_graph(&undo_delete)
+                .nodes
+                .iter()
+                .any(|node| node.id == "target_1")
+        );
+        assert_eq!(patch_graph(&undo_delete).edges.len(), 1);
+
+        let undo_connect = session.undo();
+
+        assert!(undo_connect.ok);
+        assert!(
+            patch_graph(&undo_connect)
+                .nodes
+                .iter()
+                .any(|node| node.id == "target_1")
+        );
+        assert!(patch_graph(&undo_connect).edges.is_empty());
     }
 
     #[test]
@@ -1613,29 +2349,29 @@ mod tests {
         let second_undo = session.undo();
 
         assert!(first_undo.ok);
-        assert_eq!(first_undo.graph.as_ref().unwrap().revision, "4");
+        assert_eq!(patch_graph(&first_undo).revision, "4");
         assert_eq!(
-            first_undo.graph.as_ref().unwrap().nodes[0].params["value"],
+            patch_graph(&first_undo).nodes[0].params["value"],
             Value::from(0.75)
         );
         assert!(second_undo.ok);
-        assert_eq!(second_undo.graph.as_ref().unwrap().revision, "5");
+        assert_eq!(patch_graph(&second_undo).revision, "5");
         assert!(
-            !second_undo.graph.as_ref().unwrap().nodes[0]
+            !patch_graph(&second_undo).nodes[0]
                 .params
                 .contains_key("value")
         );
-        assert_eq!(second_undo.history.events.len(), 4);
+        assert_eq!((second_undo.history.entries).len(), 4);
         assert_eq!(second_undo.history.redo_depth, 2);
     }
 
     #[test]
     fn failed_history_operations_do_not_mutate_stacks_or_session() {
         let mut no_loaded = RuntimeSession::default();
-        no_loaded.undo_stack.push(HistoryEntry {
+        no_loaded.undo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad".to_owned(),
-            patch: set_value_patch("1", 0.75),
-            inverse_patch: set_value_patch("1", 0.5),
+            mutation: graph_mutation(set_value_patch("1", 0.75)),
+            inverse_mutation: graph_mutation(set_value_patch("1", 0.5)),
         });
         let no_loaded_response = no_loaded.undo();
         assert!(!no_loaded_response.ok);
@@ -1648,25 +2384,25 @@ mod tests {
 
         let mut invalid_inverse = RuntimeSession::default();
         invalid_inverse.load_project(sample_project());
-        invalid_inverse.undo_stack.push(HistoryEntry {
+        invalid_inverse.undo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad_inverse".to_owned(),
-            patch: set_value_patch("1", 0.75),
-            inverse_patch: missing_node_patch(),
+            mutation: graph_mutation(set_value_patch("1", 0.75)),
+            inverse_mutation: graph_mutation(missing_node_patch()),
         });
         let invalid_inverse_response = invalid_inverse.undo();
         assert!(!invalid_inverse_response.ok);
         assert_eq!(invalid_inverse_response.history.undo_depth, 1);
         assert_eq!(
-            invalid_inverse_response.session.graph_revision.as_deref(),
+            invalid_inverse_response.snapshot.graph_revision(),
             Some("1")
         );
 
         let mut invalid_redo = RuntimeSession::default();
         invalid_redo.load_project(sample_project());
-        invalid_redo.redo_stack.push(HistoryEntry {
+        invalid_redo.redo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad_redo".to_owned(),
-            patch: missing_definition_node_patch(),
-            inverse_patch: set_value_patch("1", 0.5),
+            mutation: graph_mutation(missing_definition_node_patch()),
+            inverse_mutation: graph_mutation(set_value_patch("1", 0.5)),
         });
         let invalid_redo_response = invalid_redo.redo();
         assert!(!invalid_redo_response.ok);
@@ -1692,15 +2428,48 @@ mod tests {
 
         assert!(!response.ok);
         assert!(!response.applied);
-        assert!(response.event.is_none());
-        assert_eq!(response.history.events.len(), 0);
-        assert_eq!(response.graph.as_ref().unwrap().revision, "1");
-        assert_eq!(response.session.graph_revision.as_deref(), Some("1"));
+        assert!(latest_history_entry(&response).is_none());
+        assert_eq!((response.history.entries).len(), 0);
+        assert_eq!(patch_graph(&response).revision, "1");
+        assert_eq!(response.snapshot.graph_revision(), Some("1"));
         assert!(response.diagnostics[0].message.contains("unsupported op"));
     }
 
     fn graph_patch(value: Value) -> GraphPatch {
         serde_json::from_value(value).expect("patch should parse")
+    }
+
+    fn patch_graph(response: &RuntimePatchResponse) -> &GraphDocument {
+        &response
+            .snapshot
+            .project
+            .as_ref()
+            .expect("patch response should include project")
+            .graph
+    }
+
+    fn patch_view_state(response: &RuntimePatchResponse) -> &ViewState {
+        &response
+            .snapshot
+            .project
+            .as_ref()
+            .expect("patch response should include project")
+            .view_state
+    }
+
+    fn latest_history_entry(
+        response: &RuntimePatchResponse,
+    ) -> Option<&super::RuntimeHistoryEntry> {
+        response.history.entries.last()
+    }
+
+    fn graph_mutation(patch: GraphPatch) -> RuntimeMutationRequest {
+        RuntimeMutationRequest {
+            graph_patch: Some(patch),
+            view_patch: None,
+            client_id: None,
+            description: None,
+        }
     }
 
     fn set_value_patch(base_revision: &str, value: f64) -> GraphPatch {
@@ -1843,6 +2612,28 @@ mod tests {
         serde_json::from_value(sample_project_json()).expect("sample project should parse")
     }
 
+    fn sample_project_with_unresolved_definition() -> ProjectRequest {
+        let mut value = sample_project_json();
+        value["nodes"]
+            .as_array_mut()
+            .expect("nodes should be an array")
+            .push(unresolved_definition_json());
+        serde_json::from_value(value).expect("sample project should parse")
+    }
+
+    fn unresolved_project() -> ProjectRequest {
+        let mut value = sample_project_json();
+        value["graph"]["nodes"]
+            .as_array_mut()
+            .expect("graph nodes should be an array")
+            .push(unresolved_node_json("unresolved_1", "user.manipulator"));
+        value["nodes"]
+            .as_array_mut()
+            .expect("nodes should be an array")
+            .push(unresolved_definition_json());
+        serde_json::from_value(value).expect("unresolved project should parse")
+    }
+
     fn object_routing_project() -> ProjectRequest {
         let mut value = sample_project_json();
         value["graph"]["nodes"][0]["params"] = json!({ "sendName": "speed" });
@@ -1919,5 +2710,35 @@ mod tests {
             "type": { "flow": "value", "dataKind": "number.float" }
           }
         ])
+    }
+
+    fn unresolved_node_json(id: &str, object_text: &str) -> Value {
+        json!({
+          "id": id,
+          "kind": "core.unresolved-object",
+          "kindVersion": "0.1.0",
+          "params": {
+            "objectText": object_text,
+            "diagnosticMessage": format!("{object_text} is not available in the local runtime registry."),
+            "requestedKind": object_text
+          },
+          "ports": []
+        })
+    }
+
+    fn unresolved_definition_json() -> Value {
+        json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.unresolved-object",
+          "version": "0.1.0",
+          "displayName": "Unresolved Object",
+          "category": "Diagnostics",
+          "ports": [],
+          "execution": { "model": "event" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": ["diagnostic.unresolved-object.v0.1"]
+        })
     }
 }

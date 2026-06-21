@@ -11,25 +11,28 @@ use std::{
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{HeaderValue, Method, header::CONTENT_TYPE},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio_stream::{Stream, StreamExt, wrappers::IntervalStream};
+use tokio::sync::broadcast;
+use tokio_stream::{
+    Stream, StreamExt,
+    wrappers::{BroadcastStream, IntervalStream, errors::BroadcastStreamRecvError},
+};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    ClockSourceListResponse, ClockSourceManager, ClockSourceSnapshotResponse, DummyExecutionReport,
-    ExecutionPlan, GeneratedShaderResponse, GraphDocument, GraphPatch, MidiClockSourceStartRequest,
-    MidiClockSourceStartResponse, MidiClockSourceStopRequest, MidiClockSourceStopResponse,
-    MidiInputListResponse, NodeDefinition, NodeRegistry, PreviewDocument, PreviewManager,
-    ProjectRequestV02, RunProjectRequestV02, RuntimeControlEventRequest,
-    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlStateResponse, RuntimePreviewStartRequest, RuntimeSession,
-    RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
-    ShaderDiagnosticSource, build_execution_plan, build_execution_plan_v02,
+    DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, GraphDocument, NodeDefinition,
+    NodeRegistry, PreviewDocument, PreviewManager, ProjectRequestV02, RunProjectRequestV02,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
+    RuntimeControlReadResponse, RuntimeControlStateResponse, RuntimeIoDeviceListResponse,
+    RuntimeIoDeviceManager, RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest,
+    RuntimePreviewStartRequest, RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest,
+    ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource, ViewState,
+    build_execution_plan, build_execution_plan_v02,
     generated_shader_response_from_preview_document, run_dummy_execution, validate_project,
     validate_project_v02,
 };
@@ -37,12 +40,15 @@ use crate::{
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 3761;
+const MAX_ASSET_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRequest {
     pub graph: GraphDocument,
     pub nodes: Vec<NodeDefinition>,
+    #[serde(default)]
+    pub view_state: Option<ViewState>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,14 +85,41 @@ pub struct RuntimeApiResponse {
     pub report: Option<DummyExecutionReport>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSessionEvent {
+    pub schema: &'static str,
+    pub schema_version: &'static str,
+    pub id: String,
+    pub sequence: u64,
+    pub kind: RuntimeSessionEventKind,
+    pub snapshot: crate::RuntimeSessionSnapshot,
+    pub history: crate::RuntimeHistory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<crate::RuntimeHistoryEntry>,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeSessionEventKind {
+    Snapshot,
+    Load,
+    Clear,
+    Mutate,
+    Undo,
+    Redo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagnosticSeverity {
     Error,
@@ -97,19 +130,27 @@ pub enum DiagnosticSeverity {
 #[derive(Clone)]
 pub struct RuntimeServerState {
     pub session: Arc<RwLock<RuntimeSession>>,
+    pub session_events: broadcast::Sender<RuntimeSessionEvent>,
+    pub session_event_sequence: Arc<Mutex<u64>>,
     pub preview: Arc<Mutex<PreviewManager>>,
     pub assets: Arc<RwLock<RuntimeAssetStore>>,
-    pub clock_sources: Arc<ClockSourceManager>,
+    pub io_devices: Arc<RuntimeIoDeviceManager>,
+    pub logs: Arc<RuntimeLogStore>,
     pub started_at: Instant,
 }
 
 impl Default for RuntimeServerState {
     fn default() -> Self {
+        let logs = Arc::new(RuntimeLogStore::default());
+        let (session_events, _) = broadcast::channel(256);
         Self {
             session: Arc::new(RwLock::new(RuntimeSession::default())),
+            session_events,
+            session_event_sequence: Arc::new(Mutex::new(1)),
             preview: Arc::new(Mutex::new(PreviewManager::from_env())),
             assets: Arc::new(RwLock::new(RuntimeAssetStore::default())),
-            clock_sources: Arc::new(ClockSourceManager::default()),
+            io_devices: Arc::new(RuntimeIoDeviceManager::new()),
+            logs,
             started_at: Instant::now(),
         }
     }
@@ -163,21 +204,19 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v0/runtime/info", get(runtime_info))
-        .route("/v0/clock/sources", get(clock_sources))
-        .route("/v0/clock/sources/{source_id}", get(clock_source))
-        .route("/v0/clock/midi/inputs", get(clock_midi_inputs))
-        .route("/v0/clock/midi/start", post(start_clock_midi))
-        .route("/v0/clock/midi/stop", post(stop_clock_midi))
+        .route("/v0/runtime/logs", get(runtime_logs))
+        .route("/v0/runtime/logs/stream", get(runtime_logs_stream))
+        .route("/v0/io/devices", get(io_devices))
         .route("/v0/validate", post(validate_project_endpoint))
         .route("/v0/plan", post(plan_project_endpoint))
         .route("/v0/run", post(run_project_endpoint))
         .route("/v0/session", get(session_snapshot).delete(clear_session))
-        .route("/v0/session/project", get(session_project))
+        .route("/v0/session/events/stream", get(session_events_stream))
         .route("/v0/session/load", post(load_session))
         .route("/v0/session/validate", post(validate_session))
         .route("/v0/session/plan", post(plan_session))
         .route("/v0/session/run", post(run_session))
-        .route("/v0/session/patch", post(patch_session))
+        .route("/v0/session/mutate", post(mutate_session))
         .route("/v0/session/history", get(session_history))
         .route("/v0/session/undo", post(undo_session))
         .route("/v0/session/redo", post(redo_session))
@@ -189,7 +228,10 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/preview/stop", post(stop_preview))
         .route("/v0/session/preview/restart", post(restart_preview))
         .route("/v0/session/render/generated-shader", get(generated_shader))
-        .route("/v0/assets/import", post(import_asset))
+        .route(
+            "/v0/assets/import",
+            post(import_asset).layer(DefaultBodyLimit::max(MAX_ASSET_UPLOAD_BYTES)),
+        )
         .route("/v0/assets", get(list_assets))
         .route("/v0/assets/{asset_id}", get(get_asset))
         .route("/v0/session/telemetry", get(session_telemetry))
@@ -222,10 +264,11 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "dummy.run",
             "session.load",
             "session.project",
+            "session.events.stream",
             "session.validate",
             "session.plan",
             "session.run",
-            "session.patch",
+            "session.mutate",
             "session.history",
             "session.undo",
             "session.redo",
@@ -246,48 +289,214 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "assets.get",
             "session.telemetry",
             "session.telemetry.stream",
-            "clock.sources",
-            "clock.sources.read",
-            "clock.midi.inputs",
-            "clock.midi.start",
-            "clock.midi.stop",
+            "runtime.logs",
+            "runtime.logs.stream",
+            "io.devices",
         ],
     })
 }
 
-async fn clock_sources(State(state): State<RuntimeServerState>) -> Json<ClockSourceListResponse> {
-    Json(state.clock_sources.list_sources())
+async fn runtime_logs(State(state): State<RuntimeServerState>) -> Json<RuntimeLogSnapshotResponse> {
+    Json(state.logs.snapshot())
 }
 
-async fn clock_source(
+async fn runtime_logs_stream(
     State(state): State<RuntimeServerState>,
-    Path(source_id): Path<String>,
-) -> Json<ClockSourceSnapshotResponse> {
-    Json(state.clock_sources.get_source(source_id))
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let receiver = state.logs.subscribe();
+    let replay = tokio_stream::iter(
+        state
+            .logs
+            .snapshot()
+            .events
+            .into_iter()
+            .map(runtime_log_event),
+    );
+    let live = BroadcastStream::new(receiver).map(runtime_log_broadcast_event);
+    Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
 }
 
-async fn clock_midi_inputs(State(state): State<RuntimeServerState>) -> Json<MidiInputListResponse> {
-    Json(state.clock_sources.list_midi_inputs())
+fn runtime_log_broadcast_event(
+    result: Result<crate::RuntimeLogEvent, BroadcastStreamRecvError>,
+) -> Result<Event, Infallible> {
+    match result {
+        Ok(event) => runtime_log_event(event),
+        Err(_) => Ok(Event::default()
+            .event("log-gap")
+            .data("runtime log stream receiver lagged")),
+    }
 }
 
-async fn start_clock_midi(
+fn runtime_log_event(event: crate::RuntimeLogEvent) -> Result<Event, Infallible> {
+    Ok(Event::default()
+        .event("log")
+        .json_data(event)
+        .expect("runtime log event should serialize"))
+}
+
+async fn session_events_stream(
     State(state): State<RuntimeServerState>,
-    Json(request): Json<MidiClockSourceStartRequest>,
-) -> Json<MidiClockSourceStartResponse> {
-    Json(state.clock_sources.start_midi_clock(request))
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let snapshot = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        session_event_from_session(
+            &state,
+            RuntimeSessionEventKind::Snapshot,
+            &session,
+            session.snapshot().diagnostics,
+        )
+    };
+    let replay = tokio_stream::iter([session_event(snapshot)]);
+    let live = BroadcastStream::new(state.session_events.subscribe()).map(session_broadcast_event);
+    Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
 }
 
-async fn stop_clock_midi(
-    State(state): State<RuntimeServerState>,
-    Json(request): Json<MidiClockSourceStopRequest>,
-) -> Json<MidiClockSourceStopResponse> {
-    Json(state.clock_sources.stop_midi_clock(request))
+fn session_broadcast_event(
+    result: Result<RuntimeSessionEvent, BroadcastStreamRecvError>,
+) -> Result<Event, Infallible> {
+    match result {
+        Ok(event) => session_event(event),
+        Err(_) => Ok(Event::default()
+            .event("session-gap")
+            .data("runtime session stream receiver lagged")),
+    }
+}
+
+fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
+    Ok(Event::default()
+        .event("session")
+        .json_data(event)
+        .expect("runtime session event should serialize"))
+}
+
+fn publish_session_event(
+    state: &RuntimeServerState,
+    kind: RuntimeSessionEventKind,
+    session: &RuntimeSession,
+    diagnostics: Vec<RuntimeDiagnostic>,
+) {
+    let event = session_event_from_session(state, kind, session, diagnostics);
+    let _ = state.session_events.send(event);
+}
+
+fn session_event_from_session(
+    state: &RuntimeServerState,
+    kind: RuntimeSessionEventKind,
+    session: &RuntimeSession,
+    diagnostics: Vec<RuntimeDiagnostic>,
+) -> RuntimeSessionEvent {
+    let sequence = next_session_event_sequence(state);
+    let history = session.history();
+    RuntimeSessionEvent {
+        schema: "skenion.runtime.session.event",
+        schema_version: "0.1.0",
+        id: format!("session_event_{sequence:06}"),
+        sequence,
+        kind,
+        snapshot: session.snapshot(),
+        mutation: history.entries.last().cloned(),
+        history,
+        diagnostics,
+        created_at: created_at_now(),
+    }
+}
+
+fn next_session_event_sequence(state: &RuntimeServerState) -> u64 {
+    let mut sequence = state
+        .session_event_sequence
+        .lock()
+        .expect("runtime session event sequence lock should not be poisoned");
+    let current = *sequence;
+    *sequence += 1;
+    current
+}
+
+fn runtime_api_json(
+    state: &RuntimeServerState,
+    response: RuntimeApiResponse,
+) -> Json<RuntimeApiResponse> {
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn session_json(
+    state: &RuntimeServerState,
+    response: crate::RuntimeSessionResponse,
+) -> Json<crate::RuntimeSessionResponse> {
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn patch_json(
+    state: &RuntimeServerState,
+    response: crate::RuntimePatchResponse,
+) -> Json<crate::RuntimePatchResponse> {
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn control_event_json(
+    state: &RuntimeServerState,
+    response: RuntimeControlEventResponse,
+) -> Json<RuntimeControlEventResponse> {
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn control_read_json(
+    state: &RuntimeServerState,
+    response: RuntimeControlReadResponse,
+) -> Json<RuntimeControlReadResponse> {
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn preview_status_json(
+    state: &RuntimeServerState,
+    response: crate::RuntimePreviewStatusResponse,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn asset_import_json(
+    state: &RuntimeServerState,
+    response: RuntimeAssetImportResponse,
+) -> Json<RuntimeAssetImportResponse> {
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn asset_get_json(
+    state: &RuntimeServerState,
+    response: RuntimeAssetGetResponse,
+) -> Json<RuntimeAssetGetResponse> {
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn generated_shader_json(
+    state: &RuntimeServerState,
+    response: GeneratedShaderResponse,
+) -> Json<GeneratedShaderResponse> {
+    state.logs.record_shader_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+async fn io_devices(State(state): State<RuntimeServerState>) -> Json<RuntimeIoDeviceListResponse> {
+    let response = state.io_devices.list_devices();
+    state.logs.record_io_diagnostics(&response.diagnostics);
+    Json(response)
 }
 
 async fn validate_project_endpoint(
+    State(state): State<RuntimeServerState>,
     Json(value): Json<serde_json::Value>,
 ) -> Json<RuntimeApiResponse> {
-    Json(match decode_project_payload(value) {
+    let response = match decode_project_payload(value) {
         Ok(ProjectPayload::V01(request)) => {
             match validate_project_request(&request.graph, request.nodes) {
                 Ok(()) => RuntimeApiResponse::ok(),
@@ -306,82 +515,109 @@ async fn validate_project_endpoint(
             }
         }
         Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
-    })
+    };
+    runtime_api_json(&state, response)
 }
 
-async fn plan_project_endpoint(Json(value): Json<serde_json::Value>) -> Json<RuntimeApiResponse> {
+async fn plan_project_endpoint(
+    State(state): State<RuntimeServerState>,
+    Json(value): Json<serde_json::Value>,
+) -> Json<RuntimeApiResponse> {
     match decode_project_payload(value) {
         Ok(ProjectPayload::V01(request)) => {
             let registry = match registry_from_nodes(request.nodes) {
                 Ok(registry) => registry,
-                Err(diagnostics) => return Json(RuntimeApiResponse::diagnostics(diagnostics)),
+                Err(diagnostics) => {
+                    return runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics));
+                }
             };
 
             if let Err(diagnostics) = validate_graph_with_registry(&request.graph, &registry) {
-                return Json(RuntimeApiResponse::diagnostics(diagnostics));
+                return runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics));
             }
 
             let plan = build_execution_plan(&request.graph, &registry)
                 .expect("validated project should plan");
-            Json(RuntimeApiResponse {
-                ok: true,
-                diagnostics: Vec::new(),
-                plan: Some(plan),
-                report: None,
-            })
+            runtime_api_json(
+                &state,
+                RuntimeApiResponse {
+                    ok: true,
+                    diagnostics: Vec::new(),
+                    plan: Some(plan),
+                    report: None,
+                },
+            )
         }
         Ok(ProjectPayload::V02(request)) => {
             match build_execution_plan_v02(&request.graph, &request.nodes) {
-                Ok((plan, diagnostics)) => Json(RuntimeApiResponse {
-                    ok: true,
-                    diagnostics,
-                    plan: Some(plan),
-                    report: None,
-                }),
-                Err(diagnostics) => Json(RuntimeApiResponse::diagnostics(diagnostics)),
+                Ok((plan, diagnostics)) => runtime_api_json(
+                    &state,
+                    RuntimeApiResponse {
+                        ok: true,
+                        diagnostics,
+                        plan: Some(plan),
+                        report: None,
+                    },
+                ),
+                Err(diagnostics) => {
+                    runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics))
+                }
             }
         }
-        Err(diagnostics) => Json(RuntimeApiResponse::diagnostics(diagnostics)),
+        Err(diagnostics) => runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics)),
     }
 }
 
-async fn run_project_endpoint(Json(value): Json<serde_json::Value>) -> Json<RuntimeApiResponse> {
+async fn run_project_endpoint(
+    State(state): State<RuntimeServerState>,
+    Json(value): Json<serde_json::Value>,
+) -> Json<RuntimeApiResponse> {
     match decode_run_project_payload(value) {
         Ok(RunProjectPayload::V01(request)) => {
             let registry = match registry_from_nodes(request.nodes) {
                 Ok(registry) => registry,
-                Err(diagnostics) => return Json(RuntimeApiResponse::diagnostics(diagnostics)),
+                Err(diagnostics) => {
+                    return runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics));
+                }
             };
 
             if let Err(diagnostics) = validate_graph_with_registry(&request.graph, &registry) {
-                return Json(RuntimeApiResponse::diagnostics(diagnostics));
+                return runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics));
             }
 
             let plan = build_execution_plan(&request.graph, &registry)
                 .expect("validated project should plan");
             let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
-            Json(RuntimeApiResponse {
-                ok: true,
-                diagnostics: Vec::new(),
-                plan: Some(plan),
-                report: Some(report),
-            })
+            runtime_api_json(
+                &state,
+                RuntimeApiResponse {
+                    ok: true,
+                    diagnostics: Vec::new(),
+                    plan: Some(plan),
+                    report: Some(report),
+                },
+            )
         }
         Ok(RunProjectPayload::V02(request)) => {
             match build_execution_plan_v02(&request.graph, &request.nodes) {
                 Ok((plan, diagnostics)) => {
                     let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
-                    Json(RuntimeApiResponse {
-                        ok: true,
-                        diagnostics,
-                        plan: Some(plan),
-                        report: Some(report),
-                    })
+                    runtime_api_json(
+                        &state,
+                        RuntimeApiResponse {
+                            ok: true,
+                            diagnostics,
+                            plan: Some(plan),
+                            report: Some(report),
+                        },
+                    )
                 }
-                Err(diagnostics) => Json(RuntimeApiResponse::diagnostics(diagnostics)),
+                Err(diagnostics) => {
+                    runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics))
+                }
             }
         }
-        Err(diagnostics) => Json(RuntimeApiResponse::diagnostics(diagnostics)),
+        Err(diagnostics) => runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics)),
     }
 }
 
@@ -395,16 +631,6 @@ async fn session_snapshot(
     Json(session.response(true, session.snapshot().diagnostics, None))
 }
 
-async fn session_project(
-    State(state): State<RuntimeServerState>,
-) -> Json<crate::RuntimeSessionProjectResponse> {
-    let session = state
-        .session
-        .read()
-        .expect("runtime session lock should not be poisoned");
-    Json(session.project_response())
-}
-
 async fn load_session(
     State(state): State<RuntimeServerState>,
     Json(request): Json<ProjectRequest>,
@@ -413,7 +639,16 @@ async fn load_session(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    Json(session.load_project(request))
+    let response = session.load_project(request);
+    if response.ok && response.snapshot.loaded() {
+        publish_session_event(
+            &state,
+            RuntimeSessionEventKind::Load,
+            &session,
+            response.diagnostics.clone(),
+        );
+    }
+    session_json(&state, response)
 }
 
 async fn validate_session(
@@ -423,7 +658,8 @@ async fn validate_session(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    Json(session.validate_current())
+    let response = session.validate_current();
+    session_json(&state, response)
 }
 
 async fn plan_session(
@@ -433,7 +669,8 @@ async fn plan_session(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    Json(session.plan_current())
+    let response = session.plan_current();
+    session_json(&state, response)
 }
 
 async fn run_session(
@@ -444,10 +681,11 @@ async fn run_session(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    Json(session.run_current(request.frames.unwrap_or(1)))
+    let response = session.run_current(request.frames.unwrap_or(1));
+    session_json(&state, response)
 }
 
-async fn patch_session(
+async fn mutate_session(
     State(state): State<RuntimeServerState>,
     Json(value): Json<serde_json::Value>,
 ) -> Json<crate::RuntimePatchResponse> {
@@ -455,24 +693,32 @@ async fn patch_session(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    let patch = match serde_json::from_value::<GraphPatch>(value) {
-        Ok(patch) => patch,
+    let mutation = match serde_json::from_value::<RuntimeMutationRequest>(value) {
+        Ok(mutation) => mutation,
         Err(error) => {
-            return Json(session.reject_patch(
+            let response = session.reject_patch(
                 false,
                 vec![RuntimeDiagnostic::error(format!(
-                    "invalid graph patch: {error}"
+                    "invalid runtime mutation: {error}"
                 ))],
-            ));
+            );
+            return patch_json(&state, response);
         }
     };
 
-    Json(session.apply_patch(patch))
+    let response = session.apply_mutation(mutation);
+    if response.ok && response.applied {
+        publish_session_event(
+            &state,
+            RuntimeSessionEventKind::Mutate,
+            &session,
+            response.diagnostics.clone(),
+        );
+    }
+    patch_json(&state, response)
 }
 
-async fn session_history(
-    State(state): State<RuntimeServerState>,
-) -> Json<crate::GraphPatchHistory> {
+async fn session_history(State(state): State<RuntimeServerState>) -> Json<crate::RuntimeHistory> {
     let session = state
         .session
         .read()
@@ -487,7 +733,16 @@ async fn undo_session(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    Json(session.undo())
+    let response = session.undo();
+    if response.ok && response.applied {
+        publish_session_event(
+            &state,
+            RuntimeSessionEventKind::Undo,
+            &session,
+            response.diagnostics.clone(),
+        );
+    }
+    patch_json(&state, response)
 }
 
 async fn redo_session(
@@ -497,7 +752,16 @@ async fn redo_session(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    Json(session.redo())
+    let response = session.redo();
+    if response.ok && response.applied {
+        publish_session_event(
+            &state,
+            RuntimeSessionEventKind::Redo,
+            &session,
+            response.diagnostics.clone(),
+        );
+    }
+    patch_json(&state, response)
 }
 
 async fn control_event(
@@ -528,7 +792,7 @@ async fn control_event(
         }
     }
 
-    Json(response)
+    control_event_json(&state, response)
 }
 
 fn add_preview_control_update_warning(response: &mut RuntimeControlEventResponse, error: String) {
@@ -557,7 +821,8 @@ async fn control_read(
         .session
         .read()
         .expect("runtime session lock should not be poisoned");
-    Json(session.read_control(request))
+    let response = session.read_control(request);
+    control_read_json(&state, response)
 }
 
 async fn clear_session(
@@ -580,7 +845,16 @@ async fn clear_session(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    Json(session.clear())
+    let response = session.clear();
+    if response.ok {
+        publish_session_event(
+            &state,
+            RuntimeSessionEventKind::Clear,
+            &session,
+            response.diagnostics.clone(),
+        );
+    }
+    session_json(&state, response)
 }
 
 async fn preview_status(
@@ -597,7 +871,8 @@ async fn preview_status(
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
-    Json(preview.status(snapshot))
+    let response = preview.status(snapshot);
+    preview_status_json(&state, response)
 }
 
 async fn start_preview(
@@ -618,7 +893,8 @@ async fn start_preview(
                 .preview
                 .lock()
                 .expect("runtime preview lock should not be poisoned");
-            return Json(preview.request_error(snapshot, diagnostic));
+            let response = preview.request_error(snapshot, diagnostic);
+            return preview_status_json(&state, response);
         }
     };
     let context = {
@@ -632,7 +908,8 @@ async fn start_preview(
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
-    Json(preview.start(context, snapshot, request.restart))
+    let response = preview.start(context, snapshot, request.restart);
+    preview_status_json(&state, response)
 }
 
 async fn restart_preview(
@@ -649,7 +926,8 @@ async fn restart_preview(
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
-    Json(preview.restart(context, snapshot))
+    let response = preview.restart(context, snapshot);
+    preview_status_json(&state, response)
 }
 
 async fn stop_preview(
@@ -666,7 +944,8 @@ async fn stop_preview(
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
-    Json(preview.stop(snapshot))
+    let response = preview.stop(snapshot);
+    preview_status_json(&state, response)
 }
 
 async fn generated_shader(
@@ -710,7 +989,7 @@ async fn generated_shader(
         },
     };
 
-    Json(response)
+    generated_shader_json(&state, response)
 }
 
 async fn import_asset(
@@ -732,26 +1011,29 @@ async fn import_asset(
         let bytes = match field.bytes().await {
             Ok(bytes) => bytes,
             Err(error) => {
-                return Json(RuntimeAssetImportResponse {
+                let response = RuntimeAssetImportResponse {
                     ok: false,
                     asset: None,
                     diagnostics: vec![RuntimeDiagnostic::error(format!(
                         "failed to read uploaded asset bytes: {error}"
                     ))],
-                });
+                };
+                return asset_import_json(&state, response);
             }
         };
 
-        return Json(store_asset(&state, name, mime_type, bytes));
+        let response = store_asset(&state, name, mime_type, bytes);
+        return asset_import_json(&state, response);
     }
 
-    Json(RuntimeAssetImportResponse {
+    let response = RuntimeAssetImportResponse {
         ok: false,
         asset: None,
         diagnostics: vec![RuntimeDiagnostic::error(
             "asset import request did not include a file field",
         )],
-    })
+    };
+    asset_import_json(&state, response)
 }
 
 async fn list_assets(State(state): State<RuntimeServerState>) -> Json<RuntimeAssetListResponse> {
@@ -782,7 +1064,7 @@ async fn get_asset(
         .get(&asset_id)
         .cloned();
     let ok = asset.is_some();
-    Json(RuntimeAssetGetResponse {
+    let response = RuntimeAssetGetResponse {
         ok,
         asset,
         diagnostics: if ok {
@@ -792,7 +1074,8 @@ async fn get_asset(
                 "asset {asset_id} does not exist"
             ))]
         },
-    })
+    };
+    asset_get_json(&state, response)
 }
 
 async fn session_telemetry(
@@ -913,6 +1196,14 @@ fn asset_id(name: &str, mime_type: &str, bytes: &Bytes) -> String {
         .as_nanos()
         .hash(&mut hasher);
     format!("asset_{:016x}", hasher.finish())
+}
+
+fn created_at_now() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    format!("unix-ms:{millis}")
 }
 
 fn asset_kind(mime_type: &str) -> String {
@@ -1079,7 +1370,12 @@ fn cors_layer() -> CorsLayer {
         .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
             matches!(
                 origin.to_str(),
-                Ok("http://127.0.0.1:5173" | "http://localhost:5173")
+                Ok("http://127.0.0.1:5173"
+                    | "http://localhost:5173"
+                    | "http://127.0.0.1:5174"
+                    | "http://localhost:5174"
+                    | "http://127.0.0.1:5175"
+                    | "http://localhost:5175")
             )
         }))
         .allow_methods([Method::DELETE, Method::GET, Method::POST])
@@ -1088,7 +1384,7 @@ fn cors_layer() -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicU64, mpsc::SyncSender};
+    use std::sync::Arc;
 
     use axum::{
         body::{Body, to_bytes},
@@ -1103,51 +1399,22 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        MidiInputDescriptor, RuntimeClockDiagnostic, RuntimeClockDiagnosticSeverity,
-        TimestampedMidiMessage,
-        clock_source_manager::{MidiClockInputConnection, MidiInputRegistry},
+        RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse, RuntimeLogEvent, RuntimeLogSource,
+        io_device_manager::RuntimeIoDeviceRegistry,
     };
 
     use super::*;
 
-    struct ServerFakeMidiConnection;
-
-    impl MidiClockInputConnection for ServerFakeMidiConnection {}
-
-    struct ServerFakeMidiInputRegistry {
-        inputs: Vec<MidiInputDescriptor>,
+    struct ServerFakeIoDeviceRegistry {
+        devices: Vec<RuntimeIoDeviceDescriptor>,
     }
 
-    impl MidiInputRegistry for ServerFakeMidiInputRegistry {
-        fn list_inputs(&self) -> MidiInputListResponse {
-            MidiInputListResponse {
+    impl RuntimeIoDeviceRegistry for ServerFakeIoDeviceRegistry {
+        fn list_devices(&self) -> RuntimeIoDeviceListResponse {
+            RuntimeIoDeviceListResponse {
                 ok: true,
-                inputs: self.inputs.clone(),
+                devices: self.devices.clone(),
                 diagnostics: Vec::new(),
-            }
-        }
-
-        fn open_midi_clock_input(
-            &self,
-            input_port_index: usize,
-            _event_sender: SyncSender<TimestampedMidiMessage>,
-            _dropped_event_count: Arc<AtomicU64>,
-        ) -> Result<Box<dyn MidiClockInputConnection>, RuntimeClockDiagnostic> {
-            if self
-                .inputs
-                .iter()
-                .any(|input| input.index == input_port_index)
-            {
-                Ok(Box::new(ServerFakeMidiConnection))
-            } else {
-                Err(RuntimeClockDiagnostic {
-                    severity: RuntimeClockDiagnosticSeverity::Error,
-                    code: "invalid-midi-input-port".to_owned(),
-                    message: format!(
-                        "requested MIDI input port does not exist; requested index {input_port_index}, available MIDI input ports {}",
-                        self.inputs.len()
-                    ),
-                })
             }
         }
     }
@@ -1175,7 +1442,7 @@ mod tests {
             "project.plan.v0.2",
             "dummy.run",
             "session.load",
-            "session.patch",
+            "session.mutate",
             "session.history",
             "session.undo",
             "session.redo",
@@ -1190,11 +1457,9 @@ mod tests {
             "session.render.generatedShader",
             "session.telemetry",
             "session.telemetry.stream",
-            "clock.sources",
-            "clock.sources.read",
-            "clock.midi.inputs",
-            "clock.midi.start",
-            "clock.midi.stop",
+            "runtime.logs",
+            "runtime.logs.stream",
+            "io.devices",
         ] {
             assert!(
                 capabilities
@@ -1206,131 +1471,134 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clock_source_api_reports_empty_state_and_invalid_requests() {
-        let app = runtime_router_with_fake_midi_inputs(Vec::new());
+    async fn runtime_log_snapshot_replays_warning_error_backlog() {
+        let app = runtime_router_with_fake_io_devices(Vec::new());
 
-        let sources = get_json_with(app.clone(), "/v0/clock/sources").await;
-        assert_eq!(sources["ok"], true);
-        assert_eq!(sources["sources"], json!([]));
-
-        let missing = get_json_with(app.clone(), "/v0/clock/sources/missing").await;
-        assert_eq!(missing["ok"], false);
-        assert_eq!(missing["source"], Value::Null);
-        assert_eq!(missing["diagnostics"][0]["code"], "clock-source-not-found");
-
-        let inputs = get_json_with(app.clone(), "/v0/clock/midi/inputs").await;
-        assert_eq!(inputs["ok"], true);
-        assert_eq!(inputs["inputs"], json!([]));
-
-        let invalid_start = post_json_with(
-            app.clone(),
-            "/v0/clock/midi/start",
-            json!({
-                "sourceId": "midi-clock-1",
-                "inputPortIndex": 65535
-            }),
-        )
-        .await;
-        assert_eq!(invalid_start["ok"], false);
+        let empty = get_json_with(app.clone(), "/v0/runtime/logs").await;
+        assert_eq!(empty["schema"], "skenion.runtime.logs");
+        assert_eq!(empty["events"], json!([]));
+        assert_eq!(empty["retention"]["replayLimit"], 200);
         assert_eq!(
-            invalid_start["diagnostics"][0]["code"],
-            "invalid-midi-input-port"
+            empty["retention"]["replayLevels"],
+            json!(["warning", "error"])
         );
 
-        let sources_after_invalid = get_json_with(app.clone(), "/v0/clock/sources").await;
-        assert_eq!(sources_after_invalid["sources"], json!([]));
+        let undo = post_empty_with(app.clone(), "/v0/session/undo").await;
+        assert_eq!(undo["ok"], false);
 
-        let stop_unknown = post_json_with(
-            app,
-            "/v0/clock/midi/stop",
-            json!({ "sourceId": "midi-clock-1" }),
-        )
-        .await;
-        assert_eq!(stop_unknown["ok"], false);
-        assert_eq!(
-            stop_unknown["diagnostics"][0]["code"],
-            "clock-source-not-found"
+        let snapshot = get_json_with(app, "/v0/runtime/logs").await;
+        let events = snapshot["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["source"], "runtime");
+        assert_eq!(events[0]["level"], "error");
+        assert!(
+            events[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("available to undo")
         );
     }
 
     #[tokio::test]
-    async fn clock_source_api_rejects_duplicate_running_source_id() {
-        let app = runtime_router_with_fake_midi_inputs(vec![MidiInputDescriptor {
-            index: 0,
-            name: "Fake MIDI".to_owned(),
-            backend: "midir".to_owned(),
-            id: None,
-            stable: false,
-        }]);
+    async fn runtime_log_stream_replays_backlog_as_sse() {
+        let app = runtime_router_with_fake_io_devices(Vec::new());
+        let _ = post_empty_with(app.clone(), "/v0/session/undo").await;
 
-        let start = post_json_with(
-            app.clone(),
-            "/v0/clock/midi/start",
-            json!({
-                "sourceId": "midi-clock-1",
-                "inputPortIndex": 0
-            }),
-        )
-        .await;
-        assert_eq!(start["ok"], true);
-        assert_eq!(start["source"]["status"], "running");
-        assert_eq!(
-            start["source"]["latestSnapshot"]["sourceId"],
-            "midi-clock-1"
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/runtime/logs/stream")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
         );
-
-        let duplicate = post_json_with(
-            app.clone(),
-            "/v0/clock/midi/start",
-            json!({
-                "sourceId": "midi-clock-1",
-                "inputPortIndex": 0
-            }),
-        )
-        .await;
-        assert_eq!(duplicate["ok"], false);
-        assert_eq!(
-            duplicate["diagnostics"][0]["code"],
-            "clock-source-already-running"
-        );
-
-        let stop = post_json_with(
-            app.clone(),
-            "/v0/clock/midi/stop",
-            json!({ "sourceId": "midi-clock-1" }),
-        )
-        .await;
-        assert_eq!(stop["ok"], true);
-        assert_eq!(stop["source"]["status"], "stopped");
-
-        let restarted = post_json_with(
-            app.clone(),
-            "/v0/clock/midi/start",
-            json!({
-                "sourceId": "midi-clock-1",
-                "inputPortIndex": 0
-            }),
-        )
-        .await;
-        assert_eq!(restarted["ok"], true);
-        let _ = post_json_with(
-            app,
-            "/v0/clock/midi/stop",
-            json!({ "sourceId": "midi-clock-1" }),
-        )
-        .await;
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("runtime log stream should emit")
+            .expect("runtime log stream should have a chunk")
+            .expect("runtime log stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("runtime log stream should be utf8");
+        assert!(text.contains("event: log"));
+        assert!(text.contains("available to undo"));
     }
 
     #[tokio::test]
-    async fn session_load_does_not_autostart_clock_sources() {
-        let app = runtime_router_with_fake_midi_inputs(Vec::new());
+    async fn session_event_stream_replays_current_snapshot_as_sse() {
+        let app = runtime_router_with_fake_io_devices(Vec::new());
 
-        let loaded = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
-        assert_eq!(loaded["ok"], true);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/session/events/stream")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
 
-        let sources = get_json_with(app, "/v0/clock/sources").await;
-        assert_eq!(sources["ok"], true);
-        assert_eq!(sources["sources"], json!([]));
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("session event stream should emit")
+            .expect("session event stream should have a chunk")
+            .expect("session event stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("session event stream should be utf8");
+        assert!(text.contains("event: session"));
+        assert!(text.contains("skenion.runtime.session.event"));
+        assert!(text.contains("\"kind\":\"snapshot\""));
+    }
+
+    #[test]
+    fn stream_broadcast_helpers_format_live_and_gap_events() {
+        let log_event = RuntimeLogEvent {
+            id: 1,
+            timestamp: "1970-01-01T00:00:00.000Z".to_owned(),
+            source: RuntimeLogSource::Runtime,
+            level: DiagnosticSeverity::Warning,
+            code: Some("test-log".to_owned()),
+            message: "test log".to_owned(),
+        };
+        let session = RuntimeSession::default();
+        let session_event = RuntimeSessionEvent {
+            schema: "skenion.runtime.session.event",
+            schema_version: "0.1.0",
+            id: "session_event_000001".to_owned(),
+            sequence: 1,
+            kind: RuntimeSessionEventKind::Snapshot,
+            snapshot: session.snapshot(),
+            history: session.history(),
+            mutation: None,
+            diagnostics: Vec::new(),
+            created_at: "1970-01-01T00:00:00.000Z".to_owned(),
+        };
+
+        assert!(runtime_log_broadcast_event(Ok(log_event)).is_ok());
+        assert!(runtime_log_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1))).is_ok());
+        assert!(session_broadcast_event(Ok(session_event)).is_ok());
+        assert!(session_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1))).is_ok());
+    }
+
+    #[tokio::test]
+    async fn io_device_api_reports_empty_state() {
+        let app = runtime_router_with_fake_io_devices(Vec::new());
+
+        let devices = get_json_with(app.clone(), "/v0/io/devices").await;
+        assert_eq!(devices["ok"], true);
+        assert_eq!(devices["devices"], json!([]));
     }
 
     #[tokio::test]
@@ -1370,6 +1638,32 @@ mod tests {
                 .contains(asset_id)
         );
 
+        let mut large_body = format!(
+            "--{boundary}\r\ncontent-disposition: form-data; name=\"file\"; filename=\"large.mp4\"\r\ncontent-type: video/mp4\r\n\r\n"
+        )
+        .into_bytes();
+        large_body.extend(vec![b'x'; 3 * 1024 * 1024]);
+        large_body.extend(format!("\r\n--{boundary}--\r\n").into_bytes());
+        let large = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v0/assets/import")
+                    .header(
+                        CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(large_body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(large.status(), StatusCode::OK);
+        let large = body_json(large.into_body()).await;
+        assert_eq!(large["ok"], true);
+        assert_eq!(large["asset"]["name"], "large.mp4");
+
         let unnamed_body = format!(
             "--{boundary}\r\ncontent-disposition: form-data; name=\"file\"\r\n\r\nasset-bytes\r\n--{boundary}--\r\n"
         );
@@ -1407,7 +1701,7 @@ mod tests {
             .expect("router should respond");
         let listed = body_json(listed.into_body()).await;
         assert_eq!(listed["ok"], true);
-        assert_eq!(listed["assets"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["assets"].as_array().unwrap().len(), 3);
 
         let fetched = app
             .clone()
@@ -1571,24 +1865,33 @@ mod tests {
 
     #[tokio::test]
     async fn cors_allows_local_studio_origin() {
-        let response = runtime_router()
-            .oneshot(
-                Request::builder()
-                    .method(Method::OPTIONS)
-                    .uri("/v0/runtime/info")
-                    .header(ORIGIN, "http://127.0.0.1:5173")
-                    .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
-                    .body(Body::empty())
-                    .expect("request should build"),
-            )
-            .await
-            .expect("router should respond");
+        for origin in [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:5174",
+            "http://localhost:5174",
+            "http://127.0.0.1:5175",
+            "http://localhost:5175",
+        ] {
+            let response = runtime_router()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::OPTIONS)
+                        .uri("/v0/runtime/info")
+                        .header(ORIGIN, origin)
+                        .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("router should respond");
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
-            "http://127.0.0.1:5173"
-        );
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+                origin
+            );
+        }
     }
 
     #[tokio::test]
@@ -1903,38 +2206,38 @@ mod tests {
         let response = get_json("/v0/session").await;
 
         assert_eq!(response["ok"], true);
-        assert_eq!(response["loaded"], false);
-        assert_eq!(response["graphId"], Value::Null);
-        assert_eq!(response["graphRevision"], Value::Null);
-        assert_eq!(response["sessionRevision"], 0);
+        assert_eq!(response["snapshot"]["project"], Value::Null);
+        assert_eq!(response["snapshot"]["sessionRevision"], 0);
+        assert_eq!(response["snapshot"]["viewRevision"], 0);
+        assert_eq!(response["snapshot"]["controlRevision"], 0);
         assert_eq!(response["diagnostics"].as_array().unwrap().len(), 0);
-        assert_eq!(response["plan"], Value::Null);
+        assert_eq!(response["snapshot"]["plan"], Value::Null);
         assert_eq!(response["report"], Value::Null);
     }
 
     #[tokio::test]
-    async fn session_project_endpoint_returns_loaded_project() {
+    async fn session_snapshot_returns_loaded_project() {
         let app = runtime_router();
 
-        let empty = get_json_with(app.clone(), "/v0/session/project").await;
-        assert_eq!(empty["ok"], false);
-        assert_eq!(empty["loaded"], false);
-        assert_eq!(empty["project"], Value::Null);
-        assert!(
-            empty["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("no project loaded")
-        );
+        let empty = get_json_with(app.clone(), "/v0/session").await;
+        assert_eq!(empty["ok"], true);
+        assert_eq!(empty["snapshot"]["project"], Value::Null);
 
         post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
-        let project = get_json_with(app, "/v0/session/project").await;
+        let project = get_json_with(app, "/v0/session").await;
 
         assert_eq!(project["ok"], true);
-        assert_eq!(project["loaded"], true);
-        assert_eq!(project["session"]["graphId"], "minimal-value");
-        assert_eq!(project["project"]["graph"]["id"], "minimal-value");
-        assert_eq!(project["project"]["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            project["snapshot"]["project"]["graph"]["id"],
+            "minimal-value"
+        );
+        assert_eq!(
+            project["snapshot"]["project"]["nodes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1943,15 +2246,23 @@ mod tests {
         let response = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
 
         assert_eq!(response["ok"], true);
-        assert_eq!(response["loaded"], true);
-        assert_eq!(response["graphId"], "minimal-value");
-        assert_eq!(response["graphRevision"], "1");
-        assert_eq!(response["sessionRevision"], 1);
-        assert_eq!(response["plan"]["graphId"], "minimal-value");
+        assert_eq!(
+            response["snapshot"]["project"]["graph"]["id"],
+            "minimal-value"
+        );
+        assert_eq!(response["snapshot"]["project"]["graph"]["revision"], "1");
+        assert_eq!(response["snapshot"]["sessionRevision"], 1);
+        assert_eq!(response["snapshot"]["plan"]["graphId"], "minimal-value");
 
         let snapshot = get_json_with(app, "/v0/session").await;
-        assert_eq!(snapshot["loaded"], true);
-        assert_eq!(snapshot["plan"]["nodes"][0]["nodeId"], "value_1");
+        assert_eq!(
+            snapshot["snapshot"]["project"]["graph"]["id"],
+            "minimal-value"
+        );
+        assert_eq!(
+            snapshot["snapshot"]["plan"]["nodes"][0]["nodeId"],
+            "value_1"
+        );
     }
 
     #[tokio::test]
@@ -1963,11 +2274,13 @@ mod tests {
 
         let response = post_json_with(app.clone(), "/v0/session/load", invalid).await;
 
-        assert_eq!(loaded["sessionRevision"], 1);
+        assert_eq!(loaded["snapshot"]["sessionRevision"], 1);
         assert_eq!(response["ok"], false);
-        assert_eq!(response["loaded"], true);
-        assert_eq!(response["graphId"], "minimal-value");
-        assert_eq!(response["sessionRevision"], 1);
+        assert_eq!(
+            response["snapshot"]["project"]["graph"]["id"],
+            "minimal-value"
+        );
+        assert_eq!(response["snapshot"]["sessionRevision"], 1);
         assert!(
             response["diagnostics"][0]["message"]
                 .as_str()
@@ -1977,8 +2290,10 @@ mod tests {
 
         let snapshot = get_json_with(app, "/v0/session").await;
         assert_eq!(snapshot["ok"], true);
-        assert_eq!(snapshot["loaded"], true);
-        assert_eq!(snapshot["graphId"], "minimal-value");
+        assert_eq!(
+            snapshot["snapshot"]["project"]["graph"]["id"],
+            "minimal-value"
+        );
         assert_eq!(snapshot["diagnostics"].as_array().unwrap().len(), 0);
     }
 
@@ -1993,7 +2308,7 @@ mod tests {
 
         let plan = post_empty_with(app.clone(), "/v0/session/plan").await;
         assert_eq!(plan["ok"], true);
-        assert_eq!(plan["plan"]["graphId"], "minimal-value");
+        assert_eq!(plan["snapshot"]["plan"]["graphId"], "minimal-value");
 
         let run = post_json_with(app, "/v0/session/run", json!({ "frames": 2 })).await;
         assert_eq!(run["ok"], true);
@@ -2005,31 +2320,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_patch_endpoint_applies_and_rejects_conflicts() {
+    async fn session_mutate_endpoint_applies_and_rejects_conflicts() {
         let app = runtime_router();
         post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
 
-        let patched = post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+        let patched = post_json_with(
+            app.clone(),
+            "/v0/session/mutate",
+            graph_mutation(set_value_patch("1")),
+        )
+        .await;
         assert_eq!(patched["ok"], true);
         assert_eq!(patched["applied"], true);
         assert_eq!(patched["conflict"], false);
-        assert_eq!(patched["graph"]["revision"], "2");
-        assert_eq!(patched["event"]["kind"], "apply");
-        assert_eq!(patched["event"]["revisionBefore"], "1");
-        assert_eq!(patched["event"]["revisionAfter"], "2");
+        assert_eq!(patched["snapshot"]["project"]["graph"]["revision"], "2");
+        assert_eq!(patched["history"]["entries"][0]["kind"], "apply");
+        assert_eq!(
+            patched["history"]["entries"][0]["mutation"]["graphPatch"]["baseRevision"],
+            "1"
+        );
+        assert_eq!(
+            patched["history"]["entries"][0]["inverseMutation"]["graphPatch"]["baseRevision"],
+            "2"
+        );
         assert_eq!(patched["history"]["undoDepth"], 1);
         assert_eq!(patched["history"]["redoDepth"], 0);
-        assert_eq!(patched["session"]["graphRevision"], "2");
-        assert_eq!(patched["session"]["sessionRevision"], 2);
-        assert_eq!(patched["session"]["plan"]["graphRevision"], "2");
+        assert_eq!(patched["snapshot"]["sessionRevision"], 2);
+        assert_eq!(patched["snapshot"]["plan"]["graphRevision"], "2");
 
-        let conflict = post_json_with(app, "/v0/session/patch", set_value_patch("1")).await;
+        let conflict = post_json_with(
+            app,
+            "/v0/session/mutate",
+            graph_mutation(set_value_patch("1")),
+        )
+        .await;
         assert_eq!(conflict["ok"], false);
         assert_eq!(conflict["applied"], false);
         assert_eq!(conflict["conflict"], true);
-        assert_eq!(conflict["graph"]["revision"], "2");
-        assert_eq!(conflict["event"], Value::Null);
-        assert_eq!(conflict["history"]["events"].as_array().unwrap().len(), 1);
+        assert_eq!(conflict["snapshot"]["project"]["graph"]["revision"], "2");
+        assert_eq!(conflict["history"]["entries"].as_array().unwrap().len(), 1);
         assert!(
             conflict["diagnostics"][0]["message"]
                 .as_str()
@@ -2039,15 +2368,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_patch_endpoint_reports_errors_without_loaded_session() {
-        let response = post_json("/v0/session/patch", set_value_patch("1")).await;
+    async fn session_mutate_endpoint_reports_errors_without_loaded_session() {
+        let response = post_json("/v0/session/mutate", graph_mutation(set_value_patch("1"))).await;
 
         assert_eq!(response["ok"], false);
         assert_eq!(response["applied"], false);
         assert_eq!(response["conflict"], false);
-        assert_eq!(response["graph"], Value::Null);
-        assert_eq!(response["event"], Value::Null);
-        assert_eq!(response["history"]["events"].as_array().unwrap().len(), 0);
+        assert_eq!(response["snapshot"]["project"], Value::Null);
+        assert_eq!(response["history"]["entries"].as_array().unwrap().len(), 0);
         assert!(
             response["diagnostics"][0]["message"]
                 .as_str()
@@ -2057,14 +2385,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_patch_endpoint_reports_unsupported_operations() {
+    async fn session_mutate_endpoint_reports_unsupported_operations() {
         let app = runtime_router();
         post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
 
         let response = post_json_with(
             app,
-            "/v0/session/patch",
-            json!({
+            "/v0/session/mutate",
+            graph_mutation(json!({
               "schema": "skenion.graph.patch",
               "schemaVersion": "0.1.0",
               "id": "unsupported",
@@ -2072,21 +2400,20 @@ mod tests {
               "ops": [
                 { "op": "moveNode", "nodeId": "value_1" }
               ]
-            }),
+            })),
         )
         .await;
 
         assert_eq!(response["ok"], false);
         assert_eq!(response["applied"], false);
         assert_eq!(response["conflict"], false);
-        assert_eq!(response["graph"]["revision"], "1");
-        assert_eq!(response["event"], Value::Null);
-        assert_eq!(response["history"]["events"].as_array().unwrap().len(), 0);
+        assert_eq!(response["snapshot"]["project"]["graph"]["revision"], "1");
+        assert_eq!(response["history"]["entries"].as_array().unwrap().len(), 0);
         assert!(
             response["diagnostics"][0]["message"]
                 .as_str()
                 .unwrap()
-                .contains("invalid graph patch")
+                .contains("invalid runtime mutation")
         );
     }
 
@@ -2095,17 +2422,22 @@ mod tests {
         let app = runtime_router();
 
         let empty = get_json_with(app.clone(), "/v0/session/history").await;
-        assert_eq!(empty["schema"], "skenion.graph.patch.history");
-        assert_eq!(empty["events"].as_array().unwrap().len(), 0);
+        assert_eq!(empty["schema"], "skenion.runtime.history");
+        assert_eq!(empty["entries"].as_array().unwrap().len(), 0);
         assert_eq!(empty["canUndo"], false);
         assert_eq!(empty["canRedo"], false);
 
         post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
-        post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/mutate",
+            graph_mutation(set_value_patch("1")),
+        )
+        .await;
         let history = get_json_with(app, "/v0/session/history").await;
 
-        assert_eq!(history["events"].as_array().unwrap().len(), 1);
-        assert_eq!(history["events"][0]["kind"], "apply");
+        assert_eq!(history["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(history["entries"][0]["kind"], "apply");
         assert_eq!(history["undoDepth"], 1);
         assert_eq!(history["redoDepth"], 0);
     }
@@ -2114,23 +2446,28 @@ mod tests {
     async fn session_undo_and_redo_endpoints_update_graph_and_history() {
         let app = runtime_router();
         post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
-        post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/mutate",
+            graph_mutation(set_value_patch("1")),
+        )
+        .await;
 
         let undo = post_empty_with(app.clone(), "/v0/session/undo").await;
         assert_eq!(undo["ok"], true);
         assert_eq!(undo["applied"], true);
-        assert_eq!(undo["event"]["kind"], "undo");
-        assert_eq!(undo["graph"]["revision"], "3");
-        assert_eq!(undo["history"]["events"].as_array().unwrap().len(), 2);
+        assert_eq!(undo["history"]["entries"][1]["kind"], "undo");
+        assert_eq!(undo["snapshot"]["project"]["graph"]["revision"], "3");
+        assert_eq!(undo["history"]["entries"].as_array().unwrap().len(), 2);
         assert_eq!(undo["history"]["undoDepth"], 0);
         assert_eq!(undo["history"]["redoDepth"], 1);
 
         let redo = post_empty_with(app, "/v0/session/redo").await;
         assert_eq!(redo["ok"], true);
         assert_eq!(redo["applied"], true);
-        assert_eq!(redo["event"]["kind"], "redo");
-        assert_eq!(redo["graph"]["revision"], "4");
-        assert_eq!(redo["history"]["events"].as_array().unwrap().len(), 3);
+        assert_eq!(redo["history"]["entries"][2]["kind"], "redo");
+        assert_eq!(redo["snapshot"]["project"]["graph"]["revision"], "4");
+        assert_eq!(redo["history"]["entries"].as_array().unwrap().len(), 3);
         assert_eq!(redo["history"]["undoDepth"], 1);
         assert_eq!(redo["history"]["redoDepth"], 0);
     }
@@ -2144,7 +2481,6 @@ mod tests {
 
         assert_eq!(undo["ok"], false);
         assert_eq!(undo["applied"], false);
-        assert_eq!(undo["event"], Value::Null);
         assert!(
             undo["diagnostics"][0]["message"]
                 .as_str()
@@ -2153,7 +2489,6 @@ mod tests {
         );
         assert_eq!(redo["ok"], false);
         assert_eq!(redo["applied"], false);
-        assert_eq!(redo["event"], Value::Null);
         assert!(
             redo["diagnostics"][0]["message"]
                 .as_str()
@@ -2264,11 +2599,16 @@ mod tests {
 
     #[tokio::test]
     async fn session_control_event_reports_running_preview_snapshot_update_warnings() {
+        let logs = std::sync::Arc::new(RuntimeLogStore::default());
+        let (session_events, _) = tokio::sync::broadcast::channel(256);
         let state = RuntimeServerState {
             session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
+            session_events,
+            session_event_sequence: std::sync::Arc::new(std::sync::Mutex::new(1)),
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
-            clock_sources: std::sync::Arc::new(ClockSourceManager::default()),
+            io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
+            logs,
             started_at: std::time::Instant::now(),
         };
         let app = runtime_router_with_state(state.clone());
@@ -2357,7 +2697,7 @@ mod tests {
         let response = post_json("/v0/session/run", json!({ "frames": 2 })).await;
 
         assert_eq!(response["ok"], false);
-        assert_eq!(response["loaded"], false);
+        assert_eq!(response["snapshot"]["project"], Value::Null);
         assert!(
             response["diagnostics"][0]["message"]
                 .as_str()
@@ -2374,10 +2714,9 @@ mod tests {
         let response = delete_json_with(app, "/v0/session").await;
 
         assert_eq!(response["ok"], true);
-        assert_eq!(response["loaded"], false);
-        assert_eq!(response["graphId"], Value::Null);
-        assert_eq!(response["sessionRevision"], 2);
-        assert_eq!(response["plan"], Value::Null);
+        assert_eq!(response["snapshot"]["project"], Value::Null);
+        assert_eq!(response["snapshot"]["sessionRevision"], 2);
+        assert_eq!(response["snapshot"]["plan"], Value::Null);
     }
 
     #[tokio::test]
@@ -2441,7 +2780,12 @@ mod tests {
         let app = runtime_router_with_dry_preview();
         post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
         post_empty_with(app.clone(), "/v0/session/preview/start").await;
-        post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/mutate",
+            graph_mutation(set_value_patch("1")),
+        )
+        .await;
 
         let stale = get_json_with(app.clone(), "/v0/session/preview").await;
         assert_eq!(stale["state"], "running");
@@ -2498,7 +2842,7 @@ mod tests {
         assert_eq!(response["schema"], "skenion.runtime.telemetry");
         assert_eq!(response["schemaVersion"], "0.1.0");
         assert_eq!(response["ok"], true);
-        assert_eq!(response["session"]["loaded"], false);
+        assert_eq!(response["session"]["project"], Value::Null);
         assert_eq!(response["preview"]["state"], "stopped");
         assert_eq!(response["render"]["active"], false);
         assert_eq!(response["render"]["diagnostics"], json!([]));
@@ -2549,7 +2893,12 @@ mod tests {
         let app = runtime_router_with_dry_preview();
         post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
         post_empty_with(app.clone(), "/v0/session/preview/start").await;
-        post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/mutate",
+            graph_mutation(set_value_patch("1")),
+        )
+        .await;
 
         let response = get_json_with(app, "/v0/session/telemetry").await;
 
@@ -2741,23 +3090,33 @@ mod tests {
     }
 
     fn runtime_router_with_dry_preview() -> Router {
+        let logs = std::sync::Arc::new(RuntimeLogStore::default());
+        let (session_events, _) = tokio::sync::broadcast::channel(256);
         runtime_router_with_state(RuntimeServerState {
             session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
+            session_events,
+            session_event_sequence: std::sync::Arc::new(std::sync::Mutex::new(1)),
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
-            clock_sources: std::sync::Arc::new(ClockSourceManager::default()),
+            io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
+            logs,
             started_at: std::time::Instant::now(),
         })
     }
 
-    fn runtime_router_with_fake_midi_inputs(inputs: Vec<MidiInputDescriptor>) -> Router {
+    fn runtime_router_with_fake_io_devices(devices: Vec<RuntimeIoDeviceDescriptor>) -> Router {
+        let logs = std::sync::Arc::new(RuntimeLogStore::default());
+        let (session_events, _) = tokio::sync::broadcast::channel(256);
         runtime_router_with_state(RuntimeServerState {
             session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
+            session_events,
+            session_event_sequence: std::sync::Arc::new(std::sync::Mutex::new(1)),
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
-            clock_sources: std::sync::Arc::new(ClockSourceManager::with_midi_input_registry(
-                Arc::new(ServerFakeMidiInputRegistry { inputs }),
+            io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::with_device_registry(
+                Arc::new(ServerFakeIoDeviceRegistry { devices }),
             )),
+            logs,
             started_at: std::time::Instant::now(),
         })
     }
@@ -3072,5 +3431,9 @@ mod tests {
             { "op": "setNodeParam", "nodeId": "value_1", "key": "value", "value": 0.75 }
           ]
         })
+    }
+
+    fn graph_mutation(graph_patch: Value) -> Value {
+        json!({ "graphPatch": graph_patch })
     }
 }

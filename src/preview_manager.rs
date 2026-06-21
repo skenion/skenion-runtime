@@ -392,8 +392,8 @@ impl PreviewManager {
         snapshot: &RuntimeSessionSnapshot,
         diagnostics: Vec<RuntimeDiagnostic>,
     ) -> RuntimePreviewStatusResponse {
-        let session_revision = snapshot.loaded.then_some(snapshot.session_revision);
-        let control_revision = snapshot.loaded.then_some(snapshot.control_revision);
+        let session_revision = snapshot.loaded().then_some(snapshot.session_revision);
+        let control_revision = snapshot.loaded().then_some(snapshot.control_revision);
         let stale = self.status.state != PreviewState::Stopped
             && session_revision
                 .zip(self.status.preview_session_revision)
@@ -589,8 +589,9 @@ mod tests {
     use crate::{
         ExecutionGroup, ExecutionModel, GraphDocument, GraphNode, PREVIEW_TELEMETRY_SCHEMA,
         PREVIEW_TELEMETRY_SCHEMA_VERSION, PlanEdge, PlanNode, Port, PreviewTelemetryHeartbeat,
-        RuntimeSessionSnapshot, preview_manager::PreviewHandle,
-        read_preview_control_state_snapshot, telemetry::write_preview_telemetry_heartbeat,
+        RuntimeProjectSnapshot, RuntimeSessionSnapshot, create_default_view_state_for_graph,
+        preview_manager::PreviewHandle, read_preview_control_state_snapshot,
+        telemetry::write_preview_telemetry_heartbeat,
     };
 
     #[test]
@@ -1321,12 +1322,16 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
 
     fn loaded_snapshot(session_revision: u64, graph_revision: &str) -> RuntimeSessionSnapshot {
+        let graph = graph(graph_revision);
         RuntimeSessionSnapshot {
-            loaded: true,
-            graph_id: Some("minimal-value".to_owned()),
-            graph_revision: Some(graph_revision.to_owned()),
             session_revision,
+            view_revision: 0,
             control_revision: 0,
+            project: Some(RuntimeProjectSnapshot {
+                view_state: create_default_view_state_for_graph(&graph),
+                graph,
+                nodes: Vec::new(),
+            }),
             diagnostics: Vec::new(),
             plan: Some(plan(graph_revision)),
         }
@@ -1334,10 +1339,9 @@ fn fs_main() -> @location(0) vec4<f32> {
 
     fn empty_snapshot() -> RuntimeSessionSnapshot {
         RuntimeSessionSnapshot {
-            loaded: false,
-            graph_id: None,
-            graph_revision: None,
+            project: None,
             session_revision: 0,
+            view_revision: 0,
             control_revision: 0,
             diagnostics: Vec::new(),
             plan: None,
