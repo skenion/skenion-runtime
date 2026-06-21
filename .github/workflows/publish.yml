@@ -4,28 +4,52 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example skenion-runtime-v0.37.0
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-${{ github.event.release.tag_name }}
+  group: publish-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
   crates:
     name: crates.io
     runs-on: ubuntu-latest
-    if: startsWith(github.event.release.tag_name, 'skenion-runtime-v')
+    if: startsWith(github.event.release.tag_name || inputs.tag, 'skenion-runtime-v')
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - id: contracts
+        run: |
+          version="$(python3 - <<'PY'
+          import tomllib
+          with open("Cargo.toml", "rb") as fh:
+              data = tomllib.load(fh)
+          dep = data["dependencies"]["skenion-contracts"]
+          if isinstance(dep, str):
+              print(dep.strip("^=~ "))
+          else:
+              print(dep["version"].strip("^=~ "))
+          PY
+          )"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=skenion-contracts-v${version}" >> "${GITHUB_OUTPUT}"
       - uses: actions/checkout@v6
         with:
           repository: echovisionlab/skenion-contracts
-          ref: skenion-contracts-v0.34.0
+          ref: ${{ steps.contracts.outputs.tag }}
           path: .deps/skenion-contracts
       - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
@@ -41,7 +65,7 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
       - run: |
           expected="skenion-runtime-v${{ steps.package.outputs.version }}"
-          actual="${{ github.event.release.tag_name }}"
+          actual="${RELEASE_TAG}"
           if [[ "${actual}" != "${expected}" ]]; then
             echo "release tag ${actual} does not match crate version ${expected}" >&2
             exit 1
@@ -57,8 +81,8 @@ jobs:
         run: test -n "${CARGO_REGISTRY_TOKEN}"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo package
+      - run: cargo package --locked
       - if: steps.registry.outputs.published != 'true'
-        run: cargo publish
+        run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
