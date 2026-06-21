@@ -48,7 +48,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
-      - run: rustup component add llvm-tools-preview
       - run: cargo install cargo-llvm-cov --locked
       - run: cargo llvm-cov --lib --all-features --ignore-filename-regex '(Skenion-contracts|src/main\.rs|src/audio_backend\.rs|src/clock_source_manager\.rs|src/midi_input\.rs|src/visual\.rs|src/render/native\.rs|src/render/preview_document\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 100 --fail-under-functions 100 --summary-only
       - run: bash scripts/validate-with-runtime.sh ../..

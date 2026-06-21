@@ -1,0 +1,55 @@
+name: Publish
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  crates:
+    name: crates.io
+    runs-on: ubuntu-latest
+    if: startsWith(github.event.release.tag_name, 'skenion-runtime-v')
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: skenion-runtime-publish-rust
+          cache-all-crates: "true"
+          cache-on-failure: "true"
+      - id: package
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+      - run: |
+          expected="skenion-runtime-v${{ steps.package.outputs.version }}"
+          actual="${{ github.event.release.tag_name }}"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "release tag ${actual} does not match crate version ${expected}" >&2
+            exit 1
+          fi
+      - run: cargo update -p skenion-runtime --precise "${{ steps.package.outputs.version }}"
+      - id: registry
+        run: |
+          if curl --fail --silent "https://crates.io/api/v1/crates/skenion-runtime/${{ steps.package.outputs.version }}" >/dev/null; then
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "published=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - run: cargo package --allow-dirty
+      - if: steps.registry.outputs.published != 'true'
+        run: cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
