@@ -4,20 +4,20 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::{HeaderValue, Method, header::CONTENT_TYPE},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    http::{HeaderMap, HeaderValue, Method, header::CONTENT_TYPE},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use skenion_contracts::RuntimeSessionInfoResponse;
 use tokio_stream::{
     Stream, StreamExt,
     wrappers::{BroadcastStream, IntervalStream, errors::BroadcastStreamRecvError},
@@ -26,17 +26,28 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, GraphDocument, NodeDefinition,
-    NodeDefinitionV02, NodeRegistry, PreviewDocument, PreviewManager, ProjectDocumentV02,
-    ProjectRequestV02, RunProjectRequestV02, RuntimeControlEventRequest,
-    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeExtensionManager,
-    RuntimeIoDeviceListResponse, RuntimeIoDeviceManager, RuntimeLogSnapshotResponse,
-    RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope, RuntimePreviewStartRequest,
-    RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic,
-    ShaderDiagnosticPhase, ShaderDiagnosticSource, ViewState, build_execution_plan,
-    build_execution_plan_request_v02, build_execution_plan_run_request_v02,
-    generated_shader_response_from_preview_document, run_dummy_execution, validate_project,
-    validate_project_request_v02,
+    NodeDefinitionV02, NodeRegistry, PreviewDocument, ProjectDocumentV02, ProjectRequestV02,
+    RunProjectRequestV02, RuntimeControlEventRequest, RuntimeControlEventResponse,
+    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
+    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeIoDeviceListResponse,
+    RuntimeIoDeviceManager, RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest,
+    RuntimeOperationEnvelope, RuntimePreviewStartRequest, RuntimeTelemetrySnapshot,
+    SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource, ViewState,
+    build_execution_plan, build_execution_plan_request_v02, build_execution_plan_run_request_v02,
+    generated_shader_response_from_preview_document, run_dummy_execution,
+    runtime_time::created_at_now,
+    session_registry::{
+        DEFAULT_SESSION_ID, RuntimeSessionEventKind, RuntimeSessionRecord, RuntimeSessionRegistry,
+        SessionEventsQuery, capture_session_replay, event_cursor_from_headers,
+        publish_session_event, session_broadcast_event_after_high_water, session_event,
+        session_snapshot_event,
+    },
+    sidecar::{
+        RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
+        RuntimeSidecarStartupResponse, runtime_connection_profile, sidecar_health_response,
+        sidecar_shutdown_response, sidecar_startup_response,
+    },
+    validate_project, validate_project_request_v02,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -67,6 +78,7 @@ pub struct HealthResponse {
     pub ok: bool,
     pub service: &'static str,
     pub version: &'static str,
+    pub api_version: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,33 +97,6 @@ pub struct RuntimeApiResponse {
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
     pub report: Option<DummyExecutionReport>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeSessionEvent {
-    pub schema: &'static str,
-    pub schema_version: &'static str,
-    pub id: String,
-    pub sequence: u64,
-    pub kind: RuntimeSessionEventKind,
-    pub snapshot: crate::RuntimeSessionSnapshot,
-    pub history: crate::RuntimeHistory,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mutation: Option<crate::RuntimeHistoryEntry>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RuntimeSessionEventKind {
-    Snapshot,
-    Load,
-    Clear,
-    Mutate,
-    Undo,
-    Redo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,32 +120,47 @@ pub enum DiagnosticSeverity {
 
 #[derive(Clone)]
 pub struct RuntimeServerState {
-    pub session: Arc<RwLock<RuntimeSession>>,
-    pub session_events: broadcast::Sender<RuntimeSessionEvent>,
-    pub session_event_sequence: Arc<Mutex<u64>>,
-    pub preview: Arc<Mutex<PreviewManager>>,
+    pub sessions: RuntimeSessionRegistry,
     pub assets: Arc<RwLock<RuntimeAssetStore>>,
     pub io_devices: Arc<RuntimeIoDeviceManager>,
     pub extensions: Arc<RuntimeExtensionManager>,
     pub logs: Arc<RuntimeLogStore>,
+    pub endpoint: RuntimeEndpointConfig,
+    pub started_at_wall_clock: String,
     pub started_at: Instant,
 }
 
 impl Default for RuntimeServerState {
     fn default() -> Self {
+        Self::with_endpoint(DEFAULT_HOST.to_owned(), DEFAULT_PORT)
+    }
+}
+
+impl RuntimeServerState {
+    pub fn with_endpoint(host: String, port: u16) -> Self {
         let logs = Arc::new(RuntimeLogStore::default());
-        let (session_events, _) = broadcast::channel(256);
         Self {
-            session: Arc::new(RwLock::new(RuntimeSession::default())),
-            session_events,
-            session_event_sequence: Arc::new(Mutex::new(1)),
-            preview: Arc::new(Mutex::new(PreviewManager::from_env())),
+            sessions: RuntimeSessionRegistry::default(),
             assets: Arc::new(RwLock::new(RuntimeAssetStore::default())),
             io_devices: Arc::new(RuntimeIoDeviceManager::new()),
             extensions: Arc::new(RuntimeExtensionManager::from_env()),
             logs,
+            endpoint: RuntimeEndpointConfig::new(host, port),
+            started_at_wall_clock: created_at_now(),
             started_at: Instant::now(),
         }
+    }
+
+    pub fn sidecar_startup_response(&self) -> RuntimeSidecarStartupResponse {
+        sidecar_startup_response(
+            &self.endpoint,
+            self.sessions.default_session_id(),
+            &self.started_at_wall_clock,
+        )
+    }
+
+    pub fn sidecar_health_response(&self) -> RuntimeSidecarHealthResponse {
+        sidecar_health_response(&self.endpoint, &self.started_at_wall_clock)
     }
 }
 
@@ -212,6 +212,9 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v0/runtime/info", get(runtime_info))
+        .route("/v0/sidecar/startup", get(sidecar_startup))
+        .route("/v0/sidecar/health", get(sidecar_health))
+        .route("/v0/sidecar/shutdown", post(sidecar_shutdown))
         .route("/v0/extensions", get(runtime_extensions))
         .route("/v0/runtime/logs", get(runtime_logs))
         .route("/v0/runtime/logs/stream", get(runtime_logs_stream))
@@ -219,7 +222,78 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/validate", post(validate_project_endpoint))
         .route("/v0/plan", post(plan_project_endpoint))
         .route("/v0/run", post(run_project_endpoint))
+        .route(
+            "/v0/sessions/{session_id}",
+            get(session_snapshot_by_id).delete(clear_session_by_id),
+        )
+        .route("/v0/sessions/{session_id}/info", get(session_info_by_id))
+        .route(
+            "/v0/sessions/{session_id}/events/stream",
+            get(session_events_stream_by_id),
+        )
+        .route("/v0/sessions/{session_id}/load", post(load_session_by_id))
+        .route(
+            "/v0/sessions/{session_id}/validate",
+            post(validate_session_by_id),
+        )
+        .route("/v0/sessions/{session_id}/plan", post(plan_session_by_id))
+        .route("/v0/sessions/{session_id}/run", post(run_session_by_id))
+        .route(
+            "/v0/sessions/{session_id}/mutate",
+            post(mutate_session_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/operation",
+            post(apply_session_operation_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/history",
+            get(session_history_by_id),
+        )
+        .route("/v0/sessions/{session_id}/undo", post(undo_session_by_id))
+        .route("/v0/sessions/{session_id}/redo", post(redo_session_by_id))
+        .route(
+            "/v0/sessions/{session_id}/control/event",
+            post(control_event_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/control/state",
+            get(control_state_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/control/read",
+            post(control_read_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/preview",
+            get(preview_status_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/preview/start",
+            post(start_preview_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/preview/stop",
+            post(stop_preview_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/preview/restart",
+            post(restart_preview_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/render/generated-shader",
+            get(generated_shader_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/telemetry",
+            get(session_telemetry_by_id),
+        )
+        .route(
+            "/v0/sessions/{session_id}/telemetry/stream",
+            get(session_telemetry_stream_by_id),
+        )
         .route("/v0/session", get(session_snapshot).delete(clear_session))
+        .route("/v0/session/info", get(session_info))
         .route("/v0/session/events/stream", get(session_events_stream))
         .route("/v0/session/load", post(load_session))
         .route("/v0/session/validate", post(validate_session))
@@ -258,6 +332,7 @@ async fn health() -> Json<HealthResponse> {
         ok: true,
         service: "skenion-runtime",
         version: env!("CARGO_PKG_VERSION"),
+        api_version: RUNTIME_API_VERSION,
     })
 }
 
@@ -284,6 +359,10 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.undo",
             "session.redo",
             "session.clear",
+            "session.addressing",
+            "session.defaultAlias",
+            "session.info",
+            "session.events.replay",
             "session.control.event",
             "session.control.state",
             "session.control.read",
@@ -303,9 +382,36 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "runtime.logs",
             "runtime.logs.stream",
             "runtime.extensions",
+            "runtime.profile.localManaged",
+            "runtime.profile.localShared",
+            "runtime.profile.remote",
+            "runtime.sidecar.startup",
+            "runtime.sidecar.health",
+            "runtime.sidecar.shutdown",
             "io.devices",
         ],
     })
+}
+
+async fn sidecar_startup(
+    State(state): State<RuntimeServerState>,
+) -> Json<RuntimeSidecarStartupResponse> {
+    Json(state.sidecar_startup_response())
+}
+
+async fn sidecar_health(
+    State(state): State<RuntimeServerState>,
+) -> Json<RuntimeSidecarHealthResponse> {
+    Json(state.sidecar_health_response())
+}
+
+async fn sidecar_shutdown(
+    State(state): State<RuntimeServerState>,
+    body: Bytes,
+) -> Json<RuntimeSidecarShutdownResponse> {
+    let response = sidecar_shutdown_response(&body);
+    state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
 }
 
 async fn runtime_extensions(
@@ -354,82 +460,43 @@ fn runtime_log_event(event: crate::RuntimeLogEvent) -> Result<Event, Infallible>
 
 async fn session_events_stream(
     State(state): State<RuntimeServerState>,
+    Query(query): Query<SessionEventsQuery>,
+    headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    session_events_stream_for(state.sessions.default_record(), query, headers)
+}
+
+async fn session_events_stream_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<SessionEventsQuery>,
+    headers: HeaderMap,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    session_events_stream_for(state.sessions.get_or_create(&session_id), query, headers)
+}
+
+fn session_events_stream_for(
+    record: RuntimeSessionRecord,
+    query: SessionEventsQuery,
+    headers: HeaderMap,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let after = query.after.or_else(|| event_cursor_from_headers(&headers));
+    let receiver = record.events.subscribe();
     let snapshot = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
-        session_event_from_session(
-            &state,
-            RuntimeSessionEventKind::Snapshot,
-            &session,
-            session.snapshot().diagnostics,
-        )
+        session_snapshot_event(&record, &session)
     };
-    let replay = tokio_stream::iter([session_event(snapshot)]);
-    let live = BroadcastStream::new(state.session_events.subscribe()).map(session_broadcast_event);
+    let replay = capture_session_replay(&record, after, snapshot);
+    let high_water_sequence = replay.high_water_sequence;
+    let replay = tokio_stream::iter(replay.events.into_iter().map(session_event));
+    let live_record = record.clone();
+    let live = BroadcastStream::new(receiver).filter_map(move |result| {
+        session_broadcast_event_after_high_water(result, live_record.clone(), high_water_sequence)
+    });
     Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
-}
-
-fn session_broadcast_event(
-    result: Result<RuntimeSessionEvent, BroadcastStreamRecvError>,
-) -> Result<Event, Infallible> {
-    match result {
-        Ok(event) => session_event(event),
-        Err(_) => Ok(Event::default()
-            .event("session-gap")
-            .data("runtime session stream receiver lagged")),
-    }
-}
-
-fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
-    Ok(Event::default()
-        .event("session")
-        .json_data(event)
-        .expect("runtime session event should serialize"))
-}
-
-fn publish_session_event(
-    state: &RuntimeServerState,
-    kind: RuntimeSessionEventKind,
-    session: &RuntimeSession,
-    diagnostics: Vec<RuntimeDiagnostic>,
-) {
-    let event = session_event_from_session(state, kind, session, diagnostics);
-    let _ = state.session_events.send(event);
-}
-
-fn session_event_from_session(
-    state: &RuntimeServerState,
-    kind: RuntimeSessionEventKind,
-    session: &RuntimeSession,
-    diagnostics: Vec<RuntimeDiagnostic>,
-) -> RuntimeSessionEvent {
-    let sequence = next_session_event_sequence(state);
-    let history = session.history();
-    RuntimeSessionEvent {
-        schema: "skenion.runtime.session.event",
-        schema_version: "0.1.0",
-        id: format!("session_event_{sequence:06}"),
-        sequence,
-        kind,
-        snapshot: session.snapshot(),
-        mutation: history.entries.last().cloned(),
-        history,
-        diagnostics,
-        created_at: created_at_now(),
-    }
-}
-
-fn next_session_event_sequence(state: &RuntimeServerState) -> u64 {
-    let mut sequence = state
-        .session_event_sequence
-        .lock()
-        .expect("runtime session event sequence lock should not be poisoned");
-    let current = *sequence;
-    *sequence += 1;
-    current
 }
 
 fn runtime_api_json(
@@ -644,72 +711,181 @@ async fn run_project_endpoint(
 async fn session_snapshot(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimeSessionResponse> {
-    let session = state
+    session_snapshot_for(state.sessions.default_record())
+}
+
+async fn session_snapshot_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimeSessionResponse> {
+    session_snapshot_for(state.sessions.get_or_create(&session_id))
+}
+
+fn session_snapshot_for(record: RuntimeSessionRecord) -> Json<crate::RuntimeSessionResponse> {
+    let session = record
         .session
         .read()
         .expect("runtime session lock should not be poisoned");
     Json(session.response(true, session.snapshot().diagnostics, None))
 }
 
+async fn session_info(State(state): State<RuntimeServerState>) -> Json<RuntimeSessionInfoResponse> {
+    Json(session_info_for(&state, state.sessions.default_record()))
+}
+
+async fn session_info_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<RuntimeSessionInfoResponse> {
+    Json(session_info_for(
+        &state,
+        state.sessions.get_or_create(&session_id),
+    ))
+}
+
+fn session_info_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> RuntimeSessionInfoResponse {
+    let profile = runtime_connection_profile(&state.endpoint, &state.started_at_wall_clock);
+    record.info_response(profile)
+}
+
 async fn load_session(
     State(state): State<RuntimeServerState>,
     Json(request): Json<ProjectRequest>,
 ) -> Json<crate::RuntimeSessionResponse> {
-    let mut session = state
+    load_session_for(&state, state.sessions.default_record(), request)
+}
+
+async fn load_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ProjectRequest>,
+) -> Json<crate::RuntimeSessionResponse> {
+    load_session_for(&state, state.sessions.get_or_create(&session_id), request)
+}
+
+fn load_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    request: ProjectRequest,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
     let response = session.load_project(request);
     if response.ok && response.snapshot.loaded() {
         publish_session_event(
-            &state,
+            &record,
             RuntimeSessionEventKind::Load,
             &session,
             response.diagnostics.clone(),
         );
     }
-    session_json(&state, response)
+    session_json(state, response)
 }
 
 async fn validate_session(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimeSessionResponse> {
-    let mut session = state
+    validate_session_for(&state, state.sessions.default_record())
+}
+
+async fn validate_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimeSessionResponse> {
+    validate_session_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn validate_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
     let response = session.validate_current();
-    session_json(&state, response)
+    session_json(state, response)
 }
 
 async fn plan_session(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimeSessionResponse> {
-    let mut session = state
+    plan_session_for(&state, state.sessions.default_record())
+}
+
+async fn plan_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimeSessionResponse> {
+    plan_session_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn plan_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
     let response = session.plan_current();
-    session_json(&state, response)
+    session_json(state, response)
 }
 
 async fn run_session(
     State(state): State<RuntimeServerState>,
     Json(request): Json<SessionRunRequest>,
 ) -> Json<crate::RuntimeSessionResponse> {
-    let mut session = state
+    run_session_for(&state, state.sessions.default_record(), request)
+}
+
+async fn run_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SessionRunRequest>,
+) -> Json<crate::RuntimeSessionResponse> {
+    run_session_for(&state, state.sessions.get_or_create(&session_id), request)
+}
+
+fn run_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    request: SessionRunRequest,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
     let response = session.run_current(request.frames.unwrap_or(1));
-    session_json(&state, response)
+    session_json(state, response)
 }
 
 async fn mutate_session(
     State(state): State<RuntimeServerState>,
     Json(value): Json<serde_json::Value>,
 ) -> Json<crate::RuntimePatchResponse> {
-    let mut session = state
+    mutate_session_for(&state, state.sessions.default_record(), value)
+}
+
+async fn mutate_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(value): Json<serde_json::Value>,
+) -> Json<crate::RuntimePatchResponse> {
+    mutate_session_for(&state, state.sessions.get_or_create(&session_id), value)
+}
+
+fn mutate_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    value: serde_json::Value,
+) -> Json<crate::RuntimePatchResponse> {
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
@@ -722,27 +898,43 @@ async fn mutate_session(
                     "invalid runtime mutation: {error}"
                 ))],
             );
-            return patch_json(&state, response);
+            return patch_json(state, response);
         }
     };
 
     let response = session.apply_mutation(mutation);
     if response.ok && response.applied {
         publish_session_event(
-            &state,
+            &record,
             RuntimeSessionEventKind::Mutate,
             &session,
             response.diagnostics.clone(),
         );
     }
-    patch_json(&state, response)
+    patch_json(state, response)
 }
 
 async fn apply_session_operation(
     State(state): State<RuntimeServerState>,
     Json(value): Json<serde_json::Value>,
 ) -> Json<crate::PasteGraphFragmentResponse> {
-    let mut session = state
+    apply_session_operation_for(&state, state.sessions.default_record(), value)
+}
+
+async fn apply_session_operation_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(value): Json<serde_json::Value>,
+) -> Json<crate::PasteGraphFragmentResponse> {
+    apply_session_operation_for(&state, state.sessions.get_or_create(&session_id), value)
+}
+
+fn apply_session_operation_for(
+    _state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    value: serde_json::Value,
+) -> Json<crate::PasteGraphFragmentResponse> {
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
@@ -792,7 +984,7 @@ async fn apply_session_operation(
     let response = session.apply_runtime_operation(operation);
     if response.ok && response.applied {
         publish_session_event(
-            &state,
+            &record,
             RuntimeSessionEventKind::Mutate,
             &session,
             Vec::new(),
@@ -802,7 +994,18 @@ async fn apply_session_operation(
 }
 
 async fn session_history(State(state): State<RuntimeServerState>) -> Json<crate::RuntimeHistory> {
-    let session = state
+    session_history_for(state.sessions.default_record())
+}
+
+async fn session_history_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimeHistory> {
+    session_history_for(state.sessions.get_or_create(&session_id))
+}
+
+fn session_history_for(record: RuntimeSessionRecord) -> Json<crate::RuntimeHistory> {
+    let session = record
         .session
         .read()
         .expect("runtime session lock should not be poisoned");
@@ -812,47 +1015,91 @@ async fn session_history(State(state): State<RuntimeServerState>) -> Json<crate:
 async fn undo_session(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimePatchResponse> {
-    let mut session = state
+    undo_session_for(&state, state.sessions.default_record())
+}
+
+async fn undo_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimePatchResponse> {
+    undo_session_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn undo_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimePatchResponse> {
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
     let response = session.undo();
     if response.ok && response.applied {
         publish_session_event(
-            &state,
+            &record,
             RuntimeSessionEventKind::Undo,
             &session,
             response.diagnostics.clone(),
         );
     }
-    patch_json(&state, response)
+    patch_json(state, response)
 }
 
 async fn redo_session(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimePatchResponse> {
-    let mut session = state
+    redo_session_for(&state, state.sessions.default_record())
+}
+
+async fn redo_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimePatchResponse> {
+    redo_session_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn redo_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimePatchResponse> {
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
     let response = session.redo();
     if response.ok && response.applied {
         publish_session_event(
-            &state,
+            &record,
             RuntimeSessionEventKind::Redo,
             &session,
             response.diagnostics.clone(),
         );
     }
-    patch_json(&state, response)
+    patch_json(state, response)
 }
 
 async fn control_event(
     State(state): State<RuntimeServerState>,
     Json(request): Json<RuntimeControlEventRequest>,
 ) -> Json<RuntimeControlEventResponse> {
+    control_event_for(&state, state.sessions.default_record(), request)
+}
+
+async fn control_event_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<RuntimeControlEventRequest>,
+) -> Json<RuntimeControlEventResponse> {
+    control_event_for(&state, state.sessions.get_or_create(&session_id), request)
+}
+
+fn control_event_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    request: RuntimeControlEventRequest,
+) -> Json<RuntimeControlEventResponse> {
     let (mut response, control_snapshot) = {
-        let mut session = state
+        let mut session = record
             .session
             .write()
             .expect("runtime session lock should not be poisoned");
@@ -866,7 +1113,7 @@ async fn control_event(
     };
 
     if let Some(control_snapshot) = control_snapshot {
-        let mut preview = state
+        let mut preview = record
             .preview
             .lock()
             .expect("runtime preview lock should not be poisoned");
@@ -875,7 +1122,7 @@ async fn control_event(
         }
     }
 
-    control_event_json(&state, response)
+    control_event_json(state, response)
 }
 
 fn add_preview_control_update_warning(response: &mut RuntimeControlEventResponse, error: String) {
@@ -889,7 +1136,18 @@ fn add_preview_control_update_warning(response: &mut RuntimeControlEventResponse
 async fn control_state(
     State(state): State<RuntimeServerState>,
 ) -> Json<RuntimeControlStateResponse> {
-    let session = state
+    control_state_for(state.sessions.default_record())
+}
+
+async fn control_state_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<RuntimeControlStateResponse> {
+    control_state_for(state.sessions.get_or_create(&session_id))
+}
+
+fn control_state_for(record: RuntimeSessionRecord) -> Json<RuntimeControlStateResponse> {
+    let session = record
         .session
         .read()
         .expect("runtime session lock should not be poisoned");
@@ -900,70 +1158,130 @@ async fn control_read(
     State(state): State<RuntimeServerState>,
     Json(request): Json<RuntimeControlReadRequest>,
 ) -> Json<RuntimeControlReadResponse> {
-    let session = state
+    control_read_for(&state, state.sessions.default_record(), request)
+}
+
+async fn control_read_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<RuntimeControlReadRequest>,
+) -> Json<RuntimeControlReadResponse> {
+    control_read_for(&state, state.sessions.get_or_create(&session_id), request)
+}
+
+fn control_read_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    request: RuntimeControlReadRequest,
+) -> Json<RuntimeControlReadResponse> {
+    let session = record
         .session
         .read()
         .expect("runtime session lock should not be poisoned");
     let response = session.read_control(request);
-    control_read_json(&state, response)
+    control_read_json(state, response)
 }
 
 async fn clear_session(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimeSessionResponse> {
+    clear_session_for(&state, state.sessions.default_record())
+}
+
+async fn clear_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimeSessionResponse> {
+    clear_session_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn clear_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimeSessionResponse> {
     let snapshot = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
         session.snapshot()
     };
-    let _ = state
+    let _ = record
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned")
         .stop(snapshot);
 
-    let mut session = state
+    let mut session = record
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
     let response = session.clear();
     if response.ok {
         publish_session_event(
-            &state,
+            &record,
             RuntimeSessionEventKind::Clear,
             &session,
             response.diagnostics.clone(),
         );
     }
-    session_json(&state, response)
+    session_json(state, response)
 }
 
 async fn preview_status(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimePreviewStatusResponse> {
+    preview_status_for(&state, state.sessions.default_record())
+}
+
+async fn preview_status_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    preview_status_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn preview_status_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimePreviewStatusResponse> {
     let snapshot = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
         session.snapshot()
     };
-    let mut preview = state
+    let mut preview = record
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
     let response = preview.status(snapshot);
-    preview_status_json(&state, response)
+    preview_status_json(state, response)
 }
 
 async fn start_preview(
     State(state): State<RuntimeServerState>,
     body: Bytes,
 ) -> Json<crate::RuntimePreviewStatusResponse> {
+    start_preview_for(&state, state.sessions.default_record(), body)
+}
+
+async fn start_preview_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    start_preview_for(&state, state.sessions.get_or_create(&session_id), body)
+}
+
+fn start_preview_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    body: Bytes,
+) -> Json<crate::RuntimePreviewStatusResponse> {
     let snapshot = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
@@ -972,70 +1290,112 @@ async fn start_preview(
     let request = match preview_start_request(&body) {
         Ok(request) => request,
         Err(diagnostic) => {
-            let preview = state
+            let preview = record
                 .preview
                 .lock()
                 .expect("runtime preview lock should not be poisoned");
             let response = preview.request_error(snapshot, diagnostic);
-            return preview_status_json(&state, response);
+            return preview_status_json(state, response);
         }
     };
     let context = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
         session.preview_context()
     };
-    let mut preview = state
+    let mut preview = record
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
     let response = preview.start(context, snapshot, request.restart);
-    preview_status_json(&state, response)
+    preview_status_json(state, response)
 }
 
 async fn restart_preview(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimePreviewStatusResponse> {
+    restart_preview_for(&state, state.sessions.default_record())
+}
+
+async fn restart_preview_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    restart_preview_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn restart_preview_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimePreviewStatusResponse> {
     let (snapshot, context) = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
         (session.snapshot(), session.preview_context())
     };
-    let mut preview = state
+    let mut preview = record
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
     let response = preview.restart(context, snapshot);
-    preview_status_json(&state, response)
+    preview_status_json(state, response)
 }
 
 async fn stop_preview(
     State(state): State<RuntimeServerState>,
 ) -> Json<crate::RuntimePreviewStatusResponse> {
+    stop_preview_for(&state, state.sessions.default_record())
+}
+
+async fn stop_preview_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimePreviewStatusResponse> {
+    stop_preview_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn stop_preview_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimePreviewStatusResponse> {
     let snapshot = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
         session.snapshot()
     };
-    let mut preview = state
+    let mut preview = record
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
     let response = preview.stop(snapshot);
-    preview_status_json(&state, response)
+    preview_status_json(state, response)
 }
 
 async fn generated_shader(
     State(state): State<RuntimeServerState>,
 ) -> Json<GeneratedShaderResponse> {
+    generated_shader_for(&state, state.sessions.default_record())
+}
+
+async fn generated_shader_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<GeneratedShaderResponse> {
+    generated_shader_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn generated_shader_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<GeneratedShaderResponse> {
     let context = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
@@ -1072,7 +1432,7 @@ async fn generated_shader(
         },
     };
 
-    generated_shader_json(&state, response)
+    generated_shader_json(state, response)
 }
 
 async fn import_asset(
@@ -1164,32 +1524,60 @@ async fn get_asset(
 async fn session_telemetry(
     State(state): State<RuntimeServerState>,
 ) -> Json<RuntimeTelemetrySnapshot> {
-    Json(telemetry_snapshot(&state))
+    Json(telemetry_snapshot(&state, state.sessions.default_record()))
+}
+
+async fn session_telemetry_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<RuntimeTelemetrySnapshot> {
+    Json(telemetry_snapshot(
+        &state,
+        state.sessions.get_or_create(&session_id),
+    ))
 }
 
 async fn session_telemetry_stream(
     State(state): State<RuntimeServerState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    session_telemetry_stream_for(state, DEFAULT_SESSION_ID.to_owned())
+}
+
+async fn session_telemetry_stream_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    session_telemetry_stream_for(state, session_id)
+}
+
+fn session_telemetry_stream_for(
+    state: RuntimeServerState,
+    session_id: String,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream =
         IntervalStream::new(tokio::time::interval(Duration::from_millis(1000))).map(move |_| {
+            let record = state.sessions.get_or_create(&session_id);
             let event = Event::default()
                 .event("telemetry")
-                .json_data(telemetry_snapshot(&state))
+                .json_data(telemetry_snapshot(&state, record))
                 .expect("telemetry snapshot should serialize");
             Ok(event)
         });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-fn telemetry_snapshot(state: &RuntimeServerState) -> RuntimeTelemetrySnapshot {
+fn telemetry_snapshot(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> RuntimeTelemetrySnapshot {
     let snapshot = {
-        let session = state
+        let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
         session.snapshot()
     };
-    let mut preview = state
+    let mut preview = record
         .preview
         .lock()
         .expect("runtime preview lock should not be poisoned");
@@ -1279,14 +1667,6 @@ fn asset_id(name: &str, mime_type: &str, bytes: &Bytes) -> String {
         .as_nanos()
         .hash(&mut hasher);
     format!("asset_{:016x}", hasher.finish())
-}
-
-fn created_at_now() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    format!("unix-ms:{millis}")
 }
 
 fn asset_kind(mime_type: &str) -> String {
@@ -1588,11 +1968,12 @@ mod tests {
         },
     };
     use serde_json::{Value, json};
+    use skenion_contracts::validate_runtime_session_event;
     use tower::ServiceExt;
 
     use crate::{
         RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse, RuntimeLogEvent, RuntimeLogSource,
-        io_device_manager::RuntimeIoDeviceRegistry,
+        RuntimeSession, RuntimeSessionEvent, io_device_manager::RuntimeIoDeviceRegistry,
     };
 
     use super::*;
@@ -1653,6 +2034,13 @@ mod tests {
             "runtime.logs",
             "runtime.logs.stream",
             "runtime.extensions",
+            "session.addressing",
+            "session.info",
+            "session.events.replay",
+            "runtime.profile.localManaged",
+            "runtime.sidecar.startup",
+            "runtime.sidecar.health",
+            "runtime.sidecar.shutdown",
             "io.devices",
         ] {
             assert!(
@@ -1662,6 +2050,202 @@ mod tests {
                 "missing capability {expected}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sidecar_startup_health_and_shutdown_are_machine_readable() {
+        let app = runtime_router();
+
+        let startup = get_json_with(app.clone(), "/v0/sidecar/startup").await;
+        let health = get_json_with(app.clone(), "/v0/sidecar/health").await;
+        let empty_shutdown = post_empty_with(app.clone(), "/v0/sidecar/shutdown").await;
+        let shutdown = post_json_with(
+            app.clone(),
+            "/v0/sidecar/shutdown",
+            json!({ "reason": "window-close", "ownerWindowId": "window-1" }),
+        )
+        .await;
+        let invalid_shutdown = post_raw_with(app, "/v0/sidecar/shutdown", b"{".to_vec()).await;
+        let startup_from_state = runtime_state_with_dry_preview().sidecar_startup_response();
+
+        assert_eq!(startup["schema"], "skenion.runtime.sidecar.startup");
+        assert_eq!(startup["ok"], true);
+        assert_eq!(startup["runtime"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(startup["runtime"]["apiVersion"], RUNTIME_API_VERSION);
+        assert_eq!(startup["endpoint"]["protocol"], "http");
+        assert_eq!(startup["profile"]["mode"], "local-managed");
+        assert_eq!(startup["profile"]["ownership"], "owned-child");
+        assert_eq!(startup["defaultSessionId"], DEFAULT_SESSION_ID);
+        assert_eq!(startup["token"]["required"], false);
+        assert_eq!(startup["token"]["header"], "Authorization");
+        assert_eq!(startup["shutdown"]["scope"], "owned-child-only");
+        assert!(startup["defaultSessionUrl"].is_string());
+        assert_eq!(health["schema"], "skenion.runtime.sidecar.health");
+        assert_eq!(health["ok"], true);
+        assert_eq!(health["readiness"], "ready");
+        assert_eq!(health["runtime"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(health["runtime"]["apiVersion"], RUNTIME_API_VERSION);
+        assert_eq!(health["endpoint"]["protocol"], "http");
+        assert_eq!(health["profile"]["mode"], "local-managed");
+        assert!(health.get("token").is_none());
+        assert!(health.get("shutdown").is_none());
+        assert!(health.get("defaultSessionUrl").is_none());
+        assert_eq!(empty_shutdown["ok"], true);
+        assert_eq!(shutdown["schema"], "skenion.runtime.sidecar.shutdown");
+        assert_eq!(shutdown["ok"], true);
+        assert_eq!(shutdown["accepted"], false);
+        assert_eq!(shutdown["action"], "host-owned-process-stop-required");
+        assert_eq!(shutdown["scope"], "owned-child-only");
+        assert_eq!(invalid_shutdown["ok"], false);
+        assert!(startup_from_state.ok);
+        assert!(
+            runtime_state_with_dry_preview()
+                .sidecar_health_response()
+                .ok
+        );
+    }
+
+    #[tokio::test]
+    async fn session_addressed_route_family_covers_canonical_surface() {
+        let app = runtime_router_with_dry_preview();
+        let registry = RuntimeSessionRegistry::dry_preview();
+        assert_eq!(registry.get_or_create("").id, DEFAULT_SESSION_ID);
+
+        post_json_with(app.clone(), "/v0/sessions/gamma/load", sample_project()).await;
+        let alias_info = get_json_with(app.clone(), "/v0/session/info").await;
+        let gamma_info = get_json_with(app.clone(), "/v0/sessions/gamma/info").await;
+        assert_eq!(alias_info["sessionId"], DEFAULT_SESSION_ID);
+        assert_eq!(gamma_info["sessionId"], "gamma");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/gamma/events/stream")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("session event stream should emit")
+            .expect("session event stream should have a chunk")
+            .expect("session event stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("session event stream should be utf8");
+        assert!(text.contains("\"sessionId\":\"gamma\""));
+
+        assert_eq!(
+            post_empty_with(app.clone(), "/v0/sessions/gamma/validate").await["ok"],
+            true
+        );
+        assert_eq!(
+            post_empty_with(app.clone(), "/v0/sessions/gamma/plan").await["ok"],
+            true
+        );
+        assert_eq!(
+            post_json_with(
+                app.clone(),
+                "/v0/sessions/gamma/run",
+                json!({ "frames": 1 })
+            )
+            .await["ok"],
+            true
+        );
+
+        let read = post_json_with(
+            app.clone(),
+            "/v0/sessions/gamma/control/read",
+            json!({ "nodeId": "value_1", "target": "port", "id": "value" }),
+        )
+        .await;
+        assert_eq!(read["ok"], true);
+
+        assert_eq!(
+            get_json_with(app.clone(), "/v0/sessions/gamma/preview").await["ok"],
+            true
+        );
+        assert_eq!(
+            post_empty_with(app.clone(), "/v0/sessions/gamma/preview/start").await["ok"],
+            true
+        );
+        assert_eq!(
+            post_empty_with(app.clone(), "/v0/sessions/gamma/preview/restart").await["ok"],
+            true
+        );
+        assert_eq!(
+            post_empty_with(app.clone(), "/v0/sessions/gamma/preview/stop").await["ok"],
+            true
+        );
+
+        assert_eq!(
+            get_json_with(app.clone(), "/v0/sessions/gamma/telemetry").await["ok"],
+            true
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/gamma/telemetry/stream")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("telemetry stream should emit")
+            .expect("telemetry stream should have a chunk")
+            .expect("telemetry stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("telemetry stream should be utf8");
+        assert!(text.contains("event: telemetry"));
+
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/shader/load",
+            sample_shader_project(),
+        )
+        .await;
+        assert_eq!(
+            get_json_with(app.clone(), "/v0/sessions/shader/render/generated-shader").await["ok"],
+            true
+        );
+
+        post_json_with(app.clone(), "/v0/sessions/delta/load", sample_project()).await;
+        assert_eq!(
+            post_json_with(
+                app.clone(),
+                "/v0/sessions/delta/operation",
+                paste_operation("1")
+            )
+            .await["ok"],
+            true
+        );
+
+        assert_eq!(
+            post_json_with(
+                app.clone(),
+                "/v0/sessions/gamma/mutate",
+                graph_mutation(set_value_patch("1"))
+            )
+            .await["ok"],
+            true
+        );
+        assert_eq!(
+            post_empty_with(app.clone(), "/v0/sessions/gamma/undo").await["ok"],
+            true
+        );
+        assert_eq!(
+            post_empty_with(app.clone(), "/v0/sessions/gamma/redo").await["ok"],
+            true
+        );
+        assert_eq!(
+            delete_json_with(app, "/v0/sessions/gamma").await["ok"],
+            true
+        );
     }
 
     #[tokio::test]
@@ -1765,6 +2349,138 @@ mod tests {
         assert!(text.contains("\"kind\":\"snapshot\""));
     }
 
+    fn session_event_from_sse_text(text: &str) -> RuntimeSessionEvent {
+        let data = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect::<Vec<_>>()
+            .join("");
+        serde_json::from_str(&data).expect("session SSE event data should parse")
+    }
+
+    #[tokio::test]
+    async fn session_event_stream_emits_live_events_after_cursor() {
+        let state = runtime_state_with_dry_preview();
+        let app = runtime_router_with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/alpha/events/stream?after=0")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let record = state.sessions.get_or_create("alpha");
+        {
+            let session = record
+                .session
+                .read()
+                .expect("runtime session lock should not be poisoned");
+            publish_session_event(
+                &record,
+                RuntimeSessionEventKind::Snapshot,
+                &session,
+                Vec::new(),
+            );
+        }
+
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("session event stream should emit")
+            .expect("session event stream should have a chunk")
+            .expect("session event stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("session event stream should be utf8");
+        assert!(text.contains("event: session"));
+        assert!(text.contains("\"sessionId\":\"alpha\""));
+        assert!(text.contains("\"cursor\":\"1\""));
+        let event = session_event_from_sse_text(text);
+        validate_runtime_session_event(&event).expect("live event should validate");
+    }
+
+    #[tokio::test]
+    async fn session_event_stream_replays_after_query_and_last_event_id() {
+        let state = runtime_state_with_dry_preview();
+        let app = runtime_router_with_state(state.clone());
+        post_json_with(app.clone(), "/v0/sessions/alpha/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/alpha/load",
+            sample_shader_project(),
+        )
+        .await;
+
+        let record = state.sessions.get_or_create("alpha");
+        assert_eq!(
+            crate::session_registry::current_session_event_sequence(&record),
+            2
+        );
+
+        let after_query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/alpha/events/stream?after=1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let mut after_query_stream = after_query.into_body().into_data_stream();
+        let after_query_chunk =
+            tokio::time::timeout(Duration::from_secs(1), after_query_stream.next())
+                .await
+                .expect("session event stream should emit")
+                .expect("session event stream should have a chunk")
+                .expect("session event stream chunk should be ok");
+        let after_query_text =
+            std::str::from_utf8(&after_query_chunk).expect("session event stream should be utf8");
+        let after_query_event = session_event_from_sse_text(after_query_text);
+
+        assert_eq!(after_query_event.sequence, 2);
+        assert!(after_query_event.replay.replayed);
+        validate_runtime_session_event(&after_query_event)
+            .expect("after query replay event should validate");
+        assert_eq!(
+            crate::session_registry::current_session_event_sequence(&record),
+            2
+        );
+
+        let last_event_id = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/alpha/events/stream")
+                    .header("last-event-id", "1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let mut last_event_id_stream = last_event_id.into_body().into_data_stream();
+        let last_event_id_chunk =
+            tokio::time::timeout(Duration::from_secs(1), last_event_id_stream.next())
+                .await
+                .expect("session event stream should emit")
+                .expect("session event stream should have a chunk")
+                .expect("session event stream chunk should be ok");
+        let last_event_id_text =
+            std::str::from_utf8(&last_event_id_chunk).expect("session event stream should be utf8");
+        let last_event_id_event = session_event_from_sse_text(last_event_id_text);
+
+        assert_eq!(last_event_id_event.sequence, 2);
+        assert!(last_event_id_event.replay.replayed);
+        validate_runtime_session_event(&last_event_id_event)
+            .expect("Last-Event-ID replay event should validate");
+        assert_eq!(
+            crate::session_registry::current_session_event_sequence(&record),
+            2
+        );
+    }
+
     #[test]
     fn stream_broadcast_helpers_format_live_and_gap_events() {
         let log_event = RuntimeLogEvent {
@@ -1776,23 +2492,57 @@ mod tests {
             message: "test log".to_owned(),
         };
         let session = RuntimeSession::default();
-        let session_event = RuntimeSessionEvent {
-            schema: "skenion.runtime.session.event",
-            schema_version: "0.1.0",
-            id: "session_event_000001".to_owned(),
-            sequence: 1,
-            kind: RuntimeSessionEventKind::Snapshot,
-            snapshot: session.snapshot(),
-            history: session.history(),
-            mutation: None,
-            diagnostics: Vec::new(),
-            created_at: "1970-01-01T00:00:00.000Z".to_owned(),
-        };
+        let record = RuntimeSessionRegistry::dry_preview().default_record();
+        let session_event = session_snapshot_event(&record, &session);
 
         assert!(runtime_log_broadcast_event(Ok(log_event)).is_ok());
         assert!(runtime_log_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1))).is_ok());
-        assert!(session_broadcast_event(Ok(session_event)).is_ok());
-        assert!(session_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1))).is_ok());
+        assert!(
+            session_broadcast_event_after_high_water(Ok(session_event), record.clone(), 0)
+                .is_some()
+        );
+        assert!(
+            session_broadcast_event_after_high_water(
+                Err(BroadcastStreamRecvError::Lagged(1)),
+                record,
+                0
+            )
+            .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn per_session_events_carry_session_id_sequence_and_replay_metadata() {
+        let state = runtime_state_with_dry_preview();
+        let app = runtime_router_with_state(state.clone());
+
+        post_json_with(app.clone(), "/v0/sessions/alpha/load", sample_project()).await;
+        post_json_with(app, "/v0/sessions/beta/load", sample_shader_project()).await;
+
+        let alpha = state.sessions.get_or_create("alpha");
+        let beta = state.sessions.get_or_create("beta");
+        let alpha_events = alpha
+            .event_store
+            .lock()
+            .expect("event store should not be poisoned")
+            .clone();
+        let beta_events = beta
+            .event_store
+            .lock()
+            .expect("event store should not be poisoned")
+            .clone();
+
+        assert_eq!(alpha_events.len(), 1);
+        assert_eq!(alpha_events[0].session_id, "alpha");
+        assert_eq!(alpha_events[0].sequence, 1);
+        assert_eq!(alpha_events[0].replay.cursor, "1");
+        assert_eq!(beta_events[0].session_id, "beta");
+        assert_eq!(beta_events[0].sequence, 1);
+
+        let replay = capture_session_replay(&alpha, Some(0), alpha_events[0].clone()).events;
+        assert_eq!(replay.len(), 1);
+        assert!(replay[0].replay.replayed);
+        assert_eq!(replay[0].session_id, "alpha");
     }
 
     #[tokio::test]
@@ -2538,6 +3288,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_alias_and_explicit_default_session_share_behavior() {
+        let app = runtime_router();
+
+        let alias = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        let explicit = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let info = get_json_with(app, "/v0/sessions/default/info").await;
+
+        assert_eq!(alias["ok"], true);
+        assert_eq!(explicit["ok"], true);
+        assert_eq!(alias["snapshot"], explicit["snapshot"]);
+        assert_eq!(info["sessionId"], DEFAULT_SESSION_ID);
+        assert_eq!(
+            info["snapshot"]["project"]["graph"]["id"],
+            alias["snapshot"]["project"]["graph"]["id"]
+        );
+        let info = serde_json::from_value::<RuntimeSessionInfoResponse>(info)
+            .expect("session info should match contract shape");
+        skenion_contracts::validate_runtime_session_info_response(&info)
+            .expect("session info should validate against contracts");
+    }
+
+    #[tokio::test]
+    async fn explicit_sessions_keep_graph_control_and_history_state_separate() {
+        let app = runtime_router();
+
+        post_json_with(app.clone(), "/v0/sessions/alpha/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/beta/load",
+            sample_shader_project(),
+        )
+        .await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/alpha/mutate",
+            graph_mutation(set_value_patch("1")),
+        )
+        .await;
+        let alpha_control = post_json_with(
+            app.clone(),
+            "/v0/sessions/alpha/control/event",
+            json!({
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": { "selector": "set", "atoms": [{ "type": "float", "representation": "f32", "value": 7.0 }] }
+            }),
+        )
+        .await;
+
+        let alpha = get_json_with(app.clone(), "/v0/sessions/alpha").await;
+        let beta = get_json_with(app.clone(), "/v0/sessions/beta").await;
+        let alpha_history = get_json_with(app.clone(), "/v0/sessions/alpha/history").await;
+        let beta_history = get_json_with(app.clone(), "/v0/sessions/beta/history").await;
+        let beta_control = get_json_with(app, "/v0/sessions/beta/control/state").await;
+
+        assert_eq!(alpha_control["ok"], true);
+        assert_eq!(alpha["snapshot"]["project"]["graph"]["id"], "minimal-value");
+        assert_eq!(alpha["snapshot"]["project"]["graph"]["revision"], "2");
+        assert_eq!(
+            beta["snapshot"]["project"]["graph"]["id"],
+            "shader-diagnostics"
+        );
+        assert_eq!(beta["snapshot"]["project"]["graph"]["revision"], "1");
+        assert_eq!(alpha_history["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(beta_history["entries"], json!([]));
+        assert_eq!(beta_control["controlRevision"], 0);
+    }
+
+    #[tokio::test]
     async fn invalid_session_load_does_not_replace_existing_session() {
         let app = runtime_router();
         let loaded = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
@@ -2636,6 +3455,34 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("does not match session graph revision")
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_attribution_is_optional_and_client_metadata_is_preserved() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let omitted = post_json_with(
+            app.clone(),
+            "/v0/session/mutate",
+            graph_mutation(set_value_patch("1")),
+        )
+        .await;
+        let mut attributed_mutation = graph_mutation(set_value_patch("2"));
+        attributed_mutation["clientId"] = json!("studio-window-a");
+        let attributed = post_json_with(app, "/v0/session/mutate", attributed_mutation).await;
+
+        assert_eq!(omitted["ok"], true);
+        assert_eq!(omitted["history"]["entries"][0]["clientId"], Value::Null);
+        assert_eq!(attributed["ok"], true);
+        assert_eq!(
+            attributed["history"]["entries"][1]["clientId"],
+            "studio-window-a"
+        );
+        assert_eq!(
+            attributed["history"]["entries"][1]["mutation"]["clientId"],
+            "studio-window-a"
         );
     }
 
@@ -2929,19 +3776,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_control_event_reports_running_preview_snapshot_update_warnings() {
-        let logs = std::sync::Arc::new(RuntimeLogStore::default());
-        let (session_events, _) = tokio::sync::broadcast::channel(256);
-        let state = RuntimeServerState {
-            session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
-            session_events,
-            session_event_sequence: std::sync::Arc::new(std::sync::Mutex::new(1)),
-            preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
-            assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
-            io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
-            extensions: std::sync::Arc::new(RuntimeExtensionManager::default()),
-            logs,
-            started_at: std::time::Instant::now(),
-        };
+        let state = runtime_state_with_dry_preview();
         let app = runtime_router_with_state(state.clone());
         post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
         post_empty_with(app.clone(), "/v0/session/preview/start").await;
@@ -2955,6 +3790,8 @@ mod tests {
         ));
         std::fs::write(&blocker, b"blocker").expect("blocker should write");
         state
+            .sessions
+            .default_record()
             .preview
             .lock()
             .expect("preview lock should not be poisoned")
@@ -3421,35 +4258,35 @@ mod tests {
     }
 
     fn runtime_router_with_dry_preview() -> Router {
+        runtime_router_with_state(runtime_state_with_dry_preview())
+    }
+
+    fn runtime_state_with_dry_preview() -> RuntimeServerState {
         let logs = std::sync::Arc::new(RuntimeLogStore::default());
-        let (session_events, _) = tokio::sync::broadcast::channel(256);
-        runtime_router_with_state(RuntimeServerState {
-            session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
-            session_events,
-            session_event_sequence: std::sync::Arc::new(std::sync::Mutex::new(1)),
-            preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
+        RuntimeServerState {
+            sessions: RuntimeSessionRegistry::dry_preview(),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
             extensions: std::sync::Arc::new(RuntimeExtensionManager::default()),
             logs,
+            endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
+            started_at_wall_clock: created_at_now(),
             started_at: std::time::Instant::now(),
-        })
+        }
     }
 
     fn runtime_router_with_fake_io_devices(devices: Vec<RuntimeIoDeviceDescriptor>) -> Router {
         let logs = std::sync::Arc::new(RuntimeLogStore::default());
-        let (session_events, _) = tokio::sync::broadcast::channel(256);
         runtime_router_with_state(RuntimeServerState {
-            session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
-            session_events,
-            session_event_sequence: std::sync::Arc::new(std::sync::Mutex::new(1)),
-            preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
+            sessions: RuntimeSessionRegistry::dry_preview(),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::with_device_registry(
                 Arc::new(ServerFakeIoDeviceRegistry { devices }),
             )),
             extensions: std::sync::Arc::new(RuntimeExtensionManager::default()),
             logs,
+            endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
+            started_at_wall_clock: created_at_now(),
             started_at: std::time::Instant::now(),
         })
     }

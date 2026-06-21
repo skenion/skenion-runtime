@@ -4,10 +4,11 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
     AudioBackendConfig, AudioDspPlan, AudioDspPlanOptions, DEFAULT_HOST, DEFAULT_PORT,
-    ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit, build_audio_dsp_plan,
-    build_execution_plan, format_dummy_execution_text, format_midi_clock_fixture_report_text,
-    format_plan_text, load_graph_document, load_node_definition, run_dummy_execution,
-    run_midi_clock_fixture_file, run_preview_window, run_render_preview_window, serve_runtime,
+    ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit, ServeRuntimeOptions,
+    build_audio_dsp_plan, build_execution_plan, format_dummy_execution_text,
+    format_midi_clock_fixture_report_text, format_plan_text, load_graph_document,
+    load_node_definition, run_dummy_execution, run_midi_clock_fixture_file, run_preview_window,
+    run_render_preview_window, serve_runtime, serve_runtime_with_options,
     start_default_audio_output_backend, validate_project,
 };
 
@@ -158,6 +159,9 @@ enum Command {
         /// Port to bind.
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
+        /// Print machine-readable local-managed sidecar startup JSON after binding.
+        #[arg(long)]
+        startup_json: bool,
     },
 }
 
@@ -316,7 +320,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Command::ClockMidi { simulate, format } => run_clock_midi(simulate, format),
-        Command::Serve { host, port } => serve_runtime(&host, port).await,
+        Command::Serve {
+            host,
+            port,
+            startup_json,
+        } => {
+            if startup_json {
+                serve_runtime_with_options(&host, port, ServeRuntimeOptions { startup_json }).await
+            } else {
+                serve_runtime(&host, port).await
+            }
+        }
     }
 }
 
