@@ -1,15 +1,23 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CanvasNodeView, ControlState, DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch,
-    GraphPatchEvent, GraphPatchEventKind, NodeDefinition, NodeRegistry, PreviewContext,
+    CanvasNodeView, ControlState, DataFlow, DataType, DummyExecutionReport, Edge, EdgeSpecV02,
+    ExecutionPlan, GraphDocument, GraphFragmentOutsideEndpointPolicyV02, GraphNode, GraphNodeV02,
+    GraphPatch, GraphPatchEvent, GraphPatchEventKind, GraphPatchOperation, GraphTargetRef,
+    IdConflictPolicy, IdRemapResult, NodeDefinition, NodeRegistry, PasteGraphFragmentRequest,
+    PasteGraphFragmentResponse, PastePlacement, PatchPath, Port, PortActivation, PortDirection,
+    PortDirectionV02, PortRateV02, PortRef, PortSpecV02, PreviewContext,
     PreviewControlStateSnapshot, ProjectRequest, RuntimeControlEventRequest,
     RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic, ViewState,
-    apply_graph_patch, build_execution_plan, create_default_view_state_for_graph,
-    invert_graph_patch, read_graph_param, read_graph_port, run_dummy_execution,
+    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic,
+    RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ViewState, apply_graph_patch,
+    build_execution_plan, create_default_view_state_for_graph, invert_graph_patch,
+    read_graph_param, read_graph_port, run_dummy_execution,
     server::{registry_from_nodes, validate_graph_with_registry},
 };
 
@@ -379,6 +387,27 @@ impl RuntimeSession {
             client_id: None,
             description: None,
         })
+    }
+
+    pub fn apply_runtime_operation(
+        &mut self,
+        envelope: RuntimeOperationEnvelope,
+    ) -> PasteGraphFragmentResponse {
+        let target = envelope.request.target.clone();
+        if let Err(report) = skenion_contracts::validate_runtime_operation_envelope(&envelope) {
+            return self.reject_paste_response(
+                target,
+                false,
+                operation_diagnostics_from_validation_report(report.to_string()),
+                IdRemapResult {
+                    node_id_map: BTreeMap::new(),
+                    edge_id_map: BTreeMap::new(),
+                    omitted_edge_ids: Vec::new(),
+                },
+            );
+        }
+
+        self.paste_graph_fragment(envelope)
     }
 
     pub fn history(&self) -> RuntimeHistory {
@@ -783,6 +812,138 @@ impl RuntimeSession {
         self.patch_response(true, true, false, diagnostics)
     }
 
+    fn paste_graph_fragment(
+        &mut self,
+        envelope: RuntimeOperationEnvelope,
+    ) -> PasteGraphFragmentResponse {
+        let request = envelope.request.clone();
+        let target = request.target.clone();
+        let Some(graph) = self.graph.as_ref() else {
+            return self.reject_paste_response(
+                target,
+                false,
+                vec![operation_error(
+                    "paste.target.no-project",
+                    "no project loaded in runtime session",
+                    Some(request.target),
+                    None,
+                    None,
+                    None,
+                    None,
+                )],
+                empty_id_remap(),
+            );
+        };
+
+        if let Err(diagnostic) = resolve_paste_target(&request.target, graph) {
+            return self.reject_paste_response(target, false, vec![*diagnostic], empty_id_remap());
+        }
+
+        if request.target.base_revision != graph.revision {
+            return self.reject_paste_response(
+                target,
+                true,
+                vec![operation_error(
+                    "paste.revision-conflict",
+                    format!(
+                        "target baseRevision {} does not match session graph revision {}",
+                        request.target.base_revision, graph.revision
+                    ),
+                    Some(request.target.clone()),
+                    Some(request.target.base_revision.clone()),
+                    Some(graph.revision.clone()),
+                    None,
+                    None,
+                )],
+                empty_id_remap(),
+            );
+        }
+
+        let lowered =
+            match lower_paste_graph_fragment(graph, self.view_revision, &request, &envelope) {
+                Ok(lowered) => lowered,
+                Err((diagnostics, id_remap)) => {
+                    return self.reject_paste_response(target, false, diagnostics, id_remap);
+                }
+            };
+        let revision_before = graph.revision.clone();
+        let mutation = RuntimeMutationRequest {
+            graph_patch: Some(lowered.graph_patch),
+            view_patch: lowered.view_patch,
+            client_id: envelope
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.client_id.clone()),
+            description: envelope
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.label.clone())
+                .or_else(|| Some(format!("Paste graph fragment {}", envelope.id))),
+        };
+
+        let response = self.apply_mutation(mutation);
+        let history_entry_id = if response.applied {
+            response
+                .history
+                .entries
+                .last()
+                .map(|entry| entry.id.clone())
+        } else {
+            None
+        };
+        let revision_after = response
+            .snapshot
+            .graph_revision()
+            .map(ToOwned::to_owned)
+            .filter(|_| response.applied);
+        let diagnostics = response
+            .diagnostics
+            .iter()
+            .map(|diagnostic| runtime_diagnostic_to_operation_diagnostic(diagnostic, &target))
+            .collect();
+
+        PasteGraphFragmentResponse {
+            schema: "skenion.runtime.paste-graph-fragment.response".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            ok: response.ok,
+            applied: response.applied,
+            conflict: response.conflict,
+            target,
+            revision_before,
+            revision_after,
+            history_entry_id,
+            id_remap: lowered.id_remap,
+            diagnostics,
+        }
+    }
+
+    fn reject_paste_response(
+        &self,
+        target: GraphTargetRef,
+        conflict: bool,
+        diagnostics: Vec<RuntimeOperationDiagnostic>,
+        id_remap: IdRemapResult,
+    ) -> PasteGraphFragmentResponse {
+        let revision_before = self
+            .graph
+            .as_ref()
+            .map(|graph| graph.revision.clone())
+            .unwrap_or_else(|| target.base_revision.clone());
+        PasteGraphFragmentResponse {
+            schema: "skenion.runtime.paste-graph-fragment.response".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            ok: false,
+            applied: false,
+            conflict,
+            target,
+            revision_before,
+            revision_after: None,
+            history_entry_id: None,
+            id_remap,
+            diagnostics,
+        }
+    }
+
     fn patch_response(
         &self,
         ok: bool,
@@ -986,6 +1147,428 @@ fn normalize_mutation_base_revisions(
     }
 }
 
+struct LoweredPaste {
+    graph_patch: GraphPatch,
+    view_patch: Option<RuntimeViewPatch>,
+    id_remap: IdRemapResult,
+}
+
+fn resolve_paste_target(
+    target: &GraphTargetRef,
+    graph: &GraphDocument,
+) -> Result<(), Box<RuntimeOperationDiagnostic>> {
+    match &target.path {
+        PatchPath::Root => Ok(()),
+        PatchPath::HelpWorkingCopy {
+            working_copy_id, ..
+        } if working_copy_id == &graph.id => Ok(()),
+        PatchPath::HelpWorkingCopy {
+            working_copy_id, ..
+        } => Err(Box::new(operation_error(
+            "paste.target.missing-help-working-copy",
+            format!("help working copy {working_copy_id} is not loaded in this runtime session"),
+            Some(target.clone()),
+            None,
+            Some(graph.revision.clone()),
+            None,
+            None,
+        ))),
+        PatchPath::ProjectPatchDefinition { patch_id } => Err(Box::new(operation_error(
+            "paste.target.unsupported-project-patch-definition",
+            format!(
+                "project patch definition {patch_id} cannot be mutated by the current runtime session substrate"
+            ),
+            Some(target.clone()),
+            None,
+            Some(graph.revision.clone()),
+            None,
+            None,
+        ))),
+        PatchPath::PackagePatchDefinition {
+            package_id,
+            patch_id,
+            ..
+        } => Err(Box::new(operation_error(
+            "paste.target.immutable-help-source",
+            format!(
+                "package/help source patch {package_id}/{patch_id} is immutable; paste into a help working copy instead"
+            ),
+            Some(target.clone()),
+            None,
+            Some(graph.revision.clone()),
+            None,
+            None,
+        ))),
+        PatchPath::EmbeddedPatchInstance { node_id, .. } => Err(Box::new(operation_error(
+            "paste.target.unsupported-embedded-patch-instance",
+            format!(
+                "embedded patch instance owned by node {node_id} cannot be mutated by the current runtime session substrate"
+            ),
+            Some(target.clone()),
+            None,
+            Some(graph.revision.clone()),
+            None,
+            None,
+        ))),
+    }
+}
+
+fn lower_paste_graph_fragment(
+    graph: &GraphDocument,
+    view_revision: u64,
+    request: &PasteGraphFragmentRequest,
+    envelope: &RuntimeOperationEnvelope,
+) -> Result<LoweredPaste, (Vec<RuntimeOperationDiagnostic>, IdRemapResult)> {
+    let outside_policy = request
+        .options
+        .as_ref()
+        .and_then(|options| options.outside_endpoint_policy)
+        .unwrap_or(GraphFragmentOutsideEndpointPolicyV02::Reject);
+    let id_conflict_policy = request
+        .options
+        .as_ref()
+        .and_then(|options| options.id_conflict_policy)
+        .unwrap_or(IdConflictPolicy::Remap);
+
+    let fragment_analysis =
+        skenion_contracts::analyze_graph_fragment_v02(&request.fragment, outside_policy);
+    if !fragment_analysis.ok {
+        let diagnostics = fragment_analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == "error")
+            .map(|diagnostic| RuntimeOperationDiagnostic {
+                severity: diagnostic.severity.clone(),
+                code: format!("paste.fragment.{}", diagnostic.code),
+                message: diagnostic.message.clone(),
+                path: None,
+                target: Some(request.target.clone()),
+                expected_revision: None,
+                actual_revision: Some(graph.revision.clone()),
+                duplicates: None,
+                nodes: diagnostic.nodes.clone(),
+                edges: diagnostic.edges.clone(),
+            })
+            .collect();
+        return Err((
+            diagnostics,
+            IdRemapResult {
+                omitted_edge_ids: fragment_analysis.omitted_edge_ids,
+                ..empty_id_remap()
+            },
+        ));
+    }
+
+    let mut used_node_ids: HashSet<String> =
+        graph.nodes.iter().map(|node| node.id.clone()).collect();
+    let mut duplicate_nodes = Vec::new();
+    let mut node_id_map = BTreeMap::new();
+    for node in &request.fragment.nodes {
+        let pasted_id = if used_node_ids.contains(&node.id) {
+            duplicate_nodes.push(node.id.clone());
+            match id_conflict_policy {
+                IdConflictPolicy::Reject => node.id.clone(),
+                IdConflictPolicy::Remap => next_available_node_id(&node.id, &used_node_ids),
+            }
+        } else {
+            node.id.clone()
+        };
+        used_node_ids.insert(pasted_id.clone());
+        node_id_map.insert(node.id.clone(), pasted_id);
+    }
+
+    if id_conflict_policy == IdConflictPolicy::Reject && !duplicate_nodes.is_empty() {
+        return Err((
+            vec![operation_error(
+                "paste.id-conflict",
+                "pasted fragment contains node ids that already exist in the target graph",
+                Some(request.target.clone()),
+                None,
+                Some(graph.revision.clone()),
+                Some(duplicate_nodes),
+                None,
+            )],
+            IdRemapResult {
+                node_id_map,
+                omitted_edge_ids: fragment_analysis.omitted_edge_ids,
+                ..empty_id_remap()
+            },
+        ));
+    }
+
+    let omitted_edge_ids: HashSet<String> =
+        fragment_analysis.omitted_edge_ids.iter().cloned().collect();
+    let mut edge_id_map = BTreeMap::new();
+    let mut ops = Vec::new();
+    for node in &request.fragment.nodes {
+        let pasted_id = node_id_map
+            .get(&node.id)
+            .expect("node remap should include every fragment node");
+        ops.push(GraphPatchOperation::AddNode {
+            node: graph_node_v02_to_v01(node, pasted_id),
+        });
+    }
+
+    for edge in &request.fragment.edges {
+        if omitted_edge_ids.contains(&edge.id) {
+            continue;
+        }
+        edge_id_map.insert(edge.id.clone(), edge.id.clone());
+        ops.push(GraphPatchOperation::AddEdge {
+            edge: remap_edge(edge, &node_id_map),
+        });
+    }
+
+    let view_patch = lower_fragment_view_patch(view_revision, request, &node_id_map);
+    Ok(LoweredPaste {
+        graph_patch: GraphPatch {
+            schema: "skenion.graph.patch".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: format!("paste_{}", envelope.id),
+            base_revision: request.target.base_revision.clone(),
+            client_id: envelope
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.client_id.clone()),
+            created_at: envelope.created_at.clone(),
+            description: envelope
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.label.clone())
+                .or_else(|| Some("Paste graph fragment".to_owned())),
+            ops,
+        },
+        view_patch,
+        id_remap: IdRemapResult {
+            node_id_map,
+            edge_id_map,
+            omitted_edge_ids: fragment_analysis.omitted_edge_ids,
+        },
+    })
+}
+
+fn empty_id_remap() -> IdRemapResult {
+    IdRemapResult {
+        node_id_map: BTreeMap::new(),
+        edge_id_map: BTreeMap::new(),
+        omitted_edge_ids: Vec::new(),
+    }
+}
+
+fn next_available_node_id(base: &str, used_node_ids: &HashSet<String>) -> String {
+    for index in 2.. {
+        let candidate = format!("{base}_{index}");
+        if !used_node_ids.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded id remap search should always return");
+}
+
+fn graph_node_v02_to_v01(node: &GraphNodeV02, pasted_id: &str) -> GraphNode {
+    GraphNode {
+        id: pasted_id.to_owned(),
+        kind: node.kind.clone(),
+        kind_version: node.kind_version.clone(),
+        params: node.params.clone(),
+        ports: node.ports.iter().map(port_v02_to_v01).collect(),
+    }
+}
+
+fn port_v02_to_v01(port: &PortSpecV02) -> Port {
+    Port {
+        id: port.id.clone(),
+        direction: match port.direction {
+            PortDirectionV02::Input => PortDirection::Input,
+            PortDirectionV02::Output => PortDirection::Output,
+        },
+        label: port.label.clone(),
+        data_type: data_type_from_port_spec(port),
+        required: port.required,
+        default_value: port.default_value.clone(),
+        activation: port.trigger_mode.as_ref().map(|trigger| match trigger {
+            skenion_contracts::TriggerModeV02::Trigger => PortActivation::Trigger,
+            skenion_contracts::TriggerModeV02::Latched => PortActivation::Latched,
+            skenion_contracts::TriggerModeV02::Passive => PortActivation::Latched,
+        }),
+    }
+}
+
+fn data_type_from_port_spec(port: &PortSpecV02) -> DataType {
+    DataType {
+        flow: match port.rate {
+            Some(PortRateV02::Event) => DataFlow::Event,
+            Some(PortRateV02::Audio) => DataFlow::Signal,
+            Some(PortRateV02::Resource) | Some(PortRateV02::Io) => DataFlow::Resource,
+            Some(PortRateV02::Control | PortRateV02::Render | PortRateV02::Gpu) | None => {
+                if port.port_type == "message.any" {
+                    DataFlow::Event
+                } else {
+                    DataFlow::Value
+                }
+            }
+        },
+        data_kind: normalize_port_type(&port.port_type),
+        unit: None,
+        range: None,
+        shape: None,
+        channels: None,
+        sample_rate: None,
+        format: None,
+        color_space: None,
+        frame_rate: None,
+        alpha_policy: None,
+        values: None,
+    }
+}
+
+fn normalize_port_type(port_type: &str) -> String {
+    match port_type {
+        "value.number" => "number.float".to_owned(),
+        other => other
+            .strip_prefix("value.")
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| other.to_owned()),
+    }
+}
+
+fn remap_edge(edge: &EdgeSpecV02, node_id_map: &BTreeMap<String, String>) -> Edge {
+    Edge {
+        from: PortRef {
+            node: node_id_map
+                .get(&edge.source.node_id)
+                .cloned()
+                .unwrap_or_else(|| edge.source.node_id.clone()),
+            port: edge.source.port_id.clone(),
+        },
+        to: PortRef {
+            node: node_id_map
+                .get(&edge.target.node_id)
+                .cloned()
+                .unwrap_or_else(|| edge.target.node_id.clone()),
+            port: edge.target.port_id.clone(),
+        },
+    }
+}
+
+fn lower_fragment_view_patch(
+    view_revision: u64,
+    request: &PasteGraphFragmentRequest,
+    node_id_map: &BTreeMap<String, String>,
+) -> Option<RuntimeViewPatch> {
+    let fragment_views = request.fragment.view.as_ref()?.nodes.as_ref()?;
+    let mut ops = Vec::new();
+    let placement_delta = placement_delta(request, fragment_views);
+    for (source_node_id, pasted_node_id) in node_id_map {
+        let Some(view) = fragment_views.get(source_node_id) else {
+            continue;
+        };
+        let mut pasted_view = view.clone();
+        if let Some((dx, dy)) = placement_delta {
+            pasted_view.x += dx;
+            pasted_view.y += dy;
+        }
+        ops.push(RuntimeViewPatchOperation::SetNodeView {
+            node_id: pasted_node_id.clone(),
+            view: pasted_view,
+        });
+    }
+    (!ops.is_empty()).then_some(RuntimeViewPatch {
+        base_view_revision: view_revision,
+        ops,
+    })
+}
+
+fn placement_delta(
+    request: &PasteGraphFragmentRequest,
+    fragment_views: &BTreeMap<String, CanvasNodeView>,
+) -> Option<(f64, f64)> {
+    match request.placement.as_ref()? {
+        PastePlacement::Position { x, y } => {
+            let min_x = fragment_views
+                .values()
+                .map(|view| view.x)
+                .reduce(f64::min)
+                .unwrap_or(0.0);
+            let min_y = fragment_views
+                .values()
+                .map(|view| view.y)
+                .reduce(f64::min)
+                .unwrap_or(0.0);
+            Some((x - min_x, y - min_y))
+        }
+        PastePlacement::Anchor {
+            offset_x, offset_y, ..
+        } => Some((offset_x.unwrap_or_default(), offset_y.unwrap_or_default())),
+    }
+}
+
+fn operation_error(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    target: Option<GraphTargetRef>,
+    expected_revision: Option<String>,
+    actual_revision: Option<String>,
+    duplicates: Option<Vec<String>>,
+    edges: Option<Vec<String>>,
+) -> RuntimeOperationDiagnostic {
+    RuntimeOperationDiagnostic {
+        severity: "error".to_owned(),
+        code: code.into(),
+        message: message.into(),
+        path: None,
+        target,
+        expected_revision,
+        actual_revision,
+        duplicates,
+        nodes: None,
+        edges,
+    }
+}
+
+fn operation_diagnostics_from_validation_report(
+    message: String,
+) -> Vec<RuntimeOperationDiagnostic> {
+    vec![RuntimeOperationDiagnostic {
+        severity: "error".to_owned(),
+        code: "paste.operation.invalid-envelope".to_owned(),
+        message,
+        path: None,
+        target: None,
+        expected_revision: None,
+        actual_revision: None,
+        duplicates: None,
+        nodes: None,
+        edges: None,
+    }]
+}
+
+fn runtime_diagnostic_to_operation_diagnostic(
+    diagnostic: &RuntimeDiagnostic,
+    target: &GraphTargetRef,
+) -> RuntimeOperationDiagnostic {
+    RuntimeOperationDiagnostic {
+        severity: match diagnostic.severity {
+            crate::DiagnosticSeverity::Error => "error",
+            crate::DiagnosticSeverity::Warning => "warning",
+            crate::DiagnosticSeverity::Info => "info",
+        }
+        .to_owned(),
+        code: diagnostic
+            .code
+            .clone()
+            .unwrap_or_else(|| "paste.lowering.failed".to_owned()),
+        message: diagnostic.message.clone(),
+        path: None,
+        target: Some(target.clone()),
+        expected_revision: None,
+        actual_revision: None,
+        duplicates: None,
+        nodes: None,
+        edges: None,
+    }
+}
+
 fn apply_view_patch_to_view_state(
     graph: &GraphDocument,
     mut view_state: ViewState,
@@ -1095,7 +1678,8 @@ mod tests {
     use crate::{
         ControlMessage, ControlValue, Edge, GraphDocument, GraphPatch, NodeRegistry, PortRef,
         ProjectRequest, RuntimeControlEmission, RuntimeControlEventRequest,
-        RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeDiagnostic, ViewState,
+        RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeDiagnostic,
+        RuntimeOperationEnvelope, ViewState,
     };
 
     use super::{
@@ -2435,6 +3019,152 @@ mod tests {
         assert!(response.diagnostics[0].message.contains("unsupported op"));
     }
 
+    #[test]
+    fn paste_graph_fragment_lowers_to_root_graph_mutation_with_id_remap() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+
+        let response = session.apply_runtime_operation(paste_operation("1"));
+
+        assert!(response.ok);
+        assert!(response.applied);
+        assert!(!response.conflict);
+        assert_eq!(response.revision_before, "1");
+        assert_eq!(response.revision_after.as_deref(), Some("2"));
+        assert_eq!(
+            response
+                .id_remap
+                .node_id_map
+                .get("value_1")
+                .map(String::as_str),
+            Some("value_1_2")
+        );
+        assert_eq!(
+            response
+                .id_remap
+                .edge_id_map
+                .get("edge_value_to_pasted")
+                .map(String::as_str),
+            Some("edge_value_to_pasted")
+        );
+        let graph = session.graph().expect("graph should remain loaded");
+        assert!(graph.nodes.iter().any(|node| node.id == "value_1_2"));
+        assert!(graph.nodes.iter().any(|node| node.id == "pasted_target"));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from.node == "value_1_2"
+                && edge.from.port == "value"
+                && edge.to.node == "pasted_target"
+                && edge.to.port == "cold"
+        }));
+        assert_eq!(response.history_entry_id.as_deref(), Some("event_000001"));
+    }
+
+    #[test]
+    fn paste_graph_fragment_reports_base_revision_conflict() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+
+        let response = session.apply_runtime_operation(paste_operation("0"));
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(response.conflict);
+        assert_eq!(response.revision_before, "1");
+        assert_eq!(response.revision_after, None);
+        assert_eq!(response.diagnostics[0].code, "paste.revision-conflict");
+        assert_eq!(session.graph().unwrap().revision, "1");
+    }
+
+    #[test]
+    fn paste_graph_fragment_rejects_missing_help_working_copy_target() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.target.path = skenion_contracts::PatchPath::HelpWorkingCopy {
+            working_copy_id: "missing-help-copy".to_owned(),
+            source_package_id: Some("skenion.core".to_owned()),
+            source_patch_id: Some("float-help".to_owned()),
+        };
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.target.missing-help-working-copy"
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_rejects_outside_endpoint_by_default() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.fragment.edges[0].target.node_id = "outside".to_owned();
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.operation.invalid-envelope"
+        );
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("fragment-edge-outside-selection")
+        );
+    }
+
+    #[test]
+    fn paste_graph_fragment_omits_outside_endpoint_when_requested() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.fragment.edges[0].target.node_id = "outside".to_owned();
+        operation.request.options = Some(skenion_contracts::PasteGraphFragmentOptions {
+            outside_endpoint_policy: Some(
+                skenion_contracts::GraphFragmentOutsideEndpointPolicyV02::Omit,
+            ),
+            id_conflict_policy: Some(skenion_contracts::IdConflictPolicy::Remap),
+            preserve_relative_positions: Some(true),
+        });
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(response.ok);
+        assert!(response.applied);
+        assert_eq!(
+            response.id_remap.omitted_edge_ids,
+            vec!["edge_value_to_pasted"]
+        );
+        let graph = session.graph().unwrap();
+        assert!(!graph.edges.iter().any(|edge| edge.to.node == "outside"));
+    }
+
+    #[test]
+    fn paste_graph_fragment_rejects_immutable_help_source_target() {
+        let mut session = RuntimeSession::default();
+        session.load_project(sample_project());
+        let mut operation = paste_operation("1");
+        operation.request.target.path = skenion_contracts::PatchPath::PackagePatchDefinition {
+            package_id: "skenion.core".to_owned(),
+            patch_id: "float-help".to_owned(),
+            version: Some("0.37.0".to_owned()),
+        };
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.target.immutable-help-source"
+        );
+    }
+
     fn graph_patch(value: Value) -> GraphPatch {
         serde_json::from_value(value).expect("patch should parse")
     }
@@ -2482,6 +3212,66 @@ mod tests {
             { "op": "setNodeParam", "nodeId": "value_1", "key": "value", "value": value }
           ]
         }))
+    }
+
+    fn paste_operation(base_revision: &str) -> RuntimeOperationEnvelope {
+        serde_json::from_value(json!({
+          "schema": "skenion.runtime.operation",
+          "schemaVersion": "0.1.0",
+          "id": "op-paste",
+          "kind": "pasteGraphFragment",
+          "request": {
+            "target": {
+              "path": { "kind": "root" },
+              "baseRevision": base_revision
+            },
+            "fragment": paste_fragment_json(),
+            "options": {
+              "idConflictPolicy": "remap"
+            }
+          },
+          "attribution": {
+            "clientId": "studio-test",
+            "label": "Paste test fragment"
+          }
+        }))
+        .expect("paste operation should parse")
+    }
+
+    fn paste_fragment_json() -> Value {
+        json!({
+          "schema": "skenion.graph.fragment",
+          "schemaVersion": "0.2.0",
+          "nodes": [
+            {
+              "id": "value_1",
+              "kind": "core.float",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": value_f32_ports_v02_json()
+            },
+            {
+              "id": "pasted_target",
+              "kind": "core.float",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": value_f32_ports_v02_json()
+            }
+          ],
+          "edges": [
+            {
+              "id": "edge_value_to_pasted",
+              "source": { "nodeId": "value_1", "portId": "value" },
+              "target": { "nodeId": "pasted_target", "portId": "cold" }
+            }
+          ],
+          "view": {
+            "nodes": {
+              "value_1": { "x": 10.0, "y": 20.0 },
+              "pasted_target": { "x": 180.0, "y": 20.0 }
+            }
+          }
+        })
     }
 
     fn f32_value(value: f64) -> ControlValue {
@@ -2708,6 +3498,36 @@ mod tests {
             "direction": "output",
             "label": "Value",
             "type": { "flow": "value", "dataKind": "number.float" }
+          }
+        ])
+    }
+
+    fn value_f32_ports_v02_json() -> Value {
+        json!([
+          {
+            "id": "in",
+            "direction": "input",
+            "label": "In",
+            "type": "message.any",
+            "rate": "event",
+            "required": false,
+            "triggerMode": "trigger"
+          },
+          {
+            "id": "cold",
+            "direction": "input",
+            "label": "Cold",
+            "type": "number.float",
+            "rate": "control",
+            "required": false,
+            "triggerMode": "latched"
+          },
+          {
+            "id": "value",
+            "direction": "output",
+            "label": "Value",
+            "type": "number.float",
+            "rate": "control"
           }
         ])
     }

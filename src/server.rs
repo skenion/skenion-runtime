@@ -31,11 +31,12 @@ use crate::{
     RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
     RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeExtensionManager,
     RuntimeIoDeviceListResponse, RuntimeIoDeviceManager, RuntimeLogSnapshotResponse,
-    RuntimeLogStore, RuntimeMutationRequest, RuntimePreviewStartRequest, RuntimeSession,
-    RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
-    ShaderDiagnosticSource, ViewState, build_execution_plan, build_execution_plan_request_v02,
-    build_execution_plan_run_request_v02, generated_shader_response_from_preview_document,
-    run_dummy_execution, validate_project, validate_project_request_v02,
+    RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope, RuntimePreviewStartRequest,
+    RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic,
+    ShaderDiagnosticPhase, ShaderDiagnosticSource, ViewState, build_execution_plan,
+    build_execution_plan_request_v02, build_execution_plan_run_request_v02,
+    generated_shader_response_from_preview_document, run_dummy_execution, validate_project,
+    validate_project_request_v02,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -225,6 +226,7 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/plan", post(plan_session))
         .route("/v0/session/run", post(run_session))
         .route("/v0/session/mutate", post(mutate_session))
+        .route("/v0/session/operation", post(apply_session_operation))
         .route("/v0/session/history", get(session_history))
         .route("/v0/session/undo", post(undo_session))
         .route("/v0/session/redo", post(redo_session))
@@ -450,6 +452,12 @@ fn patch_json(
     response: crate::RuntimePatchResponse,
 ) -> Json<crate::RuntimePatchResponse> {
     state.logs.record_runtime_diagnostics(&response.diagnostics);
+    Json(response)
+}
+
+fn paste_operation_json(
+    response: crate::PasteGraphFragmentResponse,
+) -> Json<crate::PasteGraphFragmentResponse> {
     Json(response)
 }
 
@@ -727,6 +735,69 @@ async fn mutate_session(
         );
     }
     patch_json(&state, response)
+}
+
+async fn apply_session_operation(
+    State(state): State<RuntimeServerState>,
+    Json(value): Json<serde_json::Value>,
+) -> Json<crate::PasteGraphFragmentResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    let operation = match serde_json::from_value::<RuntimeOperationEnvelope>(value) {
+        Ok(operation) => operation,
+        Err(error) => {
+            let revision_before = session
+                .snapshot()
+                .graph_revision()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "0".to_owned());
+            return paste_operation_json(crate::PasteGraphFragmentResponse {
+                schema: "skenion.runtime.paste-graph-fragment.response".to_owned(),
+                schema_version: "0.1.0".to_owned(),
+                ok: false,
+                applied: false,
+                conflict: false,
+                target: crate::GraphTargetRef {
+                    path: crate::PatchPath::Root,
+                    base_revision: revision_before.clone(),
+                    target_revision: None,
+                },
+                revision_before,
+                revision_after: None,
+                history_entry_id: None,
+                id_remap: crate::IdRemapResult {
+                    node_id_map: BTreeMap::new(),
+                    edge_id_map: BTreeMap::new(),
+                    omitted_edge_ids: Vec::new(),
+                },
+                diagnostics: vec![crate::RuntimeOperationDiagnostic {
+                    severity: "error".to_owned(),
+                    code: "paste.operation.invalid-json".to_owned(),
+                    message: format!("invalid runtime operation: {error}"),
+                    path: None,
+                    target: None,
+                    expected_revision: None,
+                    actual_revision: None,
+                    duplicates: None,
+                    nodes: None,
+                    edges: None,
+                }],
+            });
+        }
+    };
+
+    let response = session.apply_runtime_operation(operation);
+    if response.ok && response.applied {
+        publish_session_event(
+            &state,
+            RuntimeSessionEventKind::Mutate,
+            &session,
+            Vec::new(),
+        );
+    }
+    paste_operation_json(response)
 }
 
 async fn session_history(State(state): State<RuntimeServerState>) -> Json<crate::RuntimeHistory> {
@@ -2567,6 +2638,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_operation_endpoint_pastes_graph_fragment() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let response =
+            post_json_with(app.clone(), "/v0/session/operation", paste_operation("1")).await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["applied"], true);
+        assert_eq!(response["revisionBefore"], "1");
+        assert_eq!(response["revisionAfter"], "2");
+        assert_eq!(
+            response["idRemap"]["nodeIdMap"]["value_1"],
+            json!("value_1_2")
+        );
+        assert_eq!(
+            response["idRemap"]["edgeIdMap"]["edge_value_to_pasted"],
+            json!("edge_value_to_pasted")
+        );
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
+        assert!(
+            snapshot["snapshot"]["project"]["graph"]["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| {
+                    edge["from"]["node"] == "value_1_2"
+                        && edge["from"]["port"] == "value"
+                        && edge["to"]["node"] == "pasted_target"
+                        && edge["to"]["port"] == "cold"
+                })
+        );
+    }
+
+    #[tokio::test]
     async fn session_mutate_endpoint_reports_errors_without_loaded_session() {
         let response = post_json("/v0/session/mutate", graph_mutation(set_value_patch("1"))).await;
 
@@ -3806,5 +3914,84 @@ mod tests {
 
     fn graph_mutation(graph_patch: Value) -> Value {
         json!({ "graphPatch": graph_patch })
+    }
+
+    fn paste_operation(base_revision: &str) -> Value {
+        json!({
+          "schema": "skenion.runtime.operation",
+          "schemaVersion": "0.1.0",
+          "id": "op-paste",
+          "kind": "pasteGraphFragment",
+          "request": {
+            "target": {
+              "path": { "kind": "root" },
+              "baseRevision": base_revision
+            },
+            "fragment": {
+              "schema": "skenion.graph.fragment",
+              "schemaVersion": "0.2.0",
+              "nodes": [
+                {
+                  "id": "value_1",
+                  "kind": "core.float",
+                  "kindVersion": "0.1.0",
+                  "params": {},
+                  "ports": value_f32_ports_v02_json()
+                },
+                {
+                  "id": "pasted_target",
+                  "kind": "core.float",
+                  "kindVersion": "0.1.0",
+                  "params": {},
+                  "ports": value_f32_ports_v02_json()
+                }
+              ],
+              "edges": [
+                {
+                  "id": "edge_value_to_pasted",
+                  "source": { "nodeId": "value_1", "portId": "value" },
+                  "target": { "nodeId": "pasted_target", "portId": "cold" }
+                }
+              ]
+            },
+            "options": {
+              "idConflictPolicy": "remap"
+            }
+          },
+          "attribution": {
+            "clientId": "studio-test",
+            "label": "Paste test fragment"
+          }
+        })
+    }
+
+    fn value_f32_ports_v02_json() -> Value {
+        json!([
+          {
+            "id": "in",
+            "direction": "input",
+            "label": "In",
+            "type": "message.any",
+            "rate": "event",
+            "required": false,
+            "triggerMode": "trigger"
+          },
+          {
+            "id": "cold",
+            "direction": "input",
+            "label": "Cold",
+            "type": "number.float",
+            "rate": "control",
+            "required": false,
+            "triggerMode": "latched"
+          },
+          {
+            "id": "value",
+            "direction": "output",
+            "label": "Value",
+            "type": "number.float",
+            "rate": "control"
+          }
+        ])
     }
 }
