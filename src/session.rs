@@ -682,18 +682,18 @@ impl RuntimeSession {
             graph_changed = true;
         }
 
-        if let Some(view_patch) = &mutation.view_patch {
-            if view_patch.base_view_revision != self.view_revision {
-                return self.patch_response(
-                    false,
-                    false,
-                    true,
-                    vec![RuntimeDiagnostic::error(format!(
-                        "view patch baseViewRevision {} does not match session view revision {}",
-                        view_patch.base_view_revision, self.view_revision
-                    ))],
-                );
-            }
+        if let Some(view_patch) = &mutation.view_patch
+            && view_patch.base_view_revision != self.view_revision
+        {
+            return self.patch_response(
+                false,
+                false,
+                true,
+                vec![RuntimeDiagnostic::error(format!(
+                    "view patch baseViewRevision {} does not match session view revision {}",
+                    view_patch.base_view_revision, self.view_revision
+                ))],
+            );
         }
 
         let previous_view_state = reconcile_view_state_with_graph(&graph, self.view_state.clone());
@@ -1025,12 +1025,12 @@ fn apply_view_patch_to_view_state(
                         "view patch node {node_id} has no view state"
                     ))]);
                 };
-                if let Some(from) = from {
-                    if from != &previous {
-                        return Err(vec![RuntimeDiagnostic::error(format!(
-                            "view patch node {node_id} from view does not match current view"
-                        ))]);
-                    }
+                if let Some(from) = from
+                    && from != &previous
+                {
+                    return Err(vec![RuntimeDiagnostic::error(format!(
+                        "view patch node {node_id} from view does not match current view"
+                    ))]);
                 }
                 view_state.canvas.nodes.insert(node_id.clone(), to.clone());
                 inverse_ops.insert(
