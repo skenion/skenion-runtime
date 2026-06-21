@@ -22,6 +22,12 @@ jobs:
     if: startsWith(github.event.release.tag_name, 'skenion-runtime-v')
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: echovisionlab/skenion-contracts
+          ref: skenion-contracts-v0.34.0
+          path: .deps/skenion-contracts
+      - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
