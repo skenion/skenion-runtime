@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.41.0...skenion-runtime-v0.41.1) (2026-06-22)
+
+
+### Bug Fixes
+
+* **runtime:** guard unsupported v0.2 session targets ([#118](https://github.com/echovisionlab/skenion-runtime/issues/118)) ([af3e1c6](https://github.com/echovisionlab/skenion-runtime/commit/af3e1c62367ce49e0e94b5e7c215416f2128f934))
+
 ## [0.41.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.40.0...skenion-runtime-v0.41.0) (2026-06-22)
 
 
