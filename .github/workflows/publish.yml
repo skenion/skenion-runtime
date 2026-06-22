@@ -192,7 +192,7 @@ jobs:
           PY
       - name: Verify released contracts crate
         run: |
-          if ! curl --fail --silent "https://crates.io/api/v1/crates/skenion-contracts/${{ steps.package.outputs.contracts_version }}" >/dev/null; then
+          if ! curl --fail --silent -H "User-Agent: skenion-runtime-publish/0.1" "https://crates.io/api/v1/crates/skenion-contracts/${{ steps.package.outputs.contracts_version }}" >/dev/null; then
             echo "::error::skenion-contracts ${{ steps.package.outputs.contracts_version }} is not published on crates.io."
             exit 1
           fi
@@ -236,7 +236,7 @@ jobs:
           fi
       - id: registry
         run: |
-          if curl --fail --silent "https://crates.io/api/v1/crates/skenion-runtime/${{ needs.release.outputs.version }}" >/dev/null; then
+          if curl --fail --silent -H "User-Agent: skenion-runtime-publish/0.1" "https://crates.io/api/v1/crates/skenion-runtime/${{ needs.release.outputs.version }}" >/dev/null; then
             echo "published=true" >> "${GITHUB_OUTPUT}"
           else
             echo "published=false" >> "${GITHUB_OUTPUT}"
