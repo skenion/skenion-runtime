@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(registry.len(), 1);
         assert!(!registry.is_empty());
         assert!(registry.get("core.node", "0.1.0").is_some());
-        assert!(registry.get("core.node", "0.2.0").is_none());
+        assert!(registry.get("core.node", "9.9.9").is_none());
         assert_eq!(
             registry
                 .definitions()

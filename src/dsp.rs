@@ -2,14 +2,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::f32::consts::TAU;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::{
     AudioClockBridgeMethod, AudioClockBridgePlan, AudioClockDomain, AudioClockDomainAuthority,
     AudioEndpoint, AudioEndpointDirection, AudioGraphPartition, DataFlow, Edge, ExecutionModel,
-    GraphDocument, GraphNode, NodeRegistry, PlanError, Port, PortDirection, build_execution_plan,
-    plan_audio_clock_bridge, validate_project,
+    ExecutionPlan, GraphDocument, GraphNode, NodeRegistry, PlanError, Port, PortDirection,
+    ProjectRequestCurrent, RuntimeDiagnostic, build_execution_plan,
+    build_execution_plan_request_current, expand_project_graph_current, plan_audio_clock_bridge,
+    schema_version_diagnostic, validate_project,
 };
 
 const AUDIO_SIGNAL_KIND: &str = "signal.audio";
@@ -187,16 +189,25 @@ impl Default for AudioRealtimeDspOptions {
 
 #[derive(Debug, Error)]
 pub enum AudioDspPlanError {
-    #[error("{0}")]
-    InvalidProject(#[from] crate::ProjectValidationReport),
-    #[error("{0}")]
-    Plan(#[from] PlanError),
+    #[error("audio dsp project validation failed")]
+    InvalidProject {
+        diagnostics: Box<[RuntimeDiagnostic]>,
+    },
+    #[error("{message}")]
+    Plan {
+        message: String,
+        diagnostics: Box<[RuntimeDiagnostic]>,
+    },
     #[error("audio dsp block size must be greater than zero")]
-    InvalidBlockSize,
+    InvalidBlockSize { diagnostic: Box<RuntimeDiagnostic> },
     #[error("audio dsp sample rate must be greater than zero")]
-    InvalidSampleRate,
+    InvalidSampleRate { diagnostic: Box<RuntimeDiagnostic> },
     #[error("audio signal port {node_id}.{port_id} is not an audio_block node")]
-    SignalPortOutsideAudioBlock { node_id: String, port_id: String },
+    SignalPortOutsideAudioBlock {
+        node_id: String,
+        port_id: String,
+        diagnostic: Box<RuntimeDiagnostic>,
+    },
     #[error(
         "audio signal route from {source_node_id} domain {source_clock_domain_id} to {target_node_id} domain {target_clock_domain_id} requires audio.clock-bridge or audio.resample"
     )]
@@ -205,7 +216,67 @@ pub enum AudioDspPlanError {
         target_node_id: String,
         source_clock_domain_id: String,
         target_clock_domain_id: String,
+        diagnostic: Box<RuntimeDiagnostic>,
     },
+}
+
+impl AudioDspPlanError {
+    pub fn diagnostics(&self) -> Vec<RuntimeDiagnostic> {
+        match self {
+            Self::InvalidProject { diagnostics } | Self::Plan { diagnostics, .. } => {
+                diagnostics.to_vec()
+            }
+            Self::InvalidBlockSize { diagnostic }
+            | Self::InvalidSampleRate { diagnostic }
+            | Self::SignalPortOutsideAudioBlock { diagnostic, .. }
+            | Self::ClockDomainCrossingRequiresBridge { diagnostic, .. } => {
+                vec![(**diagnostic).clone()]
+            }
+        }
+    }
+
+    fn from_diagnostics(diagnostics: Vec<RuntimeDiagnostic>) -> Self {
+        Self::InvalidProject {
+            diagnostics: diagnostics.into_boxed_slice(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn from_project_validation_report(report: crate::ProjectValidationReport) -> Self {
+        Self::InvalidProject {
+            diagnostics: report
+                .errors()
+                .iter()
+                .map(|error| {
+                    RuntimeDiagnostic::structured_error(
+                        "audio-dsp.invalid-project",
+                        error.message.clone(),
+                        json!({ "surface": "internal-project-validation" }),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn from_plan_error(error: PlanError) -> Self {
+        match error {
+            PlanError::InvalidProject(report) => Self::from_project_validation_report(report),
+            error => {
+                let message = error.to_string();
+                Self::Plan {
+                    diagnostics: vec![RuntimeDiagnostic::structured_error(
+                        "audio-dsp.plan",
+                        message.clone(),
+                        json!({ "surface": "internal-plan" }),
+                    )]
+                    .into_boxed_slice(),
+                    message,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -213,9 +284,23 @@ pub enum AudioOfflineDspError {
     #[error("{0}")]
     Plan(#[from] AudioDspPlanError),
     #[error("audio offline dsp block count must be greater than zero")]
-    InvalidBlockCount,
+    InvalidBlockCount { diagnostic: Box<RuntimeDiagnostic> },
     #[error("offline audio dsp node {node_id} uses unsupported kind {kind}")]
-    UnsupportedNodeKind { node_id: String, kind: String },
+    UnsupportedNodeKind {
+        node_id: String,
+        kind: String,
+        diagnostic: Box<RuntimeDiagnostic>,
+    },
+}
+
+impl AudioOfflineDspError {
+    pub fn diagnostics(&self) -> Vec<RuntimeDiagnostic> {
+        match self {
+            Self::Plan(error) => error.diagnostics(),
+            Self::InvalidBlockCount { diagnostic }
+            | Self::UnsupportedNodeKind { diagnostic, .. } => vec![(**diagnostic).clone()],
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -223,11 +308,29 @@ pub enum AudioRealtimeDspError {
     #[error("{0}")]
     Plan(#[from] AudioDspPlanError),
     #[error("audio realtime dsp output channel count must be greater than zero")]
-    InvalidChannelCount,
+    InvalidChannelCount { diagnostic: Box<RuntimeDiagnostic> },
     #[error("audio realtime dsp graph must contain exactly one audio.output node, found {count}")]
-    OutputCount { count: usize },
+    OutputCount {
+        count: usize,
+        diagnostic: Box<RuntimeDiagnostic>,
+    },
     #[error("audio realtime dsp node {node_id} uses unsupported kind {kind}")]
-    UnsupportedNodeKind { node_id: String, kind: String },
+    UnsupportedNodeKind {
+        node_id: String,
+        kind: String,
+        diagnostic: Box<RuntimeDiagnostic>,
+    },
+}
+
+impl AudioRealtimeDspError {
+    pub fn diagnostics(&self) -> Vec<RuntimeDiagnostic> {
+        match self {
+            Self::Plan(error) => error.diagnostics(),
+            Self::InvalidChannelCount { diagnostic }
+            | Self::OutputCount { diagnostic, .. }
+            | Self::UnsupportedNodeKind { diagnostic, .. } => vec![(**diagnostic).clone()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -260,14 +363,38 @@ pub struct AudioRealtimeDspExecutor {
 
 impl AudioRealtimeDspExecutor {
     pub fn new(
+        request: &ProjectRequestCurrent,
+        options: AudioRealtimeDspOptions,
+    ) -> Result<Self, AudioRealtimeDspError> {
+        if options.channels == 0 {
+            return Err(AudioRealtimeDspError::InvalidChannelCount {
+                diagnostic: invalid_realtime_channel_count_diagnostic(),
+            });
+        }
+        let (plan, graph) = build_audio_dsp_plan_with_graph_current(request, options.plan)?;
+        Self::from_plan_and_graph(&graph, plan, options.channels)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_from_graph(
         graph: &GraphDocument,
         registry: &NodeRegistry,
         options: AudioRealtimeDspOptions,
     ) -> Result<Self, AudioRealtimeDspError> {
         if options.channels == 0 {
-            return Err(AudioRealtimeDspError::InvalidChannelCount);
+            return Err(AudioRealtimeDspError::InvalidChannelCount {
+                diagnostic: invalid_realtime_channel_count_diagnostic(),
+            });
         }
         let plan = build_audio_dsp_plan(graph, registry, options.plan)?;
+        Self::from_plan_and_graph(graph, plan, options.channels)
+    }
+
+    fn from_plan_and_graph(
+        graph: &GraphDocument,
+        plan: AudioDspPlan,
+        channels: usize,
+    ) -> Result<Self, AudioRealtimeDspError> {
         let output_nodes = plan
             .nodes
             .iter()
@@ -276,6 +403,14 @@ impl AudioRealtimeDspExecutor {
         if output_nodes.len() != 1 {
             return Err(AudioRealtimeDspError::OutputCount {
                 count: output_nodes.len(),
+                diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                    "audio-dsp.realtime-output-count",
+                    format!(
+                        "audio realtime dsp graph must contain exactly one audio.output node, found {}",
+                        output_nodes.len()
+                    ),
+                    json!({ "count": output_nodes.len() }),
+                )),
             });
         }
         if let Some(node) = plan
@@ -286,6 +421,17 @@ impl AudioRealtimeDspExecutor {
             return Err(AudioRealtimeDspError::UnsupportedNodeKind {
                 node_id: node.node_id.clone(),
                 kind: node.kind.clone(),
+                diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                    "audio-dsp.realtime-unsupported-node-kind",
+                    format!(
+                        "audio realtime dsp node {} uses unsupported kind {}",
+                        node.node_id, node.kind
+                    ),
+                    json!({
+                        "nodeId": node.node_id.as_str(),
+                        "kind": node.kind.as_str(),
+                    }),
+                )),
             });
         }
 
@@ -319,7 +465,7 @@ impl AudioRealtimeDspExecutor {
 
         Ok(Self {
             plan,
-            channels: options.channels,
+            channels,
             block_len,
             output_node_index,
             nodes,
@@ -432,20 +578,73 @@ impl AudioRealtimeDspExecutor {
     }
 }
 
-pub fn build_audio_dsp_plan(
+pub fn build_audio_dsp_plan_current(
+    request: &ProjectRequestCurrent,
+    options: AudioDspPlanOptions,
+) -> Result<AudioDspPlan, AudioDspPlanError> {
+    build_audio_dsp_plan_with_graph_current(request, options).map(|(plan, _)| plan)
+}
+
+fn build_audio_dsp_plan_with_graph_current(
+    request: &ProjectRequestCurrent,
+    options: AudioDspPlanOptions,
+) -> Result<(AudioDspPlan, GraphDocument), AudioDspPlanError> {
+    validate_audio_dsp_plan_options(options)?;
+    validate_audio_dsp_request_schema_versions_current(request)?;
+    let (execution_plan, _diagnostics) = build_execution_plan_request_current(request)
+        .map_err(AudioDspPlanError::from_diagnostics)?;
+    let expanded_graph = expand_project_graph_current(&request.graph, &request.patch_library)
+        .map_err(AudioDspPlanError::from_diagnostics)?;
+    let graph = lower_graph_for_execution(&expanded_graph);
+    let plan = build_audio_dsp_plan_from_execution_plan(&graph, &execution_plan, options)?;
+    Ok((plan, graph))
+}
+
+fn validate_audio_dsp_request_schema_versions_current(
+    request: &ProjectRequestCurrent,
+) -> Result<(), AudioDspPlanError> {
+    let mut diagnostics = Vec::new();
+    if let Some(document) = &request.document {
+        if let Some(diagnostic) =
+            schema_version_diagnostic("project", Some(document.schema_version.as_str()))
+        {
+            diagnostics.push(diagnostic);
+        }
+    }
+    if let Some(diagnostic) =
+        schema_version_diagnostic("graph", Some(request.graph.schema_version.as_str()))
+    {
+        diagnostics.push(diagnostic);
+    }
+
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(AudioDspPlanError::InvalidProject {
+            diagnostics: diagnostics.into_boxed_slice(),
+        })
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn build_audio_dsp_plan(
     graph: &GraphDocument,
     registry: &NodeRegistry,
     options: AudioDspPlanOptions,
 ) -> Result<AudioDspPlan, AudioDspPlanError> {
-    if options.block_size == 0 {
-        return Err(AudioDspPlanError::InvalidBlockSize);
-    }
-    if options.sample_rate == 0 {
-        return Err(AudioDspPlanError::InvalidSampleRate);
-    }
+    validate_audio_dsp_plan_options(options)?;
 
-    validate_project(graph, registry)?;
-    let execution_plan = build_execution_plan(graph, registry)?;
+    validate_project(graph, registry).map_err(AudioDspPlanError::from_project_validation_report)?;
+    let execution_plan =
+        build_execution_plan(graph, registry).map_err(AudioDspPlanError::from_plan_error)?;
+    build_audio_dsp_plan_from_execution_plan(graph, &execution_plan, options)
+}
+
+fn build_audio_dsp_plan_from_execution_plan(
+    graph: &GraphDocument,
+    execution_plan: &ExecutionPlan,
+    options: AudioDspPlanOptions,
+) -> Result<AudioDspPlan, AudioDspPlanError> {
     let nodes_by_id = graph
         .nodes
         .iter()
@@ -537,16 +736,96 @@ pub fn build_audio_dsp_plan(
     })
 }
 
-pub fn run_offline_audio_dsp(
+fn lower_graph_for_execution(graph: &crate::GraphDocumentCurrent) -> GraphDocument {
+    GraphDocument {
+        schema: "skenion.graph".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        id: graph.id.clone(),
+        revision: graph.revision.clone(),
+        nodes: graph
+            .nodes
+            .iter()
+            .map(|node| crate::session::lower_graph_node_for_execution(node, &node.id))
+            .collect(),
+        edges: graph
+            .edges
+            .iter()
+            .map(crate::session::lower_edge_for_execution)
+            .collect(),
+    }
+}
+
+fn validate_audio_dsp_plan_options(options: AudioDspPlanOptions) -> Result<(), AudioDspPlanError> {
+    if options.block_size == 0 {
+        return Err(AudioDspPlanError::InvalidBlockSize {
+            diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                "audio-dsp.invalid-block-size",
+                "audio dsp block size must be greater than zero",
+                json!({ "blockSize": options.block_size }),
+            )),
+        });
+    }
+    if options.sample_rate == 0 {
+        return Err(AudioDspPlanError::InvalidSampleRate {
+            diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                "audio-dsp.invalid-sample-rate",
+                "audio dsp sample rate must be greater than zero",
+                json!({ "sampleRate": options.sample_rate }),
+            )),
+        });
+    }
+    Ok(())
+}
+
+fn validate_audio_offline_dsp_options(
+    options: AudioOfflineDspOptions,
+) -> Result<(), AudioOfflineDspError> {
+    if options.blocks == 0 {
+        return Err(AudioOfflineDspError::InvalidBlockCount {
+            diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                "audio-dsp.invalid-offline-block-count",
+                "audio offline dsp block count must be greater than zero",
+                json!({ "blocks": options.blocks }),
+            )),
+        });
+    }
+    Ok(())
+}
+
+fn invalid_realtime_channel_count_diagnostic() -> Box<RuntimeDiagnostic> {
+    Box::new(RuntimeDiagnostic::structured_error(
+        "audio-dsp.invalid-realtime-channel-count",
+        "audio realtime dsp output channel count must be greater than zero",
+        json!({ "channels": 0 }),
+    ))
+}
+
+pub fn run_offline_audio_dsp_current(
+    request: &ProjectRequestCurrent,
+    options: AudioOfflineDspOptions,
+) -> Result<AudioOfflineDspReport, AudioOfflineDspError> {
+    validate_audio_offline_dsp_options(options)?;
+    let (plan, graph) = build_audio_dsp_plan_with_graph_current(request, options.plan)?;
+    run_offline_audio_dsp_with_plan(&graph, plan, options)
+}
+
+#[allow(dead_code)]
+pub(crate) fn run_offline_audio_dsp(
     graph: &GraphDocument,
     registry: &NodeRegistry,
     options: AudioOfflineDspOptions,
 ) -> Result<AudioOfflineDspReport, AudioOfflineDspError> {
-    if options.blocks == 0 {
-        return Err(AudioOfflineDspError::InvalidBlockCount);
-    }
+    validate_audio_offline_dsp_options(options)?;
 
     let plan = build_audio_dsp_plan(graph, registry, options.plan)?;
+    run_offline_audio_dsp_with_plan(graph, plan, options)
+}
+
+fn run_offline_audio_dsp_with_plan(
+    graph: &GraphDocument,
+    plan: AudioDspPlan,
+    options: AudioOfflineDspOptions,
+) -> Result<AudioOfflineDspReport, AudioOfflineDspError> {
     let block_len = plan.block_size as usize;
     let nodes_by_id = graph
         .nodes
@@ -583,6 +862,17 @@ pub fn run_offline_audio_dsp(
                     return Err(AudioOfflineDspError::UnsupportedNodeKind {
                         node_id: node.node_id.clone(),
                         kind: node.kind.clone(),
+                        diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                            "audio-dsp.offline-unsupported-node-kind",
+                            format!(
+                                "offline audio dsp node {} uses unsupported kind {}",
+                                node.node_id, node.kind
+                            ),
+                            json!({
+                                "nodeId": node.node_id.as_str(),
+                                "kind": node.kind.as_str(),
+                            }),
+                        )),
                     });
                 }
             }
@@ -916,6 +1206,22 @@ fn audio_clock_bridge_plans(
                     target_node_id: output.node_id.clone(),
                     source_clock_domain_id: source.clock_domain_id.clone(),
                     target_clock_domain_id: output.clock_domain_id.clone(),
+                    diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                        "audio-dsp.clock-domain-crossing-requires-bridge",
+                        format!(
+                            "audio signal route from {} domain {} to {} domain {} requires audio.clock-bridge or audio.resample",
+                            source.node_id,
+                            source.clock_domain_id,
+                            output.node_id,
+                            output.clock_domain_id
+                        ),
+                        json!({
+                            "sourceNodeId": source.node_id.as_str(),
+                            "targetNodeId": output.node_id.as_str(),
+                            "sourceClockDomainId": source.clock_domain_id.as_str(),
+                            "targetClockDomainId": output.clock_domain_id.as_str(),
+                        }),
+                    )),
                 });
             }
             plans.push(plan);
@@ -1052,6 +1358,17 @@ fn reject_signal_ports_outside_audio_block(
             return Err(AudioDspPlanError::SignalPortOutsideAudioBlock {
                 node_id: node.id.clone(),
                 port_id: port.id.clone(),
+                diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                    "audio-dsp.signal-port-outside-audio-block",
+                    format!(
+                        "audio signal port {}.{} is not an audio_block node",
+                        node.id, port.id
+                    ),
+                    json!({
+                        "nodeId": node.id.as_str(),
+                        "portId": port.id.as_str(),
+                    }),
+                )),
             });
         }
     }
@@ -1391,6 +1708,7 @@ mod tests {
                 target_node_id,
                 source_clock_domain_id,
                 target_clock_domain_id,
+                ..
             } if source_node_id == "input"
                 && target_node_id == "output"
                 && source_clock_domain_id == "device:input-clock"
@@ -1643,11 +1961,17 @@ mod tests {
             build_audio_dsp_plan(&graph, &NodeRegistry::new(), AudioDspPlanOptions::default())
                 .unwrap_err();
 
-        assert!(matches!(block_error, AudioDspPlanError::InvalidBlockSize));
-        assert!(matches!(rate_error, AudioDspPlanError::InvalidSampleRate));
+        assert!(matches!(
+            block_error,
+            AudioDspPlanError::InvalidBlockSize { .. }
+        ));
+        assert!(matches!(
+            rate_error,
+            AudioDspPlanError::InvalidSampleRate { .. }
+        ));
         assert!(matches!(
             project_error,
-            AudioDspPlanError::InvalidProject(_)
+            AudioDspPlanError::InvalidProject { .. }
         ));
     }
 
@@ -1863,7 +2187,7 @@ mod tests {
 
         assert!(matches!(
             block_error,
-            AudioOfflineDspError::InvalidBlockCount
+            AudioOfflineDspError::InvalidBlockCount { .. }
         ));
         assert!(matches!(
             unsupported_error,
@@ -1893,7 +2217,7 @@ mod tests {
             { "from": { "node": "right", "port": "out" }, "to": { "node": "out", "port": "right" } }
           ]
         }));
-        let mut executor = AudioRealtimeDspExecutor::new(
+        let mut executor = AudioRealtimeDspExecutor::new_from_graph(
             &graph,
             &registry(),
             AudioRealtimeDspOptions {
@@ -1938,7 +2262,7 @@ mod tests {
             { "from": { "node": "mul", "port": "out" }, "to": { "node": "out", "port": "right" } }
           ]
         }));
-        let mut executor = AudioRealtimeDspExecutor::new(
+        let mut executor = AudioRealtimeDspExecutor::new_from_graph(
             &graph,
             &registry(),
             AudioRealtimeDspOptions {
@@ -1972,7 +2296,7 @@ mod tests {
             { "from": { "node": "osc", "port": "out" }, "to": { "node": "out", "port": "left" } }
           ]
         }));
-        let mut executor = AudioRealtimeDspExecutor::new(
+        let mut executor = AudioRealtimeDspExecutor::new_from_graph(
             &graph,
             &registry(),
             AudioRealtimeDspOptions {
@@ -2031,7 +2355,7 @@ mod tests {
             { "from": { "node": "sqrt", "port": "out" }, "to": { "node": "out", "port": "left" } }
           ]
         }));
-        let invalid_channels = AudioRealtimeDspExecutor::new(
+        let invalid_channels = AudioRealtimeDspExecutor::new_from_graph(
             &graph_without_output,
             &registry(),
             AudioRealtimeDspOptions {
@@ -2040,19 +2364,19 @@ mod tests {
             },
         )
         .unwrap_err();
-        let missing_output = AudioRealtimeDspExecutor::new(
+        let missing_output = AudioRealtimeDspExecutor::new_from_graph(
             &graph_without_output,
             &registry(),
             AudioRealtimeDspOptions::default(),
         )
         .unwrap_err();
-        let duplicate_output = AudioRealtimeDspExecutor::new(
+        let duplicate_output = AudioRealtimeDspExecutor::new_from_graph(
             &duplicate_outputs,
             &registry(),
             AudioRealtimeDspOptions::default(),
         )
         .unwrap_err();
-        let unsupported_kind = AudioRealtimeDspExecutor::new(
+        let unsupported_kind = AudioRealtimeDspExecutor::new_from_graph(
             &unsupported,
             &registry(),
             AudioRealtimeDspOptions::default(),
@@ -2061,15 +2385,15 @@ mod tests {
 
         assert!(matches!(
             invalid_channels,
-            AudioRealtimeDspError::InvalidChannelCount
+            AudioRealtimeDspError::InvalidChannelCount { .. }
         ));
         assert!(matches!(
             missing_output,
-            AudioRealtimeDspError::OutputCount { count: 0 }
+            AudioRealtimeDspError::OutputCount { count: 0, .. }
         ));
         assert!(matches!(
             duplicate_output,
-            AudioRealtimeDspError::OutputCount { count: 2 }
+            AudioRealtimeDspError::OutputCount { count: 2, .. }
         ));
         assert!(matches!(
             unsupported_kind,
@@ -2128,6 +2452,119 @@ mod tests {
             control_input_f32_from_params(&node_with_missing_source, "frequency", &node_params),
             Some(12.5)
         );
+    }
+
+    #[test]
+    fn public_current_audio_dsp_entrypoints_validate_and_lower_internally() {
+        let request = project_request_current(
+            json!({
+              "schema": "skenion.graph",
+              "schemaVersion": "0.1.0",
+              "id": "public-current-audio",
+              "revision": "1",
+              "nodes": [
+                audio_sig_node_current("left", 0.25),
+                audio_sig_node_current("right", -0.5),
+                audio_output_node_current("out")
+              ],
+              "edges": [
+                {
+                  "id": "edge_left_out",
+                  "source": { "nodeId": "left", "portId": "out" },
+                  "target": { "nodeId": "out", "portId": "left" },
+                  "resolvedType": "signal.audio"
+                },
+                {
+                  "id": "edge_right_out",
+                  "source": { "nodeId": "right", "portId": "out" },
+                  "target": { "nodeId": "out", "portId": "right" },
+                  "resolvedType": "signal.audio"
+                }
+              ]
+            }),
+            vec![
+                audio_sig_definition_current(),
+                audio_output_definition_current(),
+            ],
+        );
+
+        let plan = build_audio_dsp_plan_current(
+            &request,
+            AudioDspPlanOptions {
+                block_size: 4,
+                sample_rate: 48_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.graph_id, "public-current-audio");
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .map(|node| node.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["left", "right", "out"]
+        );
+
+        let mut executor = AudioRealtimeDspExecutor::new(
+            &request,
+            AudioRealtimeDspOptions {
+                plan: AudioDspPlanOptions {
+                    block_size: 4,
+                    sample_rate: 48_000,
+                },
+                channels: 2,
+            },
+        )
+        .unwrap();
+        let mut output = vec![0.0; 8];
+        executor.process_interleaved_output(&mut output);
+        assert_eq!(output, vec![0.25, -0.5, 0.25, -0.5, 0.25, -0.5, 0.25, -0.5]);
+
+        let offline_request = project_request_current(
+            json!({
+              "schema": "skenion.graph",
+              "schemaVersion": "0.1.0",
+              "id": "public-current-offline-audio",
+              "revision": "1",
+              "nodes": [
+                audio_sig_node_current("sig", 0.75),
+                audio_snapshot_node_current("snap")
+              ],
+              "edges": [
+                {
+                  "id": "edge_sig_snap",
+                  "source": { "nodeId": "sig", "portId": "out" },
+                  "target": { "nodeId": "snap", "portId": "signal" },
+                  "resolvedType": "signal.audio"
+                }
+              ]
+            }),
+            vec![
+                audio_sig_definition_current(),
+                audio_snapshot_definition_current(),
+            ],
+        );
+        let report = run_offline_audio_dsp_current(
+            &offline_request,
+            AudioOfflineDspOptions {
+                blocks: 1,
+                plan: AudioDspPlanOptions {
+                    block_size: 4,
+                    sample_rate: 48_000,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(report.snapshots[0].value, 0.75);
+
+        let mut unsupported_request = request.clone();
+        unsupported_request.graph.schema_version = "9.9.9".to_owned();
+        let error =
+            build_audio_dsp_plan_current(&unsupported_request, AudioDspPlanOptions::default())
+                .unwrap_err();
+        assert!(error.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("project.unsupported-schema-version")
+        }));
     }
 
     fn audio_source_definition(id: &str, input_port: &str) -> NodeDefinition {
@@ -2321,6 +2758,120 @@ mod tests {
 
     fn node_definition(value: serde_json::Value) -> NodeDefinition {
         serde_json::from_value(value).unwrap()
+    }
+
+    fn project_request_current(
+        graph: serde_json::Value,
+        nodes: Vec<serde_json::Value>,
+    ) -> ProjectRequestCurrent {
+        ProjectRequestCurrent {
+            document: None,
+            graph: serde_json::from_value(graph).unwrap(),
+            nodes: nodes
+                .into_iter()
+                .map(|node| serde_json::from_value::<crate::NodeDefinitionCurrent>(node).unwrap())
+                .collect(),
+            patch_library: Vec::new(),
+            view_state: None,
+        }
+    }
+
+    fn audio_sig_definition_current() -> serde_json::Value {
+        json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "audio.sig",
+          "version": "0.1.0",
+          "displayName": "sig~",
+          "category": "Audio",
+          "ports": [
+            { "id": "value", "direction": "input", "type": "value.number" },
+            { "id": "out", "direction": "output", "type": "signal.audio", "rate": "audio" }
+          ],
+          "execution": { "model": "audio_block" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        })
+    }
+
+    fn audio_snapshot_definition_current() -> serde_json::Value {
+        json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "audio.snapshot",
+          "version": "0.1.0",
+          "displayName": "snapshot~",
+          "category": "Audio",
+          "ports": [
+            { "id": "signal", "direction": "input", "type": "signal.audio", "rate": "audio" },
+            { "id": "trigger", "direction": "input", "type": "message.any", "rate": "event", "triggerMode": "trigger" },
+            { "id": "value", "direction": "output", "type": "value.number" }
+          ],
+          "execution": { "model": "audio_block" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        })
+    }
+
+    fn audio_output_definition_current() -> serde_json::Value {
+        json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "audio.output",
+          "version": "0.1.0",
+          "displayName": "dac~",
+          "category": "Audio",
+          "ports": [
+            { "id": "left", "direction": "input", "type": "signal.audio", "rate": "audio" },
+            { "id": "right", "direction": "input", "type": "signal.audio", "rate": "audio" }
+          ],
+          "execution": { "model": "audio_block" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        })
+    }
+
+    fn audio_sig_node_current(id: &str, value: f64) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "audio.sig",
+          "kindVersion": "0.1.0",
+          "params": { "value": value },
+          "ports": [
+            { "id": "value", "direction": "input", "type": "value.number" },
+            { "id": "out", "direction": "output", "type": "signal.audio", "rate": "audio" }
+          ]
+        })
+    }
+
+    fn audio_snapshot_node_current(id: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "audio.snapshot",
+          "kindVersion": "0.1.0",
+          "params": {},
+          "ports": [
+            { "id": "signal", "direction": "input", "type": "signal.audio", "rate": "audio" },
+            { "id": "trigger", "direction": "input", "type": "message.any", "rate": "event", "triggerMode": "trigger" },
+            { "id": "value", "direction": "output", "type": "value.number" }
+          ]
+        })
+    }
+
+    fn audio_output_node_current(id: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "audio.output",
+          "kindVersion": "0.1.0",
+          "params": {},
+          "ports": [
+            { "id": "left", "direction": "input", "type": "signal.audio", "rate": "audio" },
+            { "id": "right", "direction": "input", "type": "signal.audio", "rate": "audio" }
+          ]
+        })
     }
 
     fn float_node(id: &str, value: f64) -> serde_json::Value {

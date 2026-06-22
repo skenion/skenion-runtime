@@ -573,8 +573,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        DiagnosticSeverity, GraphDocument, GraphNode, ProjectDocumentV02, RuntimeDiagnostic,
-        create_default_view_state_for_graph,
+        DiagnosticSeverity, GraphDocument, GraphNode, ProjectDocumentCurrent, RuntimeDiagnostic,
     };
 
     #[test]
@@ -975,15 +974,15 @@ mod tests {
         }
     }
 
-    fn project_document(graph: &GraphDocument) -> ProjectDocumentV02 {
+    fn project_document(graph: &GraphDocument) -> ProjectDocumentCurrent {
         serde_json::from_value(json!({
             "schema": "skenion.project",
-            "schemaVersion": "0.2.0",
+            "schemaVersion": "0.1.0",
             "id": format!("{}-project", graph.id),
             "revision": graph.revision.clone(),
             "graph": {
                 "schema": "skenion.graph",
-                "schemaVersion": "0.2.0",
+                "schemaVersion": "0.1.0",
                 "id": graph.id.clone(),
                 "revision": graph.revision.clone(),
                 "nodes": graph.nodes.iter().map(|node| json!({
@@ -995,10 +994,28 @@ mod tests {
                 })).collect::<Vec<_>>(),
                 "edges": []
             },
-            "viewState": create_default_view_state_for_graph(graph),
+            "viewState": default_view_state(graph),
             "patchLibrary": []
         }))
         .expect("runtime telemetry test project document should parse")
+    }
+
+    fn default_view_state(graph: &GraphDocument) -> serde_json::Value {
+        json!({
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": {
+                "nodes": graph.nodes.iter().enumerate().map(|(index, node)| {
+                    (
+                        node.id.clone(),
+                        json!({
+                            "x": 160.0 * (index as f64),
+                            "y": 0.0
+                        }),
+                    )
+                }).collect::<serde_json::Map<_, _>>()
+            }
+        })
     }
 
     fn preview_status(state: PreviewState) -> RuntimePreviewStatusResponse {

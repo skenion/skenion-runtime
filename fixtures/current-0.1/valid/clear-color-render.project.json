@@ -1,0 +1,108 @@
+{
+  "graph": {
+    "schema": "skenion.graph",
+    "schemaVersion": "0.1.0",
+    "id": "runtime-fixture-clear-color-render",
+    "revision": "1",
+    "nodes": [
+      {
+        "id": "clear_color",
+        "kind": "render.clear-color",
+        "kindVersion": "0.1.0",
+        "params": {
+          "color": [0.12, 0.2, 0.34, 1]
+        },
+        "ports": [
+          {
+            "id": "out",
+            "direction": "output",
+            "type": "render.frame",
+            "rate": "render"
+          }
+        ]
+      },
+      {
+        "id": "output",
+        "kind": "render.output",
+        "kindVersion": "0.1.0",
+        "params": {},
+        "ports": [
+          {
+            "id": "in",
+            "direction": "input",
+            "type": "render.frame",
+            "rate": "render",
+            "required": true
+          }
+        ]
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_clear_output",
+        "source": {
+          "nodeId": "clear_color",
+          "portId": "out"
+        },
+        "target": {
+          "nodeId": "output",
+          "portId": "in"
+        },
+        "resolvedType": "render.frame"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "schema": "skenion.node.definition",
+      "schemaVersion": "0.1.0",
+      "id": "render.clear-color",
+      "version": "0.1.0",
+      "displayName": "Clear Color",
+      "category": "Render",
+      "ports": [
+        {
+          "id": "out",
+          "direction": "output",
+          "type": "render.frame",
+          "rate": "render"
+        }
+      ],
+      "execution": {
+        "model": "gpu_pass",
+        "clock": "frame"
+      },
+      "state": {
+        "persistent": false
+      },
+      "permissions": [],
+      "capabilities": ["render.frame.v0.1"]
+    },
+    {
+      "schema": "skenion.node.definition",
+      "schemaVersion": "0.1.0",
+      "id": "render.output",
+      "version": "0.1.0",
+      "displayName": "Render Output",
+      "category": "Render",
+      "ports": [
+        {
+          "id": "in",
+          "direction": "input",
+          "type": "render.frame",
+          "rate": "render",
+          "required": true
+        }
+      ],
+      "execution": {
+        "model": "gpu_pass",
+        "clock": "frame"
+      },
+      "state": {
+        "persistent": false
+      },
+      "permissions": [],
+      "capabilities": ["render.output.v0.1"]
+    }
+  ]
+}

@@ -37,14 +37,14 @@ pub(crate) struct PreviewSpawn {
 pub(crate) type PreviewSpawner = fn(&PreviewDocument, &Path, &Path) -> Result<PreviewSpawn, String>;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PreviewContext {
-    pub graph_id: String,
-    pub graph_revision: String,
-    pub session_revision: u64,
-    pub control_revision: u64,
-    pub graph: GraphDocument,
-    pub plan: ExecutionPlan,
-    pub control_state: ControlState,
+pub(crate) struct PreviewContext {
+    pub(crate) graph_id: String,
+    pub(crate) graph_revision: String,
+    pub(crate) session_revision: u64,
+    pub(crate) control_revision: u64,
+    pub(crate) graph: GraphDocument,
+    pub(crate) plan: ExecutionPlan,
+    pub(crate) control_state: ControlState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,7 +165,7 @@ impl PreviewManager {
         )
     }
 
-    pub fn start(
+    pub(crate) fn start(
         &mut self,
         context: Result<PreviewContext, Vec<RuntimeDiagnostic>>,
         snapshot: RuntimeSessionSnapshot,
@@ -258,7 +258,7 @@ impl PreviewManager {
         }
     }
 
-    pub fn restart(
+    pub(crate) fn restart(
         &mut self,
         context: Result<PreviewContext, Vec<RuntimeDiagnostic>>,
         snapshot: RuntimeSessionSnapshot,
@@ -589,9 +589,8 @@ mod tests {
     use crate::{
         ExecutionGroup, ExecutionModel, GraphDocument, GraphNode, PREVIEW_TELEMETRY_SCHEMA,
         PREVIEW_TELEMETRY_SCHEMA_VERSION, PlanEdge, PlanNode, Port, PreviewTelemetryHeartbeat,
-        ProjectDocumentV02, RuntimeSessionSnapshot, create_default_view_state_for_graph,
-        preview_manager::PreviewHandle, read_preview_control_state_snapshot,
-        telemetry::write_preview_telemetry_heartbeat,
+        ProjectDocumentCurrent, RuntimeSessionSnapshot, preview_manager::PreviewHandle,
+        read_preview_control_state_snapshot, telemetry::write_preview_telemetry_heartbeat,
     };
 
     #[test]
@@ -1333,15 +1332,15 @@ fn fs_main() -> @location(0) vec4<f32> {
         }
     }
 
-    fn project_document(graph: &GraphDocument) -> ProjectDocumentV02 {
+    fn project_document(graph: &GraphDocument) -> ProjectDocumentCurrent {
         serde_json::from_value(json!({
             "schema": "skenion.project",
-            "schemaVersion": "0.2.0",
+            "schemaVersion": "0.1.0",
             "id": format!("{}-project", graph.id),
             "revision": graph.revision.clone(),
             "graph": {
                 "schema": "skenion.graph",
-                "schemaVersion": "0.2.0",
+                "schemaVersion": "0.1.0",
                 "id": graph.id.clone(),
                 "revision": graph.revision.clone(),
                 "nodes": graph.nodes.iter().map(|node| json!({
@@ -1353,10 +1352,28 @@ fn fs_main() -> @location(0) vec4<f32> {
                 })).collect::<Vec<_>>(),
                 "edges": []
             },
-            "viewState": create_default_view_state_for_graph(graph),
+            "viewState": default_view_state(graph),
             "patchLibrary": []
         }))
         .expect("runtime test project document should parse")
+    }
+
+    fn default_view_state(graph: &GraphDocument) -> serde_json::Value {
+        json!({
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": {
+                "nodes": graph.nodes.iter().enumerate().map(|(index, node)| {
+                    (
+                        node.id.clone(),
+                        json!({
+                            "x": 160.0 * (index as f64),
+                            "y": 0.0
+                        }),
+                    )
+                }).collect::<serde_json::Map<_, _>>()
+            }
+        })
     }
 
     fn empty_snapshot() -> RuntimeSessionSnapshot {

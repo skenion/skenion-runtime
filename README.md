@@ -7,16 +7,15 @@ Runtime internals live in a Cargo workspace until external consumers justify ext
 
 ## Active Surface
 
-The active runtime surface is a ProjectDocumentV02 loader, planner, session API,
-and local preview process manager. Graph v0.1 is not an active authoring or
-runtime API; legacy v0.1 commands exist only as migration diagnostics while the
-remaining internals are being lifted to v0.2.
+The active runtime surface is a current 0.1 project loader, planner, session API,
+and local preview process manager. Unsupported graph/project/node contract
+versions are rejected with structured diagnostics.
 
 It can validate and plan:
 
-- Skenion ProjectDocumentV02 JSON files
-- graph v0.2 documents resolved against v0.2 node definition manifests
-- v0.2 patch libraries and subpatch expansion
+- Skenion current 0.1 project JSON files
+- graph 0.1 documents resolved against node definition manifests
+- current 0.1 patch libraries and subpatch expansion
 - duplicate node and port ids
 - edge endpoint existence
 - output-to-input edge direction
@@ -30,26 +29,15 @@ It can validate and plan:
 - a local session-driven preview process manager
 
 ```sh
-cargo run -- validate-project --project path/to/project-v0.2.json
-cargo run -- plan --project path/to/project-v0.2.json --format text
-cargo run -- plan --project path/to/project-v0.2.json --format json
-cargo run -- run --project path/to/project-v0.2.json --frames 2 --format json
+cargo run -- validate-project --project path/to/project-0.1.json
+cargo run -- plan --project path/to/project-0.1.json --format text
+cargo run -- plan --project path/to/project-0.1.json --format json
+cargo run -- run --project path/to/project-0.1.json --frames 2 --format json
 ```
 
 The preview process manager is exposed through the Runtime session HTTP API.
 Standalone preview child commands consume prepared plan or preview-document
-artifacts and are not the active graph authoring API.
-
-Legacy v0.1 loader checks are intentionally named as legacy commands:
-
-```sh
-cargo run -- legacy-validate-node path/to/node-definition-v0.1.json
-cargo run -- legacy-validate-graph path/to/graph-v0.1.json
-cargo run -- legacy-validate-project --graph path/to/graph-v0.1.json --nodes path/to/node-definitions-v0.1
-cargo run -- legacy-preview --graph path/to/graph-v0.1.json --nodes path/to/node-definitions-v0.1 --frames 300
-cargo run -- legacy-audio-plan --graph path/to/graph-v0.1.json --nodes path/to/node-definitions-v0.1 --format json
-cargo run -- legacy-audio-output --graph path/to/graph-v0.1.json --nodes path/to/node-definitions-v0.1 --duration-ms 1000
-```
+artifacts and are not graph import or authoring APIs.
 
 ## Status
 

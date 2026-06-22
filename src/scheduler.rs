@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{ExecutionModel, ExecutionPlan};
+use crate::{ExecutionModel, ExecutionModelCurrent, ExecutionPlan};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,7 +24,7 @@ pub struct DummyNodeExecution {
     pub node_id: String,
     pub kind: String,
     pub kind_version: String,
-    pub execution_model: ExecutionModel,
+    pub execution_model: ExecutionModelCurrent,
     pub order: usize,
     pub status: &'static str,
 }
@@ -41,7 +41,7 @@ pub fn run_dummy_execution(plan: &ExecutionPlan, frame_count: usize) -> DummyExe
                     node_id: node.node_id.clone(),
                     kind: node.kind.clone(),
                     kind_version: node.kind_version.clone(),
-                    execution_model: node.execution_model.clone(),
+                    execution_model: execution_model_current(&node.execution_model),
                     order: node.order,
                     status: "simulated",
                 })
@@ -54,6 +54,20 @@ pub fn run_dummy_execution(plan: &ExecutionPlan, frame_count: usize) -> DummyExe
         graph_revision: plan.graph_revision.clone(),
         frame_count,
         frames,
+    }
+}
+
+fn execution_model_current(model: &ExecutionModel) -> ExecutionModelCurrent {
+    match model {
+        ExecutionModel::Event => ExecutionModelCurrent::Event,
+        ExecutionModel::Value => ExecutionModelCurrent::Value,
+        ExecutionModel::Frame => ExecutionModelCurrent::Frame,
+        ExecutionModel::AudioBlock => ExecutionModelCurrent::AudioBlock,
+        ExecutionModel::VideoFrame => ExecutionModelCurrent::VideoFrame,
+        ExecutionModel::GpuPass => ExecutionModelCurrent::GpuPass,
+        ExecutionModel::AsyncResource => ExecutionModelCurrent::AsyncResource,
+        ExecutionModel::ScriptControl => ExecutionModelCurrent::ScriptControl,
+        ExecutionModel::NativePlugin => ExecutionModelCurrent::NativePlugin,
     }
 }
 

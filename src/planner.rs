@@ -4,67 +4,85 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Edge, ExecutionModel, FeedbackPolicyV02, GraphDocument, NodeRegistry, ProjectValidationReport,
-    validate_project,
+    Edge, ExecutionModel, FeedbackPolicyCurrent, GraphDocument, NodeRegistry,
+    ProjectValidationReport, validate_project,
 };
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionPlan {
-    pub graph_id: String,
-    pub graph_revision: String,
-    pub nodes: Vec<PlanNode>,
-    pub edges: Vec<PlanEdge>,
-    pub groups: Vec<ExecutionGroup>,
+    pub(crate) graph_id: String,
+    pub(crate) graph_revision: String,
+    pub(crate) nodes: Vec<PlanNode>,
+    pub(crate) edges: Vec<PlanEdge>,
+    pub(crate) groups: Vec<ExecutionGroup>,
+}
+
+impl ExecutionPlan {
+    pub fn graph_id(&self) -> &str {
+        &self.graph_id
+    }
+
+    pub fn graph_revision(&self) -> &str {
+        &self.graph_revision
+    }
+
+    pub fn node_ids(&self) -> impl Iterator<Item = &str> {
+        self.nodes.iter().map(|node| node.node_id.as_str())
+    }
+
+    pub fn contains_node(&self, node_id: &str) -> bool {
+        self.node_ids().any(|candidate| candidate == node_id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlanNode {
-    pub node_id: String,
-    pub kind: String,
-    pub kind_version: String,
-    pub execution_model: ExecutionModel,
-    pub order: usize,
+pub(crate) struct PlanNode {
+    pub(crate) node_id: String,
+    pub(crate) kind: String,
+    pub(crate) kind_version: String,
+    pub(crate) execution_model: ExecutionModel,
+    pub(crate) order: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlanEdge {
-    pub from_node: String,
-    pub from_port: String,
-    pub to_node: String,
-    pub to_port: String,
+pub(crate) struct PlanEdge {
+    pub(crate) from_node: String,
+    pub(crate) from_port: String,
+    pub(crate) to_node: String,
+    pub(crate) to_port: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<PlanEdgeMetadata>,
+    pub(crate) metadata: Option<PlanEdgeMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlanEdgeMetadata {
+pub(crate) struct PlanEdgeMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_type: Option<String>,
+    pub(crate) resolved_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub merge_policy: Option<String>,
+    pub(crate) merge_policy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fan_out_policy: Option<String>,
+    pub(crate) fan_out_policy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub order: Option<u64>,
+    pub(crate) order: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub feedback: Option<FeedbackPolicyV02>,
+    pub(crate) feedback: Option<FeedbackPolicyCurrent>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cycle_classification: Option<String>,
+    pub(crate) cycle_classification: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExecutionGroup {
-    pub execution_model: ExecutionModel,
-    pub node_ids: Vec<String>,
+pub(crate) struct ExecutionGroup {
+    pub(crate) execution_model: ExecutionModel,
+    pub(crate) node_ids: Vec<String>,
 }
 
 #[derive(Debug, Error)]
-pub enum PlanError {
+pub(crate) enum PlanError {
     #[error("{0}")]
     InvalidProject(#[from] ProjectValidationReport),
     #[error("cycle detected: {nodes}")]

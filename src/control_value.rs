@@ -98,7 +98,7 @@ impl ControlValue {
         }
     }
 
-    pub fn for_node_default(node: &GraphNode) -> Option<Self> {
+    pub(crate) fn for_node_default(node: &GraphNode) -> Option<Self> {
         match node.kind.as_str() {
             FLOAT_KIND => Some(Self::Float {
                 representation: read_representation_param(node, DEFAULT_FLOAT_REPRESENTATION),

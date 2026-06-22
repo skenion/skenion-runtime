@@ -8,15 +8,16 @@ mod conversion;
 mod dsp;
 mod extension_manager;
 mod io_device_manager;
-mod loader;
 mod log_store;
 #[cfg(not(test))]
 mod midi_input;
 mod planner;
 mod preview_control_state;
 mod preview_manager;
+#[allow(dead_code)]
 mod project;
-mod project_v02;
+mod project_current;
+#[allow(dead_code)]
 mod registry;
 mod render;
 mod runtime_time;
@@ -27,6 +28,7 @@ mod session;
 mod session_registry;
 mod sidecar;
 mod telemetry;
+#[allow(dead_code, unused_imports)]
 mod validation;
 mod visual;
 
@@ -47,41 +49,45 @@ pub use collaboration::{
     COLLABORATION_EVENT_REPLAY_LIMIT, RuntimeCollaborationLog, RuntimeCollaborationReplay,
     collaboration_broadcast_event_after_high_water, collaboration_event,
 };
-pub use contract::{
+#[allow(unused_imports)]
+pub(crate) use contract::{
     ApplyPatchError, AudioClockBridgeMethod, AudioClockBridgePlan, AudioClockDomain,
     AudioClockDomainAuthority, AudioDeviceDescriptor, AudioDevicePreference, AudioEndpoint,
     AudioEndpointDirection, AudioGraphPartition, AudioResamplerPlan, AudioStreamConfigRequest,
-    AudioStreamConfigResolved, CanvasNodeView, ClockAuthority, ClockCapability, ClockField,
-    ClockSourceKind, ClockState, ClockTimeSignature, CycleValidationV02, DataFlow, DataType, Edge,
-    EdgeEndpointV02, EdgeSpecV02, ExecutionModel, ExecutionModelV02, ExtensionKind,
+    AudioStreamConfigResolved, ClockAuthority, ClockCapability, ClockField, ClockSourceKind,
+    ClockState, ClockTimeSignature, DataFlow, DataType, Edge, ExecutionModel, ExtensionKind,
     ExtensionManifest, ExtensionNativeArtifact, ExtensionNativeBinding, ExtensionProvides,
-    FanOutPolicyV02, FeedbackBoundaryV02, FeedbackPolicyV02, GraphDocument, GraphDocumentV02,
-    GraphFragmentOutsideEndpointPolicyV02, GraphFragmentV02, GraphNode, GraphNodeV02, GraphPatch,
-    GraphPatchEvent, GraphPatchEventKind, GraphPatchHistory, GraphPatchOperation, GraphTargetRef,
-    GraphValidationResultV02, IdConflictPolicy, IdRemapResult, InvertPatchError,
-    MIDI_CLOCK_TICKS_PER_QUARTER, MIDI_CLOCK_TICKS_PER_SIXTEENTH, MergePolicyV02,
-    MidiClockApplyResult, MidiClockDiagnostic, MidiClockDiagnosticSeverity, MidiClockMessage,
-    MidiClockMessageKind, MidiClockSnapshot, NodeDefinition, NodeDefinitionV02, NodeExecution,
-    NodeState, NumberRange, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement,
-    PatchContractPortV02, PatchContractV02, PatchDefinitionV02, PatchPath, Port, PortActivation,
-    PortDirection, PortDirectionV02, PortRateV02, PortRef, PortSpecV02, ProjectDocumentV02,
-    ProjectMetadataV02, ReplaceNodeInterfaceEdgePolicy, RuntimeCollaborationAck,
-    RuntimeCollaborationAuthSubject, RuntimeCollaborationCausalMetadata,
-    RuntimeCollaborationChange, RuntimeCollaborationConflict, RuntimeCollaborationEventEnvelope,
-    RuntimeCollaborationEventKind, RuntimeCollaborationEventPayload, RuntimeCollaborationNack,
-    RuntimeCollaborationNackReason, RuntimeCollaborationOperationBatch,
-    RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationDiagnostic,
-    RuntimeCollaborationOperationEnvelope, RuntimeCollaborationOperationPayload,
-    RuntimeCollaborationOperationResult, RuntimeCollaborationOperationStatus,
-    RuntimeCollaborationPresenceEnvelope, RuntimeCollaborationRebase,
-    RuntimeCollaborationRebaseStrategy, RuntimeCollaborationSelectionEnvelope,
-    RuntimeCollaborationServerClock, RuntimeCollaborationUndoRedoAction,
-    RuntimeCollaborationUndoScope, RuntimeCollaborationUndoScopeKind, RuntimeOperationAttribution,
-    RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ShaderInterface,
-    ShaderInterfaceDiagnostic, ShaderUniform, StringOrStrings, ViewState,
-    analyze_shader_interface_v01, apply_midi_clock_message, create_default_view_state_for_graph,
+    GraphDocument, GraphNode, GraphPatch, GraphPatchOperation, InvertPatchError,
+    MIDI_CLOCK_TICKS_PER_QUARTER, MIDI_CLOCK_TICKS_PER_SIXTEENTH, MidiClockApplyResult,
+    MidiClockDiagnostic, MidiClockDiagnosticSeverity, MidiClockMessage, MidiClockMessageKind,
+    MidiClockSnapshot, NodeDefinition, NodeExecution, NodeState, NumberRange, Port, PortActivation,
+    PortDirection, PortRef, ShaderInterface, ShaderInterfaceDiagnostic, ShaderUniform,
+    StringOrStrings, analyze_shader_interface_v01, apply_midi_clock_message,
     midi_clock_snapshot_to_clock_state, parse_midi_clock_message, plan_audio_clock_bridge,
-    shader_interface_to_ports_v01, validate_runtime_collaboration_event_envelope,
+    shader_interface_to_ports_v01,
+};
+pub use contract::{
+    CanvasNodeView, CanvasViewState, CanvasViewport, CycleValidationCurrent, EdgeEndpointCurrent,
+    EdgeSpecCurrent, ExecutionModelCurrent, FanOutPolicyCurrent, FeedbackBoundaryCurrent,
+    FeedbackPolicyCurrent, GraphDocumentCurrent, GraphFragmentCurrent,
+    GraphFragmentOutsideEndpointPolicyCurrent, GraphNodeCurrent, GraphTargetRef,
+    GraphValidationResultCurrent, IdConflictPolicy, IdRemapResult, MergePolicyCurrent,
+    NodeDefinitionCurrent, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement,
+    PatchContractCurrent, PatchContractPortCurrent, PatchDefinitionCurrent, PatchPath,
+    PortDirectionCurrent, PortRateCurrent, PortSpecCurrent, ProjectDocumentCurrent,
+    ProjectMetadataCurrent, RuntimeCollaborationAck, RuntimeCollaborationAuthSubject,
+    RuntimeCollaborationCausalMetadata, RuntimeCollaborationChange, RuntimeCollaborationConflict,
+    RuntimeCollaborationEventEnvelope, RuntimeCollaborationEventKind,
+    RuntimeCollaborationEventPayload, RuntimeCollaborationNack, RuntimeCollaborationNackReason,
+    RuntimeCollaborationOperationBatch, RuntimeCollaborationOperationBatchResult,
+    RuntimeCollaborationOperationDiagnostic, RuntimeCollaborationOperationEnvelope,
+    RuntimeCollaborationOperationPayload, RuntimeCollaborationOperationResult,
+    RuntimeCollaborationOperationStatus, RuntimeCollaborationPresenceEnvelope,
+    RuntimeCollaborationRebase, RuntimeCollaborationRebaseStrategy,
+    RuntimeCollaborationSelectionEnvelope, RuntimeCollaborationServerClock,
+    RuntimeCollaborationUndoRedoAction, RuntimeCollaborationUndoScope,
+    RuntimeCollaborationUndoScopeKind, RuntimeOperationAttribution, RuntimeOperationDiagnostic,
+    RuntimeOperationEnvelope, ViewState, validate_runtime_collaboration_event_envelope,
     validate_runtime_collaboration_operation_batch,
     validate_runtime_collaboration_operation_batch_result,
     validate_runtime_collaboration_operation_envelope,
@@ -92,8 +98,9 @@ pub use contract::{
 pub use control_state::{
     ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,
     RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlReadTarget,
-    RuntimeControlStateResponse, read_graph_param, read_graph_port,
+    RuntimeControlStateResponse,
 };
+pub(crate) use control_state::{read_graph_param, read_graph_port};
 pub use control_value::{ControlMessage, ControlValue};
 pub use conversion::{convert_control_value_to_data_kind, convert_control_value_to_stored};
 pub use dsp::{
@@ -101,7 +108,8 @@ pub use dsp::{
     AudioDspPlanError, AudioDspPlanNode, AudioDspPlanOptions, AudioDspRenderedBuffer,
     AudioDspSignalInput, AudioDspSignalOutput, AudioDspSnapshot, AudioEndpointPlanNode,
     AudioOfflineDspError, AudioOfflineDspOptions, AudioOfflineDspReport, AudioRealtimeDspError,
-    AudioRealtimeDspExecutor, AudioRealtimeDspOptions, build_audio_dsp_plan, run_offline_audio_dsp,
+    AudioRealtimeDspExecutor, AudioRealtimeDspOptions, build_audio_dsp_plan_current,
+    run_offline_audio_dsp_current,
 };
 pub use extension_manager::{
     RUNTIME_EXTENSION_ABI_VERSION, RUNTIME_EXTENSION_MANIFEST_FILE, RuntimeExtensionDescriptor,
@@ -113,50 +121,48 @@ pub use io_device_manager::{
     RuntimeIoDeviceManager, RuntimeIoDiagnostic, RuntimeIoDiagnosticSeverity, RuntimeIoDirection,
     RuntimeIoInlineFrame, RuntimeIoTransportKind,
 };
-pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use log_store::{
     DEFAULT_RUNTIME_LOG_BACKLOG_LIMIT, RUNTIME_LOG_SCHEMA, RUNTIME_LOG_SCHEMA_VERSION,
     RuntimeLogEvent, RuntimeLogRetention, RuntimeLogSnapshotResponse, RuntimeLogSource,
     RuntimeLogStore,
 };
-pub use planner::{
-    ExecutionGroup, ExecutionPlan, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode,
-    build_execution_plan, format_plan_text,
-};
+pub(crate) use planner::build_execution_plan;
+pub(crate) use planner::{ExecutionGroup, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode};
+pub use planner::{ExecutionPlan, format_plan_text};
 pub use preview_control_state::{
     PREVIEW_CONTROL_STATE_SCHEMA, PREVIEW_CONTROL_STATE_SCHEMA_VERSION,
     PreviewControlStateSnapshot, preview_control_state_path, read_preview_control_state_snapshot,
     write_preview_control_state_snapshot,
 };
+pub(crate) use preview_manager::PreviewContext;
 pub use preview_manager::{
-    PreviewContext, PreviewManager, PreviewState, RuntimePreviewStartRequest,
-    RuntimePreviewStatusResponse,
+    PreviewManager, PreviewState, RuntimePreviewStartRequest, RuntimePreviewStatusResponse,
 };
-pub use project::{ProjectValidationError, ProjectValidationReport, validate_project};
-pub use project_v02::{
-    ProjectRequestV02, RunProjectRequestV02, build_execution_plan_request_v02,
-    build_execution_plan_run_request_v02, build_execution_plan_v02, expand_project_graph_v02,
-    validate_project_request_v02, validate_project_v02,
+pub(crate) use project::{ProjectValidationReport, validate_project};
+pub use project_current::{
+    CURRENT_SCHEMA_VERSION, ProjectRequestCurrent, RunProjectRequestCurrent,
+    build_execution_plan_current, build_execution_plan_request_current,
+    build_execution_plan_run_request_current, expand_project_graph_current,
+    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
+    schema_version_diagnostic, validate_project_current, validate_project_request_current,
 };
-pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadError};
+pub(crate) use registry::NodeRegistry;
 pub use render::{
     ClearColorScene, DEFAULT_CLEAR_COLOR, FullscreenShaderScene, GeneratedShaderResponse,
-    GeneratedShaderSource, GeneratedShaderSourceMap, PREVIEW_DOCUMENT_SCHEMA,
-    PREVIEW_DOCUMENT_SCHEMA_VERSION, PreviewDocument, RENDER_CLEAR_COLOR_KIND,
+    GeneratedShaderSource, GeneratedShaderSourceMap, RENDER_CLEAR_COLOR_KIND,
     RENDER_FULLSCREEN_SHADER_KIND, RENDER_OUTPUT_KIND, RenderScene, RenderSceneBuildError,
-    ShaderLanguage, ShaderUniformBinding, ShaderUniformValue,
-    generated_shader_response_from_preview_document, render_scene_from_preview_document,
-    run_render_preview_window, write_preview_document,
+    ShaderLanguage, ShaderUniformBinding, ShaderUniformValue, run_render_preview_document_file,
 };
+pub(crate) use render::{PreviewDocument, generated_shader_response_from_preview_document};
 pub use scheduler::{
     DummyExecutionReport, DummyFrameReport, DummyNodeExecution, format_dummy_execution_text,
     run_dummy_execution,
 };
 pub use serve::{ServeRuntimeOptions, serve_runtime, serve_runtime_with_options};
 pub use server::{
-    DEFAULT_HOST, DEFAULT_PORT, DiagnosticSeverity, HealthResponse, ProjectRequest,
-    RUNTIME_API_VERSION, RunProjectRequest, RuntimeApiResponse, RuntimeDiagnostic,
-    RuntimeInfoResponse, RuntimeServerState, runtime_router, runtime_router_with_state,
+    DEFAULT_HOST, DEFAULT_PORT, DiagnosticSeverity, HealthResponse, RUNTIME_API_VERSION,
+    RuntimeApiResponse, RuntimeDiagnostic, RuntimeInfoResponse, RuntimeServerState, runtime_router,
+    runtime_router_with_state,
 };
 pub use session::{
     RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
@@ -180,8 +186,8 @@ pub use telemetry::{
     TELEMETRY_SCHEMA_VERSION, preview_telemetry_path, read_preview_telemetry, unix_ms_timestamp,
     write_preview_telemetry_heartbeat,
 };
-pub use validation::{
-    ValidationError, ValidationReport, apply_graph_patch, compatible_data_types,
-    invert_graph_patch, type_label, validate_graph_document, validate_node_definition,
+pub(crate) use validation::{
+    ValidationReport, compatible_data_types, type_label, validate_graph_document,
+    validate_node_definition,
 };
 pub use visual::{PreviewFrameLimit, run_preview_window};

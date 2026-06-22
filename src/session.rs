@@ -6,19 +6,20 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CanvasNodeView, ControlState, DataFlow, DataType, DummyExecutionReport, Edge, EdgeSpecV02,
-    ExecutionPlan, GraphDocument, GraphDocumentV02, GraphFragmentOutsideEndpointPolicyV02,
-    GraphNode, GraphNodeV02, GraphPatch, GraphTargetRef, IdConflictPolicy, IdRemapResult,
-    NodeDefinition, NodeDefinitionV02, NodeRegistry, PasteGraphFragmentRequest,
-    PasteGraphFragmentResponse, PastePlacement, PatchPath, Port, PortActivation, PortDirection,
-    PortDirectionV02, PortRateV02, PortRef, PortSpecV02, PreviewContext,
-    PreviewControlStateSnapshot, ProjectDocumentV02, ProjectRequest, ProjectRequestV02,
-    RuntimeCollaborationChange, RuntimeControlEventRequest, RuntimeControlEventResponse,
-    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlReadTarget,
-    RuntimeControlStateResponse, RuntimeDiagnostic, RuntimeOperationDiagnostic,
-    RuntimeOperationEnvelope, StringOrStrings, ViewState, build_execution_plan,
-    build_execution_plan_request_v02, create_default_view_state_for_graph, read_graph_param,
-    read_graph_port, run_dummy_execution, server::registry_from_nodes,
+    CanvasNodeView, CanvasViewState, ControlState, DataFlow, DataType, DummyExecutionReport, Edge,
+    EdgeSpecCurrent, ExecutionPlan, GraphDocument, GraphDocumentCurrent,
+    GraphFragmentOutsideEndpointPolicyCurrent, GraphNode, GraphNodeCurrent, GraphPatch,
+    GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinition, NodeDefinitionCurrent,
+    NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
+    Port, PortActivation, PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef,
+    PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot, ProjectDocumentCurrent,
+    ProjectRequestCurrent, RuntimeCollaborationChange, RuntimeControlEventRequest,
+    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
+    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic,
+    RuntimeOperationDiagnostic, RuntimeOperationEnvelope, StringOrStrings, ViewState,
+    build_execution_plan, build_execution_plan_request_current,
+    project_document_validation_diagnostics_current, read_graph_param, read_graph_port,
+    run_dummy_execution, server::registry_from_nodes,
 };
 const UNRESOLVED_OBJECT_NODE_KIND: &str = "core.unresolved-object";
 
@@ -28,7 +29,7 @@ pub struct RuntimeSessionSnapshot {
     pub session_revision: u64,
     pub view_revision: u64,
     pub control_revision: u64,
-    pub project: Option<ProjectDocumentV02>,
+    pub project: Option<ProjectDocumentCurrent>,
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
 }
@@ -86,7 +87,7 @@ pub struct SessionRunRequest {
 pub struct RuntimeMutationRequest {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub graph_patch: Option<GraphPatch>,
+    pub(crate) graph_patch: Option<GraphPatch>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view_patch: Option<RuntimeViewPatch>,
@@ -98,6 +99,28 @@ pub struct RuntimeMutationRequest {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+impl RuntimeMutationRequest {
+    pub fn view_patch(view_patch: RuntimeViewPatch) -> Self {
+        Self {
+            graph_patch: None,
+            view_patch: Some(view_patch),
+            actor_id: None,
+            client_id: None,
+            description: None,
+        }
+    }
+
+    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.client_id = Some(client_id.into());
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -167,8 +190,8 @@ pub enum RuntimeHistoryEntryKind {
 
 #[derive(Debug)]
 pub struct RuntimeSession {
-    project: Option<ProjectDocumentV02>,
-    nodes_v02: Vec<NodeDefinitionV02>,
+    project: Option<ProjectDocumentCurrent>,
+    nodes_current: Vec<NodeDefinitionCurrent>,
     graph: Option<GraphDocument>,
     registry: Option<NodeRegistry>,
     plan: Option<ExecutionPlan>,
@@ -188,7 +211,7 @@ impl Default for RuntimeSession {
     fn default() -> Self {
         Self {
             project: None,
-            nodes_v02: Vec::new(),
+            nodes_current: Vec::new(),
             graph: None,
             registry: None,
             plan: None,
@@ -217,8 +240,8 @@ enum HistoryEntry {
     ProjectDocument {
         event_id: String,
         actor_id: Option<String>,
-        before: Box<ProjectDocumentV02>,
-        after: Box<ProjectDocumentV02>,
+        before: Box<ProjectDocumentCurrent>,
+        after: Box<ProjectDocumentCurrent>,
         before_view_revision: u64,
         after_view_revision: u64,
         mutation: RuntimeMutationRequest,
@@ -268,7 +291,7 @@ impl RuntimeSession {
         }
     }
 
-    pub fn preview_context(&self) -> Result<PreviewContext, Vec<RuntimeDiagnostic>> {
+    pub(crate) fn preview_context(&self) -> Result<PreviewContext, Vec<RuntimeDiagnostic>> {
         let Some(graph) = &self.graph else {
             return Err(vec![RuntimeDiagnostic::error(
                 "no project loaded in runtime session",
@@ -291,43 +314,39 @@ impl RuntimeSession {
         })
     }
 
-    pub fn load_project_v02(&mut self, request: ProjectRequestV02) -> RuntimeSessionResponse {
-        let document = project_document_from_request_v02(&request);
-        if let Err(report) = skenion_contracts::validate_project_document_v02(&document) {
-            let diagnostics = report
-                .errors()
-                .iter()
-                .map(|error| {
-                    RuntimeDiagnostic::structured_error(
-                        "project.invalid-v0.2",
-                        error.message.clone(),
-                        serde_json::json!({ "projectId": document.id }),
-                    )
-                })
-                .collect();
+    pub fn load_project_current(
+        &mut self,
+        request: ProjectRequestCurrent,
+    ) -> RuntimeSessionResponse {
+        let document = project_document_from_request_current(&request);
+        if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
+            let diagnostics = project_document_validation_diagnostics_current(&document, &report);
             return self.response(false, diagnostics, None);
         }
 
-        let (plan, mut diagnostics) = match build_execution_plan_request_v02(&request) {
+        let (plan, mut diagnostics) = match build_execution_plan_request_current(&request) {
             Ok(result) => result,
             Err(diagnostics) => return self.response(false, diagnostics, None),
         };
-        diagnostics.extend(unresolved_object_diagnostics_v02(&document.graph));
+        diagnostics.extend(unresolved_object_diagnostics_current(&document.graph));
 
-        let graph = graph_document_v02_to_v01(&document.graph);
-        let legacy_nodes = request
+        let graph = lower_graph_for_execution(&document.graph);
+        let lowered_nodes = request
             .nodes
             .iter()
-            .map(node_definition_v02_to_v01)
+            .map(lower_node_definition_for_execution)
             .collect::<Vec<_>>();
-        let registry = match registry_from_nodes(legacy_nodes) {
+        let registry = match registry_from_nodes(lowered_nodes) {
             Ok(registry) => registry,
             Err(diagnostics) => return self.response(false, diagnostics, None),
         };
         let control_state = ControlState::from_graph(&graph);
-        let view_state = reconcile_view_state_with_graph(&graph, Some(document.view_state.clone()));
+        let view_state = reconcile_view_state_with_graph_current(
+            &document.graph,
+            Some(document.view_state.clone()),
+        );
         self.project = Some(document);
-        self.nodes_v02 = request.nodes;
+        self.nodes_current = request.nodes;
         self.graph = Some(graph);
         self.registry = Some(registry);
         self.plan = Some(plan);
@@ -342,50 +361,11 @@ impl RuntimeSession {
         self.response(true, diagnostics, None)
     }
 
-    pub fn import_legacy_project_v01(&mut self, request: ProjectRequest) -> RuntimeSessionResponse {
-        let ProjectRequest {
-            graph,
-            nodes,
-            view_state,
-        } = request;
-        let request = ProjectRequestV02 {
-            document: None,
-            graph: graph_document_v01_to_v02(graph),
-            nodes: nodes.iter().map(node_definition_v01_to_v02).collect(),
-            patch_library: Vec::new(),
-            view_state,
-        };
-        let mut response = self.load_project_v02(request);
-        if response.ok {
-            let diagnostic = RuntimeDiagnostic::structured_warning(
-                "project.legacy-v0.1-import",
-                "legacy v0.1 project imported into active v0.2 Runtime session",
-                serde_json::json!({ "activeSchemaVersion": "0.2.0" }),
-            );
-            self.diagnostics.push(diagnostic.clone());
-            response.snapshot = self.snapshot();
-            response.diagnostics.push(diagnostic);
-        }
-        response
-    }
-
-    pub fn load_project(&mut self, _request: ProjectRequest) -> RuntimeSessionResponse {
-        self.response(
-            false,
-            vec![RuntimeDiagnostic::structured_error(
-                "project.active-v0.1-unsupported",
-                "v0.1 ProjectRequest is a legacy import input only; use load_project_v02 for active sessions or import_legacy_project_v01 for migration",
-                serde_json::json!({ "activeSchemaVersion": "0.2.0" }),
-            )],
-            None,
-        )
-    }
-
     pub fn validate_current(&mut self) -> RuntimeSessionResponse {
-        let diagnostics = match self.current_project_request_v02() {
-            Some(request) => match crate::validate_project_request_v02(&request) {
+        let diagnostics = match self.current_project_request_current() {
+            Some(request) => match crate::validate_project_request_current(&request) {
                 Ok((mut diagnostics, _)) => {
-                    diagnostics.extend(unresolved_object_diagnostics_v02(&request.graph));
+                    diagnostics.extend(unresolved_object_diagnostics_current(&request.graph));
                     diagnostics
                 }
                 Err(diagnostics) => diagnostics,
@@ -402,7 +382,7 @@ impl RuntimeSession {
     }
 
     pub fn plan_current(&mut self) -> RuntimeSessionResponse {
-        let request = match self.current_project_request_v02() {
+        let request = match self.current_project_request_current() {
             Some(request) => request,
             None => {
                 let diagnostics = vec![RuntimeDiagnostic::error(
@@ -413,9 +393,9 @@ impl RuntimeSession {
             }
         };
 
-        match build_execution_plan_request_v02(&request) {
+        match build_execution_plan_request_current(&request) {
             Ok((plan, mut diagnostics)) => {
-                diagnostics.extend(unresolved_object_diagnostics_v02(&request.graph));
+                diagnostics.extend(unresolved_object_diagnostics_current(&request.graph));
                 self.plan = Some(plan);
                 self.diagnostics = diagnostics.clone();
                 self.response(true, diagnostics, None)
@@ -455,7 +435,8 @@ impl RuntimeSession {
         self.apply_mutation_with_history(mutation, RuntimeHistoryEntryKind::Apply, None)
     }
 
-    pub fn apply_patch(&mut self, patch: GraphPatch) -> RuntimePatchResponse {
+    #[cfg(test)]
+    pub(crate) fn apply_patch(&mut self, patch: GraphPatch) -> RuntimePatchResponse {
         self.apply_mutation(RuntimeMutationRequest {
             graph_patch: Some(patch),
             view_patch: None,
@@ -486,7 +467,7 @@ impl RuntimeSession {
         self.paste_graph_fragment(envelope)
     }
 
-    pub fn apply_collaboration_change_set_v02(
+    pub fn apply_collaboration_change_set_current(
         &mut self,
         target: GraphTargetRef,
         changes: Vec<RuntimeCollaborationChange>,
@@ -506,7 +487,7 @@ impl RuntimeSession {
                 )],
             );
         };
-        let target_revision = match target_graph_revision_v02(&project, &target) {
+        let target_revision = match target_graph_revision_current(&project, &target) {
             Ok(revision) => revision,
             Err(diagnostic) => {
                 return self.patch_response(
@@ -537,17 +518,18 @@ impl RuntimeSession {
             );
         }
 
-        let (next_project, next_view_revision) = match apply_collaboration_changes_to_project_v02(
-            project.clone(),
-            self.view_revision,
-            &target,
-            &changes,
-        ) {
-            Ok(result) => result,
-            Err(diagnostics) => {
-                return self.patch_response(false, false, false, diagnostics);
-            }
-        };
+        let (next_project, next_view_revision) =
+            match apply_collaboration_changes_to_project_current(
+                project.clone(),
+                self.view_revision,
+                &target,
+                &changes,
+            ) {
+                Ok(result) => result,
+                Err(diagnostics) => {
+                    return self.patch_response(false, false, false, diagnostics);
+                }
+            };
         self.apply_project_document_update(
             project,
             next_project,
@@ -683,7 +665,7 @@ impl RuntimeSession {
 
     pub fn clear(&mut self) -> RuntimeSessionResponse {
         self.project = None;
-        self.nodes_v02 = Vec::new();
+        self.nodes_current = Vec::new();
         self.graph = None;
         self.registry = None;
         self.plan = None;
@@ -833,30 +815,31 @@ impl RuntimeSession {
         }
     }
 
-    pub fn graph(&self) -> Option<GraphDocument> {
+    #[cfg(test)]
+    pub(crate) fn graph(&self) -> Option<GraphDocument> {
         self.graph.clone()
     }
 
-    pub fn project_document_v02(&self) -> Option<ProjectDocumentV02> {
+    pub fn project_document_current(&self) -> Option<ProjectDocumentCurrent> {
         self.project.clone()
     }
 
-    pub fn target_revision_v02(&self, target: &GraphTargetRef) -> Option<String> {
+    pub fn target_revision_current(&self, target: &GraphTargetRef) -> Option<String> {
         self.project
             .as_ref()
-            .and_then(|project| target_graph_revision_v02(project, target).ok())
+            .and_then(|project| target_graph_revision_current(project, target).ok())
     }
 
     pub fn view_state(&self) -> Option<ViewState> {
         self.view_state.clone()
     }
 
-    fn current_project_request_v02(&self) -> Option<ProjectRequestV02> {
+    fn current_project_request_current(&self) -> Option<ProjectRequestCurrent> {
         let project = self.project.as_ref()?;
-        Some(ProjectRequestV02 {
+        Some(ProjectRequestCurrent {
             document: self.project.clone(),
             graph: project.graph.clone(),
-            nodes: self.nodes_v02.clone(),
+            nodes: self.nodes_current.clone(),
             patch_library: project.patch_library.clone(),
             view_state: self.view_state.clone(),
         })
@@ -899,9 +882,9 @@ impl RuntimeSession {
                 false,
                 false,
                 vec![RuntimeDiagnostic::structured_error(
-                    "project.active-v0.1-graph-patch-unsupported",
-                    "active Runtime sessions use v0.2 ProjectDocument graph targets; v0.1 graphPatch is supported only through explicit legacy import/migration",
-                    serde_json::json!({ "activeSchemaVersion": "0.2.0" }),
+                    "project.graph-patch-unsupported",
+                    "active Runtime sessions use current 0.1 ProjectDocument graph targets; graphPatch mutations are unsupported",
+                    serde_json::json!({ "activeSchemaVersion": "0.1.0" }),
                 )],
             );
         }
@@ -922,12 +905,13 @@ impl RuntimeSession {
             );
         }
 
-        let previous_view_state = runtime_owned_view_state(reconcile_view_state_with_graph(
-            &graph,
-            self.view_state.clone(),
-        ));
-        let mut next_view_state =
-            reconcile_view_state_with_graph(&next_graph, Some(previous_view_state.clone()));
+        let previous_view_state = runtime_owned_view_state(
+            reconcile_view_state_with_execution_graph(&graph, self.view_state.clone()),
+        );
+        let mut next_view_state = reconcile_view_state_with_execution_graph(
+            &next_graph,
+            Some(previous_view_state.clone()),
+        );
         let view_patch = mutation
             .view_patch
             .as_ref()
@@ -1031,7 +1015,7 @@ impl RuntimeSession {
             );
         };
 
-        let target_revision = match target_graph_revision_v02(&project, &request.target) {
+        let target_revision = match target_graph_revision_current(&project, &request.target) {
             Ok(revision) => revision,
             Err(diagnostic) => {
                 return self.reject_paste_response(
@@ -1065,7 +1049,7 @@ impl RuntimeSession {
 
         let revision_before = target_revision;
         let (next_project, next_view_revision, id_remap, revision_after) =
-            match paste_graph_fragment_into_project_v02(
+            match paste_graph_fragment_into_project_current(
                 project.clone(),
                 self.view_revision,
                 &request,
@@ -1132,30 +1116,30 @@ impl RuntimeSession {
 
     fn apply_project_document_update(
         &mut self,
-        before: ProjectDocumentV02,
-        after: ProjectDocumentV02,
+        before: ProjectDocumentCurrent,
+        after: ProjectDocumentCurrent,
         next_view_revision: u64,
         mutation: RuntimeMutationRequest,
         subject_event_id: Option<String>,
     ) -> RuntimePatchResponse {
         let before_view_revision = self.view_revision;
-        let request = ProjectRequestV02 {
+        let request = ProjectRequestCurrent {
             document: Some(after.clone()),
             graph: after.graph.clone(),
-            nodes: self.nodes_v02.clone(),
+            nodes: self.nodes_current.clone(),
             patch_library: after.patch_library.clone(),
             view_state: Some(after.view_state.clone()),
         };
-        let (plan, mut diagnostics) = match build_execution_plan_request_v02(&request) {
+        let (plan, mut diagnostics) = match build_execution_plan_request_current(&request) {
             Ok(result) => result,
             Err(diagnostics) => return self.patch_response(false, false, false, diagnostics),
         };
-        diagnostics.extend(unresolved_object_diagnostics_v02(&after.graph));
-        let graph = graph_document_v02_to_v01(&after.graph);
+        diagnostics.extend(unresolved_object_diagnostics_current(&after.graph));
+        let graph = lower_graph_for_execution(&after.graph);
         let registry = match registry_from_nodes(
-            self.nodes_v02
+            self.nodes_current
                 .iter()
-                .map(node_definition_v02_to_v01)
+                .map(lower_node_definition_for_execution)
                 .collect(),
         ) {
             Ok(registry) => registry,
@@ -1196,7 +1180,7 @@ impl RuntimeSession {
             self.project
                 .as_ref()
                 .map(|project| project.view_state.clone())
-                .unwrap_or_else(|| reconcile_view_state_with_graph(&graph, None)),
+                .unwrap_or_else(|| reconcile_view_state_with_execution_graph(&graph, None)),
         );
         self.view_revision = next_view_revision;
         self.control_state = ControlState::from_graph(&graph);
@@ -1344,7 +1328,7 @@ impl RuntimeSession {
 
     fn restore_project_document_state(
         &mut self,
-        mut project: ProjectDocumentV02,
+        mut project: ProjectDocumentCurrent,
         view_revision: u64,
         mutation: RuntimeHistoryEntryKind,
         mutation_to_record: RuntimeMutationRequest,
@@ -1355,25 +1339,25 @@ impl RuntimeSession {
             project.graph.revision = next_graph_revision(&current.graph.revision);
             project.revision = project.graph.revision.clone();
         }
-        let request = ProjectRequestV02 {
+        let request = ProjectRequestCurrent {
             document: Some(project.clone()),
             graph: project.graph.clone(),
-            nodes: self.nodes_v02.clone(),
+            nodes: self.nodes_current.clone(),
             patch_library: project.patch_library.clone(),
             view_state: Some(project.view_state.clone()),
         };
-        let (plan, mut diagnostics) = match build_execution_plan_request_v02(&request) {
+        let (plan, mut diagnostics) = match build_execution_plan_request_current(&request) {
             Ok(result) => result,
             Err(diagnostics) => {
                 return self.patch_response(false, false, false, diagnostics);
             }
         };
-        diagnostics.extend(unresolved_object_diagnostics_v02(&project.graph));
-        let graph = graph_document_v02_to_v01(&project.graph);
+        diagnostics.extend(unresolved_object_diagnostics_current(&project.graph));
+        let graph = lower_graph_for_execution(&project.graph);
         let registry = match registry_from_nodes(
-            self.nodes_v02
+            self.nodes_current
                 .iter()
-                .map(node_definition_v02_to_v01)
+                .map(lower_node_definition_for_execution)
                 .collect(),
         ) {
             Ok(registry) => registry,
@@ -1396,7 +1380,7 @@ impl RuntimeSession {
             self.project
                 .as_ref()
                 .map(|project| project.view_state.clone())
-                .unwrap_or_else(|| reconcile_view_state_with_graph(&graph, None)),
+                .unwrap_or_else(|| reconcile_view_state_with_execution_graph(&graph, None)),
         );
         self.view_revision = view_revision;
         self.control_state = ControlState::from_graph(&graph);
@@ -1457,11 +1441,11 @@ enum HistoryDirection {
 }
 
 fn project_document_history_delta(
-    current: &ProjectDocumentV02,
-    before: &ProjectDocumentV02,
-    after: &ProjectDocumentV02,
+    current: &ProjectDocumentCurrent,
+    before: &ProjectDocumentCurrent,
+    after: &ProjectDocumentCurrent,
     direction: HistoryDirection,
-) -> ProjectDocumentV02 {
+) -> ProjectDocumentCurrent {
     let (expected_current, exact_target) = match direction {
         HistoryDirection::Undo => (after, before),
         HistoryDirection::Redo => (before, after),
@@ -1471,8 +1455,8 @@ fn project_document_history_delta(
     }
 
     let mut project = current.clone();
-    apply_graph_history_delta_v02(&mut project.graph, &before.graph, &after.graph, direction);
-    project.view_state = view_state_history_delta_v02(
+    apply_graph_history_delta_current(&mut project.graph, &before.graph, &after.graph, direction);
+    project.view_state = view_state_history_delta_current(
         &project.view_state,
         &before.view_state,
         &after.view_state,
@@ -1494,7 +1478,7 @@ fn project_document_history_delta(
         else {
             continue;
         };
-        if apply_graph_history_delta_v02(
+        if apply_graph_history_delta_current(
             &mut patch.graph,
             &before_patch.graph,
             &after_patch.graph,
@@ -1508,22 +1492,22 @@ fn project_document_history_delta(
     project
 }
 
-fn apply_graph_history_delta_v02(
-    current: &mut GraphDocumentV02,
-    before: &GraphDocumentV02,
-    after: &GraphDocumentV02,
+fn apply_graph_history_delta_current(
+    current: &mut GraphDocumentCurrent,
+    before: &GraphDocumentCurrent,
+    after: &GraphDocumentCurrent,
     direction: HistoryDirection,
 ) -> bool {
     match direction {
-        HistoryDirection::Undo => undo_graph_history_delta_v02(current, before, after),
-        HistoryDirection::Redo => redo_graph_history_delta_v02(current, before, after),
+        HistoryDirection::Undo => undo_graph_history_delta_current(current, before, after),
+        HistoryDirection::Redo => redo_graph_history_delta_current(current, before, after),
     }
 }
 
-fn undo_graph_history_delta_v02(
-    current: &mut GraphDocumentV02,
-    before: &GraphDocumentV02,
-    after: &GraphDocumentV02,
+fn undo_graph_history_delta_current(
+    current: &mut GraphDocumentCurrent,
+    before: &GraphDocumentCurrent,
+    after: &GraphDocumentCurrent,
 ) -> bool {
     let before_node_ids = before
         .nodes
@@ -1589,10 +1573,10 @@ fn undo_graph_history_delta_v02(
     changed
 }
 
-fn redo_graph_history_delta_v02(
-    current: &mut GraphDocumentV02,
-    before: &GraphDocumentV02,
-    after: &GraphDocumentV02,
+fn redo_graph_history_delta_current(
+    current: &mut GraphDocumentCurrent,
+    before: &GraphDocumentCurrent,
+    after: &GraphDocumentCurrent,
 ) -> bool {
     let before_node_ids = before
         .nodes
@@ -1665,7 +1649,7 @@ fn redo_graph_history_delta_v02(
     changed
 }
 
-fn view_state_history_delta_v02(
+fn view_state_history_delta_current(
     current: &ViewState,
     before: &ViewState,
     after: &ViewState,
@@ -1722,17 +1706,20 @@ fn next_graph_revision(current: &str) -> String {
         .unwrap_or_else(|_| format!("{current}+1"))
 }
 
-fn project_document_from_request_v02(request: &ProjectRequestV02) -> ProjectDocumentV02 {
+fn project_document_from_request_current(
+    request: &ProjectRequestCurrent,
+) -> ProjectDocumentCurrent {
     if let Some(document) = &request.document {
         return document.clone();
     }
     let graph = request.graph.clone();
-    let view_state = request.view_state.clone().unwrap_or_else(|| {
-        reconcile_view_state_with_graph(&graph_document_v02_to_v01(&graph), None)
-    });
-    ProjectDocumentV02 {
+    let view_state = request
+        .view_state
+        .clone()
+        .unwrap_or_else(|| reconcile_view_state_with_graph_current(&graph, None));
+    ProjectDocumentCurrent {
         schema: "skenion.project".to_owned(),
-        schema_version: "0.2.0".to_owned(),
+        schema_version: "0.1.0".to_owned(),
         id: graph.id.clone(),
         revision: graph.revision.clone(),
         metadata: None,
@@ -1744,7 +1731,7 @@ fn project_document_from_request_v02(request: &ProjectRequestV02) -> ProjectDocu
     }
 }
 
-fn graph_document_v02_to_v01(graph: &GraphDocumentV02) -> GraphDocument {
+fn lower_graph_for_execution(graph: &GraphDocumentCurrent) -> GraphDocument {
     GraphDocument {
         schema: "skenion.graph".to_owned(),
         schema_version: "0.1.0".to_owned(),
@@ -1753,99 +1740,13 @@ fn graph_document_v02_to_v01(graph: &GraphDocumentV02) -> GraphDocument {
         nodes: graph
             .nodes
             .iter()
-            .map(|node| graph_node_v02_to_v01(node, &node.id))
+            .map(|node| lower_graph_node_for_execution(node, &node.id))
             .collect(),
-        edges: graph.edges.iter().map(edge_v02_to_v01).collect(),
+        edges: graph.edges.iter().map(lower_edge_for_execution).collect(),
     }
 }
 
-fn graph_document_v01_to_v02(graph: GraphDocument) -> GraphDocumentV02 {
-    GraphDocumentV02 {
-        schema: "skenion.graph".to_owned(),
-        schema_version: "0.2.0".to_owned(),
-        id: graph.id,
-        revision: graph.revision,
-        nodes: graph.nodes.iter().map(graph_node_v01_to_v02).collect(),
-        edges: graph
-            .edges
-            .iter()
-            .enumerate()
-            .map(|(index, edge)| edge_v01_to_v02(index, edge))
-            .collect(),
-        cable_styles: None,
-    }
-}
-
-fn graph_node_v01_to_v02(node: &GraphNode) -> GraphNodeV02 {
-    GraphNodeV02 {
-        id: node.id.clone(),
-        kind: node.kind.clone(),
-        kind_version: node.kind_version.clone(),
-        params: node.params.clone(),
-        ports: node.ports.iter().map(port_v01_to_v02).collect(),
-        port_groups: None,
-    }
-}
-
-fn edge_v01_to_v02(index: usize, edge: &Edge) -> EdgeSpecV02 {
-    EdgeSpecV02 {
-        id: format!(
-            "legacy_edge_{}_{}_{}_{}",
-            sanitize_id_fragment(&edge.from.node),
-            sanitize_id_fragment(&edge.from.port),
-            sanitize_id_fragment(&edge.to.node),
-            index + 1
-        ),
-        source: crate::EdgeEndpointV02 {
-            node_id: edge.from.node.clone(),
-            port_id: edge.from.port.clone(),
-        },
-        target: crate::EdgeEndpointV02 {
-            node_id: edge.to.node.clone(),
-            port_id: edge.to.port.clone(),
-        },
-        resolved_type: None,
-        order: None,
-        enabled: None,
-        adapter: None,
-        feedback: None,
-        style_override: None,
-        label: None,
-        description: None,
-    }
-}
-
-fn node_definition_v01_to_v02(definition: &NodeDefinition) -> NodeDefinitionV02 {
-    NodeDefinitionV02 {
-        schema: "skenion.node.definition".to_owned(),
-        schema_version: "0.2.0".to_owned(),
-        id: definition.id.clone(),
-        version: definition.version.clone(),
-        display_name: definition.display_name.clone(),
-        category: definition.category.clone(),
-        script_api_version: definition.script_api_version.clone(),
-        bundle_hash: definition.bundle_hash.clone(),
-        surface: definition
-            .surface
-            .as_ref()
-            .map(|surface| skenion_contracts::NodeSurfaceV02 {
-                palette: surface.palette.clone(),
-            }),
-        ports: definition.ports.iter().map(port_v01_to_v02).collect(),
-        port_groups: None,
-        execution: skenion_contracts::NodeExecutionV02 {
-            model: execution_model_v01_to_v02(&definition.execution.model),
-            clock: definition.execution.clock.clone(),
-        },
-        state: skenion_contracts::NodeStateV02 {
-            persistent: definition.state.persistent,
-        },
-        permissions: definition.permissions.clone(),
-        capabilities: definition.capabilities.clone(),
-    }
-}
-
-fn node_definition_v02_to_v01(definition: &NodeDefinitionV02) -> NodeDefinition {
+fn lower_node_definition_for_execution(definition: &NodeDefinitionCurrent) -> NodeDefinition {
     NodeDefinition {
         schema: "skenion.node.definition".to_owned(),
         schema_version: "0.1.0".to_owned(),
@@ -1861,9 +1762,13 @@ fn node_definition_v02_to_v01(definition: &NodeDefinitionV02) -> NodeDefinition 
             .map(|surface| skenion_contracts::NodeSurfaceV01 {
                 palette: surface.palette.clone(),
             }),
-        ports: definition.ports.iter().map(port_v02_to_v01).collect(),
+        ports: definition
+            .ports
+            .iter()
+            .map(lower_port_for_execution)
+            .collect(),
         execution: skenion_contracts::NodeExecutionV01 {
-            model: execution_model_v02_to_v01(&definition.execution.model),
+            model: lower_execution_model_for_execution(&definition.execution.model),
             clock: definition.execution.clock.clone(),
         },
         state: skenion_contracts::NodeStateV01 {
@@ -1874,90 +1779,27 @@ fn node_definition_v02_to_v01(definition: &NodeDefinitionV02) -> NodeDefinition 
     }
 }
 
-fn port_v01_to_v02(port: &Port) -> PortSpecV02 {
-    PortSpecV02 {
-        id: port.id.clone(),
-        direction: match port.direction {
-            PortDirection::Input => PortDirectionV02::Input,
-            PortDirection::Output => PortDirectionV02::Output,
-        },
-        port_type: port.data_type.data_kind.clone(),
-        label: port.label.clone(),
-        rate: Some(match port.data_type.flow {
-            DataFlow::Event => PortRateV02::Event,
-            DataFlow::Signal => PortRateV02::Audio,
-            DataFlow::Resource => PortRateV02::Resource,
-            DataFlow::Stream => PortRateV02::Io,
-            DataFlow::Value => PortRateV02::Control,
-        }),
-        accepts: None,
-        min_connections: port.required.filter(|required| *required).map(|_| 1),
-        max_connections: None,
-        merge_policy: None,
-        fan_out_policy: None,
-        trigger_mode: port.activation.as_ref().map(|activation| match activation {
-            PortActivation::Trigger => skenion_contracts::TriggerModeV02::Trigger,
-            PortActivation::Latched => skenion_contracts::TriggerModeV02::Latched,
-        }),
-        default_value: port.default_value.clone(),
-        latch: None,
-        required: port.required,
-        style_key: None,
-        group: None,
-        description: None,
-    }
-}
-
-fn execution_model_v01_to_v02(
-    model: &crate::ExecutionModel,
-) -> skenion_contracts::ExecutionModelV02 {
-    match model {
-        crate::ExecutionModel::Event => skenion_contracts::ExecutionModelV02::Event,
-        crate::ExecutionModel::Value => skenion_contracts::ExecutionModelV02::Value,
-        crate::ExecutionModel::Frame => skenion_contracts::ExecutionModelV02::Frame,
-        crate::ExecutionModel::AudioBlock => skenion_contracts::ExecutionModelV02::AudioBlock,
-        crate::ExecutionModel::VideoFrame => skenion_contracts::ExecutionModelV02::VideoFrame,
-        crate::ExecutionModel::GpuPass => skenion_contracts::ExecutionModelV02::GpuPass,
-        crate::ExecutionModel::AsyncResource => skenion_contracts::ExecutionModelV02::AsyncResource,
-        crate::ExecutionModel::ScriptControl => skenion_contracts::ExecutionModelV02::ScriptControl,
-        crate::ExecutionModel::NativePlugin => skenion_contracts::ExecutionModelV02::NativePlugin,
-    }
-}
-
-fn execution_model_v02_to_v01(
-    model: &skenion_contracts::ExecutionModelV02,
+fn lower_execution_model_for_execution(
+    model: &skenion_contracts::ExecutionModelV01,
 ) -> crate::ExecutionModel {
     match model {
-        skenion_contracts::ExecutionModelV02::Event => crate::ExecutionModel::Event,
-        skenion_contracts::ExecutionModelV02::Value => crate::ExecutionModel::Value,
-        skenion_contracts::ExecutionModelV02::Frame => crate::ExecutionModel::Frame,
-        skenion_contracts::ExecutionModelV02::AudioBlock => crate::ExecutionModel::AudioBlock,
-        skenion_contracts::ExecutionModelV02::VideoFrame => crate::ExecutionModel::VideoFrame,
-        skenion_contracts::ExecutionModelV02::GpuPass => crate::ExecutionModel::GpuPass,
-        skenion_contracts::ExecutionModelV02::AsyncResource => crate::ExecutionModel::AsyncResource,
-        skenion_contracts::ExecutionModelV02::ScriptControl => crate::ExecutionModel::ScriptControl,
-        skenion_contracts::ExecutionModelV02::NativePlugin => crate::ExecutionModel::NativePlugin,
+        skenion_contracts::ExecutionModelV01::Event => crate::ExecutionModel::Event,
+        skenion_contracts::ExecutionModelV01::Value => crate::ExecutionModel::Value,
+        skenion_contracts::ExecutionModelV01::Frame => crate::ExecutionModel::Frame,
+        skenion_contracts::ExecutionModelV01::AudioBlock => crate::ExecutionModel::AudioBlock,
+        skenion_contracts::ExecutionModelV01::VideoFrame => crate::ExecutionModel::VideoFrame,
+        skenion_contracts::ExecutionModelV01::GpuPass => crate::ExecutionModel::GpuPass,
+        skenion_contracts::ExecutionModelV01::AsyncResource => crate::ExecutionModel::AsyncResource,
+        skenion_contracts::ExecutionModelV01::ScriptControl => crate::ExecutionModel::ScriptControl,
+        skenion_contracts::ExecutionModelV01::NativePlugin => crate::ExecutionModel::NativePlugin,
     }
 }
 
-fn sanitize_id_fragment(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn reconcile_view_state_with_graph(
-    graph: &GraphDocument,
+fn reconcile_view_state_with_graph_current(
+    graph: &GraphDocumentCurrent,
     view_state: Option<ViewState>,
 ) -> ViewState {
-    let mut reconciled = create_default_view_state_for_graph(graph);
+    let mut reconciled = default_view_state_for_graph_current(graph);
     let Some(view_state) = view_state else {
         return reconciled;
     };
@@ -1975,6 +1817,84 @@ fn reconcile_view_state_with_graph(
     }
 
     reconciled
+}
+
+fn reconcile_view_state_with_execution_graph(
+    graph: &GraphDocument,
+    view_state: Option<ViewState>,
+) -> ViewState {
+    let mut reconciled = default_view_state_for_execution_graph(graph);
+    let Some(view_state) = view_state else {
+        return reconciled;
+    };
+
+    for node in &graph.nodes {
+        if let Some(node_view) = view_state.canvas.nodes.get(&node.id) {
+            reconciled
+                .canvas
+                .nodes
+                .insert(node.id.clone(), node_view.clone());
+        }
+    }
+    if view_state.canvas.viewport.is_some() {
+        reconciled.canvas.viewport = view_state.canvas.viewport;
+    }
+
+    reconciled
+}
+
+fn default_view_state_for_graph_current(graph: &GraphDocumentCurrent) -> ViewState {
+    ViewState {
+        schema: "skenion.view-state".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        canvas: CanvasViewState {
+            nodes: graph
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(index, node)| {
+                    (
+                        node.id.clone(),
+                        CanvasNodeView {
+                            x: 160.0 * (index as f64),
+                            y: 0.0,
+                            width: None,
+                            height: None,
+                            collapsed: None,
+                        },
+                    )
+                })
+                .collect(),
+            viewport: None,
+        },
+    }
+}
+
+fn default_view_state_for_execution_graph(graph: &GraphDocument) -> ViewState {
+    ViewState {
+        schema: "skenion.view-state".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        canvas: CanvasViewState {
+            nodes: graph
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(index, node)| {
+                    (
+                        node.id.clone(),
+                        CanvasNodeView {
+                            x: 160.0 * (index as f64),
+                            y: 0.0,
+                            width: None,
+                            height: None,
+                            collapsed: None,
+                        },
+                    )
+                })
+                .collect(),
+            viewport: None,
+        },
+    }
 }
 
 fn runtime_owned_view_state(mut view_state: ViewState) -> ViewState {
@@ -1995,17 +1915,17 @@ fn normalize_mutation_base_revisions(
     }
 }
 
-fn target_graph_revision_v02(
-    project: &ProjectDocumentV02,
+fn target_graph_revision_current(
+    project: &ProjectDocumentCurrent,
     target: &GraphTargetRef,
 ) -> Result<String, Box<RuntimeOperationDiagnostic>> {
-    Ok(target_graph_v02(project, target)?.revision.clone())
+    Ok(target_graph_current(project, target)?.revision.clone())
 }
 
-fn target_graph_v02<'a>(
-    project: &'a ProjectDocumentV02,
+fn target_graph_current<'a>(
+    project: &'a ProjectDocumentCurrent,
     target: &GraphTargetRef,
-) -> Result<&'a GraphDocumentV02, Box<RuntimeOperationDiagnostic>> {
+) -> Result<&'a GraphDocumentCurrent, Box<RuntimeOperationDiagnostic>> {
     match &target.path {
         PatchPath::Root => Ok(&project.graph),
         PatchPath::HelpWorkingCopy {
@@ -2070,11 +1990,11 @@ fn target_graph_v02<'a>(
 }
 
 type PasteProjectResult =
-    Result<(ProjectDocumentV02, u64, IdRemapResult, String), PasteProjectError>;
+    Result<(ProjectDocumentCurrent, u64, IdRemapResult, String), PasteProjectError>;
 type PasteProjectError = (Vec<RuntimeOperationDiagnostic>, IdRemapResult);
 
-fn paste_graph_fragment_into_project_v02(
-    mut project: ProjectDocumentV02,
+fn paste_graph_fragment_into_project_current(
+    mut project: ProjectDocumentCurrent,
     view_revision: u64,
     request: &PasteGraphFragmentRequest,
 ) -> PasteProjectResult {
@@ -2097,13 +2017,13 @@ fn paste_graph_fragment_into_project_v02(
         ));
     }
     let (next_graph, id_remap) = {
-        let graph = match graph_for_path_v02(&project, &target_path) {
+        let graph = match graph_for_path_current(&project, &target_path) {
             Some(graph) => graph,
             None => {
                 return Err((
                     vec![operation_error(
                         "paste.target.missing-graph",
-                        "paste target graph is not available in the active v0.2 project",
+                        "paste target graph is not available in the active current 0.1 project",
                         Some(request.target.clone()),
                         None,
                         None,
@@ -2114,7 +2034,7 @@ fn paste_graph_fragment_into_project_v02(
                 ));
             }
         };
-        paste_graph_fragment_into_graph_v02(graph, request)?
+        paste_graph_fragment_into_graph_current(graph, request)?
     };
     let revision_after = next_graph.revision.clone();
     let mut next_view_revision = view_revision;
@@ -2122,19 +2042,25 @@ fn paste_graph_fragment_into_project_v02(
         &target_path,
         PatchPath::Root | PatchPath::HelpWorkingCopy { .. }
     ) {
-        let graph_v01 = graph_document_v02_to_v01(&next_graph);
+        let execution_graph = lower_graph_for_execution(&next_graph);
         let view_patch = lower_fragment_view_patch(view_revision, request, &id_remap.node_id_map);
         let view_state = if let Some(view_patch) = view_patch {
             let (view_state, _) = apply_view_patch_to_view_state(
-                &graph_v01,
-                reconcile_view_state_with_graph(&graph_v01, Some(project.view_state.clone())),
+                &execution_graph,
+                reconcile_view_state_with_execution_graph(
+                    &execution_graph,
+                    Some(project.view_state.clone()),
+                ),
                 &view_patch,
             )
             .expect("lowered fragment view patch should reference pasted graph nodes");
             next_view_revision += 1;
             view_state
         } else {
-            reconcile_view_state_with_graph(&graph_v01, Some(project.view_state.clone()))
+            reconcile_view_state_with_execution_graph(
+                &execution_graph,
+                Some(project.view_state.clone()),
+            )
         };
         project.graph = next_graph;
         project.revision = project.graph.revision.clone();
@@ -2152,12 +2078,12 @@ fn paste_graph_fragment_into_project_v02(
     Ok((project, next_view_revision, id_remap, revision_after))
 }
 
-fn apply_collaboration_changes_to_project_v02(
-    mut project: ProjectDocumentV02,
+fn apply_collaboration_changes_to_project_current(
+    mut project: ProjectDocumentCurrent,
     view_revision: u64,
     target: &GraphTargetRef,
     changes: &[RuntimeCollaborationChange],
-) -> Result<(ProjectDocumentV02, u64), Vec<RuntimeDiagnostic>> {
+) -> Result<(ProjectDocumentCurrent, u64), Vec<RuntimeDiagnostic>> {
     if matches!(
         &target.path,
         PatchPath::PackagePatchDefinition { .. } | PatchPath::EmbeddedPatchInstance { .. }
@@ -2168,10 +2094,10 @@ fn apply_collaboration_changes_to_project_v02(
             serde_json::json!({ "target": target }),
         )]);
     }
-    let mut graph = graph_for_path_v02(&project, &target.path).ok_or_else(|| {
+    let mut graph = graph_for_path_current(&project, &target.path).ok_or_else(|| {
         vec![RuntimeDiagnostic::structured_error(
             "collaboration.target.missing-graph",
-            "collaboration target graph is not available in the active v0.2 project",
+            "collaboration target graph is not available in the active current 0.1 project",
             serde_json::json!({ "target": target }),
         )]
     })?;
@@ -2313,11 +2239,11 @@ fn apply_collaboration_changes_to_project_v02(
         &target.path,
         PatchPath::Root | PatchPath::HelpWorkingCopy { .. }
     ) {
-        let graph_v01 = graph_document_v02_to_v01(&graph);
+        let execution_graph = lower_graph_for_execution(&graph);
         project.graph = graph;
         project.revision = project.graph.revision.clone();
-        project.view_state = runtime_owned_view_state(reconcile_view_state_with_graph(
-            &graph_v01,
+        project.view_state = runtime_owned_view_state(reconcile_view_state_with_execution_graph(
+            &execution_graph,
             Some(view_state),
         ));
         if view_changed {
@@ -2348,7 +2274,10 @@ fn unsupported_patch_view_change_diagnostic(target: &GraphTargetRef) -> RuntimeD
     )
 }
 
-fn graph_for_path_v02(project: &ProjectDocumentV02, path: &PatchPath) -> Option<GraphDocumentV02> {
+fn graph_for_path_current(
+    project: &ProjectDocumentCurrent,
+    path: &PatchPath,
+) -> Option<GraphDocumentCurrent> {
     match path {
         PatchPath::Root => Some(project.graph.clone()),
         PatchPath::HelpWorkingCopy {
@@ -2365,15 +2294,16 @@ fn graph_for_path_v02(project: &ProjectDocumentV02, path: &PatchPath) -> Option<
     }
 }
 
-fn paste_graph_fragment_into_graph_v02(
-    mut graph: GraphDocumentV02,
+fn paste_graph_fragment_into_graph_current(
+    mut graph: GraphDocumentCurrent,
     request: &PasteGraphFragmentRequest,
-) -> Result<(GraphDocumentV02, IdRemapResult), (Vec<RuntimeOperationDiagnostic>, IdRemapResult)> {
+) -> Result<(GraphDocumentCurrent, IdRemapResult), (Vec<RuntimeOperationDiagnostic>, IdRemapResult)>
+{
     let outside_policy = request
         .options
         .as_ref()
         .and_then(|options| options.outside_endpoint_policy)
-        .unwrap_or(GraphFragmentOutsideEndpointPolicyV02::Reject);
+        .unwrap_or(GraphFragmentOutsideEndpointPolicyCurrent::Reject);
     let id_conflict_policy = request
         .options
         .as_ref()
@@ -2381,7 +2311,7 @@ fn paste_graph_fragment_into_graph_v02(
         .unwrap_or(IdConflictPolicy::Remap);
 
     let fragment_analysis =
-        skenion_contracts::analyze_graph_fragment_v02(&request.fragment, outside_policy);
+        skenion_contracts::analyze_graph_fragment_v01(&request.fragment, outside_policy);
     if !fragment_analysis.ok {
         let diagnostics = fragment_analysis
             .diagnostics
@@ -2493,7 +2423,7 @@ fn paste_graph_fragment_into_graph_v02(
         edge_id_map.insert(edge.id.clone(), pasted_edge_id.clone());
         graph
             .edges
-            .push(remap_edge_v02(edge, &node_id_map, pasted_edge_id));
+            .push(remap_edge_current(edge, &node_id_map, pasted_edge_id));
     }
 
     graph.revision = next_graph_revision(&graph.revision);
@@ -2508,11 +2438,11 @@ fn paste_graph_fragment_into_graph_v02(
     ))
 }
 
-fn remap_edge_v02(
-    edge: &EdgeSpecV02,
+fn remap_edge_current(
+    edge: &EdgeSpecCurrent,
     node_id_map: &BTreeMap<String, String>,
     edge_id: String,
-) -> EdgeSpecV02 {
+) -> EdgeSpecCurrent {
     let mut edge = edge.clone();
     edge.id = edge_id;
     edge.source.node_id = node_id_map
@@ -2556,36 +2486,39 @@ fn next_available_node_id(base: &str, used_node_ids: &HashSet<String>) -> String
     }
 }
 
-pub(crate) fn graph_node_v02_to_v01(node: &GraphNodeV02, pasted_id: &str) -> GraphNode {
+pub(crate) fn lower_graph_node_for_execution(
+    node: &GraphNodeCurrent,
+    pasted_id: &str,
+) -> GraphNode {
     GraphNode {
         id: pasted_id.to_owned(),
         kind: node.kind.clone(),
         kind_version: node.kind_version.clone(),
         params: node.params.clone(),
-        ports: node.ports.iter().map(port_v02_to_v01).collect(),
+        ports: node.ports.iter().map(lower_port_for_execution).collect(),
     }
 }
 
-fn port_v02_to_v01(port: &PortSpecV02) -> Port {
+fn lower_port_for_execution(port: &PortSpecCurrent) -> Port {
     Port {
         id: port.id.clone(),
         direction: match port.direction {
-            PortDirectionV02::Input => PortDirection::Input,
-            PortDirectionV02::Output => PortDirection::Output,
+            PortDirectionCurrent::Input => PortDirection::Input,
+            PortDirectionCurrent::Output => PortDirection::Output,
         },
         label: port.label.clone(),
         data_type: data_type_from_port_spec(port),
         required: port.required,
         default_value: port.default_value.clone(),
         activation: port.trigger_mode.as_ref().map(|trigger| match trigger {
-            skenion_contracts::TriggerModeV02::Trigger => PortActivation::Trigger,
-            skenion_contracts::TriggerModeV02::Latched => PortActivation::Latched,
-            skenion_contracts::TriggerModeV02::Passive => PortActivation::Latched,
+            skenion_contracts::TriggerModeV01::Trigger => PortActivation::Trigger,
+            skenion_contracts::TriggerModeV01::Latched => PortActivation::Latched,
+            skenion_contracts::TriggerModeV01::Passive => PortActivation::Latched,
         }),
     }
 }
 
-fn data_type_from_port_spec(port: &PortSpecV02) -> DataType {
+fn data_type_from_port_spec(port: &PortSpecCurrent) -> DataType {
     let data_kind = normalize_port_type(&port.port_type);
     let format = match data_kind.as_str() {
         "number.float" => Some(StringOrStrings::One("f32".to_owned())),
@@ -2595,10 +2528,11 @@ fn data_type_from_port_spec(port: &PortSpecV02) -> DataType {
     let color_space = (data_kind == "gpu.texture2d").then(|| "srgb".to_owned());
     DataType {
         flow: match port.rate {
-            Some(PortRateV02::Event) => DataFlow::Event,
-            Some(PortRateV02::Audio) => DataFlow::Signal,
-            Some(PortRateV02::Resource) | Some(PortRateV02::Io) => DataFlow::Resource,
-            Some(PortRateV02::Control | PortRateV02::Render | PortRateV02::Gpu) | None => {
+            Some(PortRateCurrent::Event) => DataFlow::Event,
+            Some(PortRateCurrent::Audio) => DataFlow::Signal,
+            Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
+            Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
+            | None => {
                 if port.port_type == "message.any" {
                     DataFlow::Event
                 } else if data_kind == "gpu.texture2d" {
@@ -2632,7 +2566,7 @@ fn normalize_port_type(port_type: &str) -> String {
     }
 }
 
-fn remap_edge(edge: &EdgeSpecV02, node_id_map: &BTreeMap<String, String>) -> Edge {
+fn remap_edge(edge: &EdgeSpecCurrent, node_id_map: &BTreeMap<String, String>) -> Edge {
     Edge {
         from: PortRef {
             node: node_id_map
@@ -2651,7 +2585,7 @@ fn remap_edge(edge: &EdgeSpecV02, node_id_map: &BTreeMap<String, String>) -> Edg
     }
 }
 
-pub(crate) fn edge_v02_to_v01(edge: &EdgeSpecV02) -> Edge {
+pub(crate) fn lower_edge_for_execution(edge: &EdgeSpecCurrent) -> Edge {
     remap_edge(edge, &BTreeMap::new())
 }
 
@@ -2893,7 +2827,7 @@ fn unresolved_object_diagnostics(graph: &GraphDocument) -> Vec<RuntimeDiagnostic
         .collect()
 }
 
-fn unresolved_object_diagnostics_v02(graph: &GraphDocumentV02) -> Vec<RuntimeDiagnostic> {
+fn unresolved_object_diagnostics_current(graph: &GraphDocumentCurrent) -> Vec<RuntimeDiagnostic> {
     graph
         .nodes
         .iter()
@@ -2931,27 +2865,26 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::{
-        ControlMessage, ControlValue, Edge, EdgeEndpointV02, EdgeSpecV02, GraphDocument,
-        GraphDocumentV02, GraphPatch, NodeRegistry, PasteGraphFragmentRequest, PortRef,
-        PortSpecV02, ProjectRequest, ProjectRequestV02, RuntimeCollaborationChange,
-        RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlReadRequest,
-        RuntimeControlReadTarget, RuntimeDiagnostic, RuntimeOperationDiagnostic,
-        RuntimeOperationEnvelope, ViewState,
+        ControlMessage, ControlValue, Edge, EdgeEndpointCurrent, EdgeSpecCurrent, GraphDocument,
+        GraphDocumentCurrent, GraphPatch, NodeRegistry, PasteGraphFragmentRequest, PortRef,
+        PortSpecCurrent, ProjectRequestCurrent, RuntimeCollaborationChange, RuntimeControlEmission,
+        RuntimeControlEventRequest, RuntimeControlReadRequest, RuntimeControlReadTarget,
+        RuntimeDiagnostic, RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ViewState,
     };
 
     use super::{
         HistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest, RuntimePatchResponse,
         RuntimeSession, RuntimeViewPatch, RuntimeViewPatchOperation, lower_fragment_view_patch,
-        port_v02_to_v01, remap_edge, runtime_diagnostic_to_operation_diagnostic,
+        lower_port_for_execution, remap_edge, runtime_diagnostic_to_operation_diagnostic,
     };
 
     #[test]
     fn invalid_registry_load_returns_diagnostics_without_revision_change() {
         let mut session = RuntimeSession::default();
-        let mut request = sample_project_v02();
+        let mut request = sample_project_current();
         request.nodes[0].schema_version = "9.9.9".to_owned();
 
-        let response = session.load_project_v02(request);
+        let response = session.load_project_current(request);
 
         assert!(!response.ok);
         assert!(!response.snapshot.loaded());
@@ -2980,7 +2913,7 @@ mod tests {
     #[test]
     fn plan_current_reports_invalid_stored_project() {
         let mut session = RuntimeSession {
-            graph: Some(sample_project().graph),
+            graph: Some(sample_internal_graph()),
             registry: Some(NodeRegistry::new()),
             plan: None,
             diagnostics: Vec::new(),
@@ -3002,7 +2935,7 @@ mod tests {
     #[test]
     fn validate_current_reports_invalid_stored_project() {
         let mut session = RuntimeSession {
-            graph: Some(sample_project().graph),
+            graph: Some(sample_internal_graph()),
             registry: None,
             plan: None,
             diagnostics: Vec::new(),
@@ -3023,7 +2956,7 @@ mod tests {
     #[test]
     fn validate_current_reports_registry_validation_errors() {
         let mut session = RuntimeSession {
-            graph: Some(sample_project().graph),
+            graph: Some(sample_internal_graph()),
             registry: Some(NodeRegistry::new()),
             plan: None,
             diagnostics: Vec::new(),
@@ -3044,7 +2977,7 @@ mod tests {
     #[test]
     fn run_current_rebuilds_missing_plan() {
         let mut session = RuntimeSession::default();
-        let loaded = session.import_legacy_project_v01(sample_project());
+        let loaded = load_sample_project(&mut session);
         assert!(loaded.ok);
         session.plan = None;
 
@@ -3058,7 +2991,7 @@ mod tests {
     #[test]
     fn run_current_returns_plan_failure_when_rebuild_fails() {
         let mut session = RuntimeSession {
-            graph: Some(sample_project().graph),
+            graph: Some(sample_internal_graph()),
             registry: Some(NodeRegistry::new()),
             plan: None,
             diagnostics: Vec::new(),
@@ -3097,7 +3030,7 @@ mod tests {
     #[test]
     fn control_set_bang_and_in_follow_typed_value_semantics() {
         let mut session = RuntimeSession::default();
-        assert!(session.import_legacy_project_v01(sample_project()).ok);
+        assert!(load_sample_project(&mut session).ok);
 
         let set =
             session.apply_control_event(set_control_request("value_1", "in", f32_value(32.0)));
@@ -3121,16 +3054,11 @@ mod tests {
 
         let bang = session.apply_control_event(bang_control_request("value_1", "in"));
         assert!(bang.ok);
-        assert_eq!(bang.emitted.len(), 2);
+        assert_eq!(bang.emitted.len(), 1);
         assert_eq!(bang.emitted[0].node_id, "value_1");
         assert_eq!(bang.emitted[0].port_id, "value");
         assert_eq!(
             emitted_value(&bang.emitted[0]),
-            Some(ControlValue::float(32.0))
-        );
-        assert_eq!(bang.emitted[1].node_id, "target_1");
-        assert_eq!(
-            emitted_value(&bang.emitted[1]),
             Some(ControlValue::float(32.0))
         );
         assert!(bang.changed);
@@ -3164,7 +3092,7 @@ mod tests {
         let mut session = RuntimeSession::default();
         assert!(
             session
-                .import_legacy_project_v01(object_routing_project())
+                .load_project_current(object_routing_project_current())
                 .ok
         );
 
@@ -3190,11 +3118,11 @@ mod tests {
     #[test]
     fn control_read_addresses_params_ports_and_state() {
         let mut session = RuntimeSession::default();
-        let mut project = sample_project();
+        let mut project = sample_project_current();
         project.graph.nodes[0]
             .params
             .insert("value".to_owned(), json!(0.0));
-        assert!(session.import_legacy_project_v01(project).ok);
+        assert!(session.load_project_current(project).ok);
         assert!(
             session
                 .apply_control_event(set_control_request("value_1", "in", f32_value(32.0)))
@@ -3247,7 +3175,7 @@ mod tests {
                 .contains("no project loaded")
         );
 
-        assert!(session.import_legacy_project_v01(sample_project()).ok);
+        assert!(load_sample_project(&mut session).ok);
         let missing_port = session.read_control(control_read(
             "value_1",
             RuntimeControlReadTarget::Port,
@@ -3296,38 +3224,9 @@ mod tests {
                 .contains("state other does not exist")
         );
 
-        let mut project_with_debug = sample_project_json();
-        project_with_debug["graph"]["nodes"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "id": "debug_1",
-                "kind": "debug.sink",
-                "kindVersion": "0.1.0",
-                "params": {},
-                "ports": []
-            }));
-        project_with_debug["nodes"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "schema": "skenion.node.definition",
-                "schemaVersion": "0.1.0",
-                "id": "debug.sink",
-                "version": "0.1.0",
-                "displayName": "Debug Sink",
-                "category": "Debug",
-                "ports": [],
-                "execution": { "model": "value" },
-                "state": { "persistent": false },
-                "permissions": [],
-                "capabilities": []
-            }));
         assert!(
             session
-                .import_legacy_project_v01(
-                    serde_json::from_value(project_with_debug).expect("debug project should parse")
-                )
+                .load_project_current(debug_sink_project_current())
                 .ok
         );
         let missing_runtime_state = session.read_control(control_read(
@@ -3346,7 +3245,7 @@ mod tests {
     #[test]
     fn invalid_control_event_does_not_mutate_state_or_revision() {
         let mut session = RuntimeSession::default();
-        assert!(session.import_legacy_project_v01(sample_project()).ok);
+        assert!(load_sample_project(&mut session).ok);
         assert!(
             session
                 .apply_control_event(set_control_request("value_1", "in", f32_value(32.0)))
@@ -3369,7 +3268,7 @@ mod tests {
     #[test]
     fn failed_control_propagation_does_not_mutate_state_or_revision() {
         let mut session = RuntimeSession::default();
-        assert!(session.import_legacy_project_v01(sample_project()).ok);
+        assert!(load_sample_project(&mut session).ok);
         session.graph.as_mut().unwrap().edges = vec![Edge {
             from: PortRef {
                 node: "value_1".to_owned(),
@@ -3402,7 +3301,7 @@ mod tests {
     #[test]
     fn graph_patch_rebuilds_control_state_from_graph_params() {
         let mut session = RuntimeSession::default();
-        assert!(session.import_legacy_project_v01(sample_project()).ok);
+        assert!(load_sample_project(&mut session).ok);
         assert!(
             session
                 .apply_control_event(set_control_request("value_1", "in", f32_value(32.0)))
@@ -3411,7 +3310,7 @@ mod tests {
 
         let response = session.apply_patch(set_value_patch("1", 0.75));
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         assert_eq!(
             session.control_state_response().values.get("value_1"),
             Some(&ControlValue::float(32.0))
@@ -3432,7 +3331,7 @@ mod tests {
                 .contains("no project loaded")
         );
 
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let context = session.preview_context().expect("context should exist");
         assert_eq!(context.graph_id, "minimal-value");
         assert_eq!(context.graph_revision, "1");
@@ -3458,7 +3357,7 @@ mod tests {
     #[test]
     fn graph_and_view_state_accessors_return_loaded_project_copies() {
         let mut session = RuntimeSession::default();
-        let loaded = session.import_legacy_project_v01(sample_project());
+        let loaded = load_sample_project(&mut session);
 
         assert!(loaded.ok);
         assert_eq!(session.graph().unwrap().id, "minimal-value");
@@ -3493,12 +3392,12 @@ mod tests {
     #[test]
     fn patch_with_matching_revision_applies_and_rebuilds_plan() {
         let mut session = RuntimeSession::default();
-        let loaded = session.import_legacy_project_v01(sample_project());
+        let loaded = load_sample_project(&mut session);
         assert!(loaded.ok);
 
         let response = session.apply_patch(set_value_patch("1", 0.75));
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         assert_eq!(response.history.entries.len(), 0);
         assert_eq!(response.history.undo_depth, 0);
         assert_eq!(response.history.redo_depth, 0);
@@ -3515,7 +3414,7 @@ mod tests {
     fn unresolved_object_loads_session_with_error_diagnostic() {
         let mut session = RuntimeSession::default();
 
-        let response = session.import_legacy_project_v01(unresolved_project());
+        let response = session.load_project_current(unresolved_project_current());
 
         assert!(response.ok);
         assert!(response.snapshot.loaded());
@@ -3538,7 +3437,8 @@ mod tests {
     #[test]
     fn replace_node_with_unresolved_object_applies_with_error_diagnostic() {
         let mut session = RuntimeSession::default();
-        let loaded = session.import_legacy_project_v01(sample_project_with_unresolved_definition());
+        let loaded =
+            session.load_project_current(sample_project_current_with_unresolved_definition());
         assert!(loaded.ok);
 
         let response = session.apply_patch(graph_patch(json!({
@@ -3556,7 +3456,7 @@ mod tests {
           ]
         })));
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         assert!(response.snapshot.loaded());
         assert_eq!(patch_graph(&response).revision, "1");
     }
@@ -3564,12 +3464,12 @@ mod tests {
     #[test]
     fn patch_with_wrong_base_revision_conflicts_without_mutating_session() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
 
         let response = session.apply_patch(set_value_patch("0", 0.75));
         let snapshot = session.snapshot();
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         assert!(latest_history_entry(&response).is_none());
         assert!((response.history.entries).is_empty());
         assert_eq!(patch_graph(&response).revision, "1");
@@ -3580,16 +3480,16 @@ mod tests {
     #[test]
     fn invalid_patch_operations_do_not_mutate_session() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
 
         let duplicate = session.apply_patch(duplicate_edge_patch());
         let missing = session.apply_patch(missing_node_patch());
         let snapshot = session.snapshot();
 
-        assert_active_v01_graph_patch_rejected(&duplicate);
+        assert_graph_patch_rejected(&duplicate);
         assert!(latest_history_entry(&duplicate).is_none());
         assert!((duplicate.history.entries).is_empty());
-        assert_active_v01_graph_patch_rejected(&missing);
+        assert_graph_patch_rejected(&missing);
         assert_eq!(snapshot.graph_revision(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
     }
@@ -3597,12 +3497,12 @@ mod tests {
     #[test]
     fn incompatible_patch_result_does_not_mutate_session() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
 
         let response = session.apply_patch(incompatible_edge_patch());
         let snapshot = session.snapshot();
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         assert_eq!(snapshot.graph_revision(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
     }
@@ -3610,12 +3510,12 @@ mod tests {
     #[test]
     fn registry_invalid_patch_result_does_not_mutate_session() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
 
         let response = session.apply_patch(missing_definition_node_patch());
         let snapshot = session.snapshot();
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         assert_eq!(snapshot.graph_revision(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
     }
@@ -3623,7 +3523,7 @@ mod tests {
     #[test]
     fn remove_node_patch_removes_incident_edges() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
 
         let response = session.apply_patch(graph_patch(json!({
           "schema": "skenion.graph.patch",
@@ -3635,7 +3535,7 @@ mod tests {
           ]
         })));
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         let graph = patch_graph(&response);
         assert_eq!(graph.revision, "1");
         assert!(graph.nodes.iter().any(|node| node.id == "value_1"));
@@ -3644,14 +3544,14 @@ mod tests {
 
     #[test]
     fn patch_non_numeric_revision_gets_suffix() {
-        let mut project = sample_project();
+        let mut project = sample_project_current();
         project.graph.revision = "rev_0001".to_owned();
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(project);
+        session.load_project_current(project);
 
         let response = session.apply_patch(set_value_patch("rev_0001", 0.75));
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         assert_eq!(patch_graph(&response).revision, "rev_0001");
     }
 
@@ -3679,7 +3579,7 @@ mod tests {
     #[test]
     fn undo_after_patch_restores_graph_and_records_history_entry() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let applied = session.apply_runtime_operation(paste_operation("1"));
         assert!(applied.ok);
         let apply_event_id = applied.history_entry_id.clone().unwrap();
@@ -3712,7 +3612,7 @@ mod tests {
     #[test]
     fn redo_after_undo_reapplies_graph_and_records_history_entry() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         session.apply_runtime_operation(paste_operation("1"));
         session.undo();
 
@@ -3740,7 +3640,7 @@ mod tests {
     #[test]
     fn view_state_patch_undo_redo_moves_once_from_start_to_end() {
         let mut session = RuntimeSession::default();
-        let loaded = session.import_legacy_project_v01(sample_project());
+        let loaded = load_sample_project(&mut session);
         assert!(loaded.ok);
         let mut start = loaded
             .snapshot
@@ -3807,7 +3707,7 @@ mod tests {
     #[test]
     fn empty_and_conflicting_view_mutations_are_rejected_without_history() {
         let mut session = RuntimeSession::default();
-        assert!(session.import_legacy_project_v01(sample_project()).ok);
+        assert!(load_sample_project(&mut session).ok);
 
         let empty = session.apply_mutation(RuntimeMutationRequest {
             graph_patch: None,
@@ -3839,7 +3739,7 @@ mod tests {
     #[test]
     fn view_patch_set_node_view_success_errors_and_noop_paths() {
         let mut session = RuntimeSession::default();
-        let loaded = session.import_legacy_project_v01(sample_project());
+        let loaded = load_sample_project(&mut session);
         assert!(loaded.ok);
         let start = loaded
             .snapshot
@@ -3907,7 +3807,7 @@ mod tests {
     #[test]
     fn view_patch_helper_reports_missing_view_and_from_mismatch() {
         let mut session = RuntimeSession::default();
-        let loaded = session.import_legacy_project_v01(sample_project());
+        let loaded = load_sample_project(&mut session);
         assert!(loaded.ok);
         let graph = session.graph().expect("loaded graph");
         let mut view_state = loaded
@@ -4008,7 +3908,7 @@ mod tests {
     #[test]
     fn combined_graph_and_noop_view_mutation_keeps_view_revision_stable() {
         let mut session = RuntimeSession::default();
-        let loaded = session.import_legacy_project_v01(sample_project());
+        let loaded = load_sample_project(&mut session);
         assert!(loaded.ok);
         let value_view = loaded.snapshot.view_state().unwrap().canvas.nodes["value_1"].clone();
 
@@ -4026,7 +3926,7 @@ mod tests {
             description: Some("set graph without moving view".to_owned()),
         });
 
-        assert_active_v01_graph_patch_rejected(&response);
+        assert_graph_patch_rejected(&response);
         assert_eq!(response.snapshot.graph_revision(), Some("1"));
         assert_eq!(response.snapshot.view_revision, 1);
         assert!(latest_history_entry(&response).is_none());
@@ -4035,7 +3935,7 @@ mod tests {
     #[test]
     fn new_patch_after_undo_clears_redo_stack() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         session.apply_runtime_operation(paste_operation("1"));
         let undone = session.undo();
         assert_eq!(undone.history.redo_depth, 1);
@@ -4052,9 +3952,9 @@ mod tests {
     }
 
     #[test]
-    fn active_v01_remove_node_patch_is_rejected_without_history() {
+    fn graph_patch_remove_node_patch_is_rejected_without_history() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let removed = session.apply_patch(graph_patch(json!({
           "schema": "skenion.graph.patch",
           "schemaVersion": "0.1.0",
@@ -4065,7 +3965,7 @@ mod tests {
           ]
         })));
 
-        assert_active_v01_graph_patch_rejected(&removed);
+        assert_graph_patch_rejected(&removed);
         assert!(
             patch_graph(&removed)
                 .nodes
@@ -4077,13 +3977,13 @@ mod tests {
     }
 
     #[test]
-    fn active_v01_connection_and_delete_patches_are_rejected_without_history() {
-        let mut project = sample_project();
+    fn graph_patch_connection_and_delete_patches_are_rejected_without_history() {
+        let mut project = sample_project_current();
         project.graph.edges.clear();
         let mut session = RuntimeSession::default();
-        assert!(session.import_legacy_project_v01(project).ok);
+        assert!(session.load_project_current(project).ok);
         let connected = session.apply_patch(duplicate_edge_patch());
-        assert_active_v01_graph_patch_rejected(&connected);
+        assert_graph_patch_rejected(&connected);
         assert!(patch_graph(&connected).edges.is_empty());
         let deleted = session.apply_patch(graph_patch(json!({
           "schema": "skenion.graph.patch",
@@ -4094,7 +3994,7 @@ mod tests {
             { "op": "removeNode", "nodeId": "target_1" }
           ]
         })));
-        assert_active_v01_graph_patch_rejected(&deleted);
+        assert_graph_patch_rejected(&deleted);
         assert!(patch_graph(&deleted).edges.is_empty());
         assert_eq!(deleted.history.undo_depth, 0);
     }
@@ -4102,7 +4002,7 @@ mod tests {
     #[test]
     fn multiple_undo_operations_keep_advancing_revision() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         session.apply_runtime_operation(paste_operation("1"));
         session.apply_runtime_operation(paste_operation("2"));
 
@@ -4148,7 +4048,7 @@ mod tests {
         );
 
         let mut invalid_inverse = RuntimeSession::default();
-        invalid_inverse.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut invalid_inverse);
         invalid_inverse.undo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad_inverse".to_owned(),
             actor_id: None,
@@ -4164,7 +4064,7 @@ mod tests {
         );
 
         let mut invalid_redo = RuntimeSession::default();
-        invalid_redo.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut invalid_redo);
         invalid_redo.redo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad_redo".to_owned(),
             actor_id: None,
@@ -4176,11 +4076,11 @@ mod tests {
         assert_eq!(invalid_redo_response.history.redo_depth, 1);
         assert_eq!(
             invalid_redo_response.diagnostics[0].code.as_deref(),
-            Some("project.active-v0.1-graph-patch-unsupported")
+            Some("project.graph-patch-unsupported")
         );
 
         let mut no_actor_history = RuntimeSession::default();
-        no_actor_history.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut no_actor_history);
         let no_actor_undo = no_actor_history.undo_for_actor("participant-a");
         let no_actor_redo = no_actor_history.redo_for_actor("participant-a");
         assert!(!no_actor_undo.ok);
@@ -4189,7 +4089,7 @@ mod tests {
         assert!(no_actor_redo.diagnostics[0].message.contains("actor"));
 
         let mut invalid_actor_inverse = RuntimeSession::default();
-        invalid_actor_inverse.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut invalid_actor_inverse);
         invalid_actor_inverse
             .undo_stack
             .push(HistoryEntry::Mutation {
@@ -4203,7 +4103,7 @@ mod tests {
         assert_eq!(invalid_actor_inverse_response.history.undo_depth, 1);
 
         let mut invalid_actor_redo = RuntimeSession::default();
-        invalid_actor_redo.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut invalid_actor_redo);
         invalid_actor_redo.redo_stack.push(HistoryEntry::Mutation {
             event_id: "event_bad_actor_redo".to_owned(),
             actor_id: Some("participant-a".to_owned()),
@@ -4218,7 +4118,7 @@ mod tests {
     #[test]
     fn reject_patch_uses_current_session_snapshot() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
 
         let response = session.reject_patch(
             false,
@@ -4239,7 +4139,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_lowers_to_root_graph_mutation_with_id_remap() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
 
         let response = session.apply_runtime_operation(paste_operation("1"));
 
@@ -4282,7 +4182,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_remaps_past_existing_generated_ids() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let first = session.apply_runtime_operation(paste_operation("1"));
         assert!(first.ok);
 
@@ -4302,7 +4202,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_uses_default_descriptions_without_attribution() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.attribution = None;
 
@@ -4333,7 +4233,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_rejects_invalid_operation_envelope() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.kind = "loadProject".to_owned();
 
@@ -4355,7 +4255,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_rejects_id_conflicts_when_requested() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.options = Some(skenion_contracts::PasteGraphFragmentOptions {
             outside_endpoint_policy: None,
@@ -4385,7 +4285,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_reports_apply_mutation_failures_as_operation_diagnostics() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.fragment.nodes[1].kind = "missing.kind".to_owned();
 
@@ -4395,7 +4295,7 @@ mod tests {
         assert!(!response.applied);
         assert_eq!(response.history_entry_id, None);
         assert_eq!(response.revision_after, None);
-        assert_eq!(response.diagnostics[0].code, "paste.lowering.failed");
+        assert_eq!(response.diagnostics[0].code, "node-definition.missing");
         assert!(
             response.diagnostics[0]
                 .message
@@ -4406,7 +4306,7 @@ mod tests {
     #[test]
     fn paste_operation_validation_reports_fragment_analysis_errors() {
         let mut session = RuntimeSession::default();
-        session.load_project_v02(sample_project_v02());
+        session.load_project_current(sample_project_current());
         let mut operation = paste_operation("1");
         operation.request.fragment.nodes[1].ports[1].id = "renamed".to_owned();
 
@@ -4458,17 +4358,17 @@ mod tests {
         assert!(patch.is_none());
 
         operation.request.fragment.view =
-            Some(skenion_contracts::GraphFragmentViewV02 { nodes: None });
+            Some(skenion_contracts::GraphFragmentViewV01 { nodes: None });
         let patch = lower_fragment_view_patch(1, &operation.request, &BTreeMap::new());
         assert!(patch.is_none());
 
-        let edge = EdgeSpecV02 {
+        let edge = EdgeSpecCurrent {
             id: "edge".to_owned(),
-            source: EdgeEndpointV02 {
+            source: EdgeEndpointCurrent {
                 node_id: "outside_source".to_owned(),
                 port_id: "out".to_owned(),
             },
-            target: EdgeEndpointV02 {
+            target: EdgeEndpointCurrent {
                 node_id: "outside_target".to_owned(),
                 port_id: "in".to_owned(),
             },
@@ -4552,7 +4452,7 @@ mod tests {
     }
 
     #[test]
-    fn v02_active_cutover_private_helpers_cover_defensive_paths() {
+    fn current_active_cutover_private_helpers_cover_defensive_paths() {
         let root_target = paste_operation("1").request.target;
         let change: RuntimeCollaborationChange = serde_json::from_value(json!({
           "op": "node.add",
@@ -4560,15 +4460,15 @@ mod tests {
           "node": {
             "id": "value_1",
             "kind": "core.float",
-            "kindVersion": "0.2.0",
+            "kindVersion": "0.1.0",
             "params": {},
-            "ports": value_f32_ports_v02_json()
+            "ports": value_f32_ports_current_json()
           }
         }))
         .expect("collaboration change should parse");
 
         let mut unloaded = RuntimeSession::default();
-        let no_project = unloaded.apply_collaboration_change_set_v02(
+        let no_project = unloaded.apply_collaboration_change_set_current(
             root_target.clone(),
             vec![change.clone()],
             None,
@@ -4580,33 +4480,48 @@ mod tests {
             Some("collaboration.target.no-project")
         );
 
-        let active_v01 = unloaded.load_project(sample_project());
-        assert_eq!(
-            active_v01.diagnostics[0].code.as_deref(),
-            Some("project.active-v0.1-unsupported")
-        );
-
-        let mut invalid_request = sample_project_v02();
-        let mut invalid_document = super::project_document_from_request_v02(&invalid_request);
-        invalid_document.schema_version = "0.1.0".to_owned();
+        let mut invalid_request = sample_project_current();
+        let mut invalid_document = super::project_document_from_request_current(&invalid_request);
+        invalid_document.schema_version = "9.9.9".to_owned();
         invalid_request.document = Some(invalid_document);
-        let invalid_document_response = unloaded.load_project_v02(invalid_request);
+        let invalid_document_response = unloaded.load_project_current(invalid_request);
         assert_eq!(
             invalid_document_response.diagnostics[0].code.as_deref(),
-            Some("project.invalid-v0.2")
+            Some("project.unsupported-schema-version")
+        );
+        assert_eq!(
+            invalid_document_response.diagnostics[0]
+                .details
+                .as_ref()
+                .unwrap()["surface"],
+            "project"
+        );
+        assert_eq!(
+            invalid_document_response.diagnostics[0]
+                .details
+                .as_ref()
+                .unwrap()["expectedSchemaVersion"],
+            "0.1.0"
+        );
+        assert_eq!(
+            invalid_document_response.diagnostics[0]
+                .details
+                .as_ref()
+                .unwrap()["receivedSchemaVersion"],
+            "9.9.9"
         );
 
         let mut session = RuntimeSession::default();
-        assert!(session.load_project_v02(sample_project_v02()).ok);
-        assert!(session.project_document_v02().is_some());
+        assert!(session.load_project_current(sample_project_current()).ok);
+        assert!(session.project_document_current().is_some());
         assert_eq!(
-            session.target_revision_v02(&root_target).as_deref(),
+            session.target_revision_current(&root_target).as_deref(),
             Some("1")
         );
 
         let mut stale_target = root_target.clone();
         stale_target.base_revision = "0".to_owned();
-        let stale = session.apply_collaboration_change_set_v02(
+        let stale = session.apply_collaboration_change_set_current(
             stale_target,
             vec![change.clone()],
             None,
@@ -4625,7 +4540,7 @@ mod tests {
               "baseRevision": "1"
             }))
             .expect("target should parse");
-        let missing_target = session.apply_collaboration_change_set_v02(
+        let missing_target = session.apply_collaboration_change_set_current(
             missing_help_target,
             vec![change.clone()],
             None,
@@ -4637,7 +4552,7 @@ mod tests {
             Some("paste.target.missing-help-working-copy")
         );
 
-        let duplicate = session.apply_collaboration_change_set_v02(
+        let duplicate = session.apply_collaboration_change_set_current(
             root_target.clone(),
             vec![change],
             None,
@@ -4658,8 +4573,8 @@ mod tests {
           "baseRevision": "1"
         }))
         .expect("target should parse");
-        let paste_error = super::paste_graph_fragment_into_project_v02(
-            super::project_document_from_request_v02(&sample_project_v02()),
+        let paste_error = super::paste_graph_fragment_into_project_current(
+            super::project_document_from_request_current(&sample_project_current()),
             1,
             &PasteGraphFragmentRequest {
                 target: unsupported_target,
@@ -4696,13 +4611,13 @@ mod tests {
     }
 
     #[test]
-    fn active_v02_failure_paths_cover_registry_restore_and_history_rejection() {
-        let mut duplicate_request = sample_project_v02();
+    fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
+        let mut duplicate_request = sample_project_current();
         duplicate_request
             .nodes
             .push(duplicate_request.nodes[0].clone());
         let mut duplicate_session = RuntimeSession::default();
-        let duplicate_load = duplicate_session.load_project_v02(duplicate_request);
+        let duplicate_load = duplicate_session.load_project_current(duplicate_request);
         assert!(!duplicate_load.ok);
         assert!(
             duplicate_load.diagnostics[0]
@@ -4710,13 +4625,13 @@ mod tests {
                 .contains("duplicate node definition")
         );
 
-        let mut invalid_request = sample_project_v02();
-        let mut invalid_document = super::project_document_from_request_v02(&invalid_request);
+        let mut invalid_request = sample_project_current();
+        let mut invalid_document = super::project_document_from_request_current(&invalid_request);
         invalid_document.graph.nodes[0].kind = "missing.kind".to_owned();
         invalid_request.document = Some(invalid_document.clone());
         let mut invalid_session = RuntimeSession {
             project: Some(invalid_document),
-            nodes_v02: invalid_request.nodes,
+            nodes_current: invalid_request.nodes,
             revision: 1,
             view_revision: 1,
             ..RuntimeSession::default()
@@ -4734,16 +4649,20 @@ mod tests {
         );
 
         let mut update_session = RuntimeSession::default();
-        assert!(update_session.load_project_v02(sample_project_v02()).ok);
+        assert!(
+            update_session
+                .load_project_current(sample_project_current())
+                .ok
+        );
         let before = update_session
-            .project_document_v02()
+            .project_document_current()
             .expect("project should load");
         let mut after = before.clone();
         after.graph.revision = "2".to_owned();
         after.revision = "2".to_owned();
         update_session
-            .nodes_v02
-            .push(update_session.nodes_v02[0].clone());
+            .nodes_current
+            .push(update_session.nodes_current[0].clone());
         let update = update_session.apply_project_document_update(
             before,
             after,
@@ -4761,11 +4680,11 @@ mod tests {
         let mut restore_plan_session = RuntimeSession::default();
         assert!(
             restore_plan_session
-                .load_project_v02(sample_project_v02())
+                .load_project_current(sample_project_current())
                 .ok
         );
         let mut invalid_restore = restore_plan_session
-            .project_document_v02()
+            .project_document_current()
             .expect("project should load");
         invalid_restore.graph.nodes[0].kind = "missing.kind".to_owned();
         let restored = restore_plan_session.restore_project_document_state(
@@ -4786,15 +4705,15 @@ mod tests {
         let mut restore_registry_session = RuntimeSession::default();
         assert!(
             restore_registry_session
-                .load_project_v02(sample_project_v02())
+                .load_project_current(sample_project_current())
                 .ok
         );
         let restore_project = restore_registry_session
-            .project_document_v02()
+            .project_document_current()
             .expect("project should load");
         restore_registry_session
-            .nodes_v02
-            .push(restore_registry_session.nodes_v02[0].clone());
+            .nodes_current
+            .push(restore_registry_session.nodes_current[0].clone());
         let restored = restore_registry_session.restore_project_document_state(
             restore_project,
             1,
@@ -4811,9 +4730,13 @@ mod tests {
         );
 
         let mut history_session = RuntimeSession::default();
-        assert!(history_session.load_project_v02(sample_project_v02()).ok);
+        assert!(
+            history_session
+                .load_project_current(sample_project_current())
+                .ok
+        );
         let before = history_session
-            .project_document_v02()
+            .project_document_current()
             .expect("project should load");
         let mut after = before.clone();
         after.graph.nodes[0].kind = "missing.kind".to_owned();
@@ -4832,12 +4755,12 @@ mod tests {
         assert!(!outcome.applied);
 
         let mut view_session = RuntimeSession::default();
-        let loaded = view_session.load_project_v02(sample_project_v02());
+        let loaded = view_session.load_project_current(sample_project_current());
         assert!(loaded.ok);
         let start = loaded
             .snapshot
             .view_state()
-            .expect("v0.2 load should include view state")
+            .expect("current 0.1 load should include view state")
             .canvas
             .nodes["value_1"]
             .clone();
@@ -4855,7 +4778,7 @@ mod tests {
             }),
             actor_id: None,
             client_id: None,
-            description: Some("v0.2 active view move".to_owned()),
+            description: Some("current 0.1 active view move".to_owned()),
         });
         assert!(view_patch.ok);
         assert!(view_patch.applied);
@@ -4884,10 +4807,10 @@ mod tests {
 
     #[test]
     fn history_delta_helpers_merge_non_top_project_patch_and_view_edits() {
-        let mut before = super::project_document_from_request_v02(&sample_project_v02());
+        let mut before = super::project_document_from_request_current(&sample_project_current());
         before.patch_library = vec![
-            patch_definition_v02("identity"),
-            patch_definition_v02("before-only"),
+            patch_definition_current("identity"),
+            patch_definition_current("before-only"),
         ];
         before.view_state.canvas.nodes.insert(
             "before_only_view".to_owned(),
@@ -4901,7 +4824,7 @@ mod tests {
         );
 
         let mut after = before.clone();
-        after.graph.nodes.push(graph_node_v02("root_added"));
+        after.graph.nodes.push(graph_node_current("root_added"));
         after.graph.revision = "2".to_owned();
         after.revision = "2".to_owned();
         after.view_state.canvas.nodes.insert(
@@ -4921,22 +4844,25 @@ mod tests {
         after.patch_library[0]
             .graph
             .nodes
-            .push(graph_node_v02("patch_added"));
+            .push(graph_node_current("patch_added"));
         after.patch_library[0].graph.revision = "2".to_owned();
         after.patch_library[0].revision = "2".to_owned();
 
         let mut current = after.clone();
-        current.graph.nodes.push(graph_node_v02("other_actor_root"));
+        current
+            .graph
+            .nodes
+            .push(graph_node_current("other_actor_root"));
         current
             .patch_library
-            .push(patch_definition_v02("current-only"));
+            .push(patch_definition_current("current-only"));
         current
             .patch_library
-            .push(patch_definition_v02("before-only"));
+            .push(patch_definition_current("before-only"));
         current.patch_library[0]
             .graph
             .nodes
-            .push(graph_node_v02("other_actor_patch"));
+            .push(graph_node_current("other_actor_patch"));
         current.view_state.canvas.nodes.insert(
             "other_actor_root".to_owned(),
             crate::CanvasNodeView {
@@ -5019,30 +4945,32 @@ mod tests {
         );
 
         let mut before_graph = before.graph.clone();
-        before_graph.nodes.push(graph_node_v02("before_only"));
+        before_graph.nodes.push(graph_node_current("before_only"));
         let mut after_graph = before_graph.clone();
         after_graph.nodes.retain(|node| node.id != "before_only");
         let mut current_graph = after_graph.clone();
-        current_graph.nodes.push(graph_node_v02("before_only"));
-        current_graph.nodes.push(graph_node_v02("not_in_before"));
-        assert!(super::undo_graph_history_delta_v02(
+        current_graph.nodes.push(graph_node_current("before_only"));
+        current_graph
+            .nodes
+            .push(graph_node_current("not_in_before"));
+        assert!(super::undo_graph_history_delta_current(
             &mut current_graph.clone(),
             &before_graph,
             &after_graph
         ));
-        assert!(super::redo_graph_history_delta_v02(
+        assert!(super::redo_graph_history_delta_current(
             &mut current_graph,
             &before_graph,
             &after_graph
         ));
 
-        let _ = super::view_state_history_delta_v02(
+        let _ = super::view_state_history_delta_current(
             &before.view_state,
             &before.view_state,
             &after.view_state,
             super::HistoryDirection::Undo,
         );
-        let _ = super::view_state_history_delta_v02(
+        let _ = super::view_state_history_delta_current(
             &before.view_state,
             &before.view_state,
             &after.view_state,
@@ -5051,8 +4979,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_conversion_helpers_cover_surface_ports_models_and_id_sanitizing() {
-        let definition: crate::NodeDefinition = serde_json::from_value(json!({
+    fn active_lowering_helpers_cover_surface_ports_models_and_id_sanitizing() {
+        let definition: crate::NodeDefinitionCurrent = serde_json::from_value(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
           "id": "core.matrix",
@@ -5061,30 +4989,18 @@ mod tests {
           "category": "Test",
           "surface": { "palette": "cyan" },
           "ports": [
-            { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" } },
-            { "id": "resource", "direction": "input", "type": { "flow": "resource", "dataKind": "resource.buffer" } },
-            { "id": "stream", "direction": "output", "type": { "flow": "stream", "dataKind": "io.midi" } }
+            { "id": "signal", "direction": "input", "type": "signal.audio", "rate": "audio" },
+            { "id": "resource", "direction": "input", "type": "resource.buffer", "rate": "resource" },
+            { "id": "stream", "direction": "output", "type": "io.midi", "rate": "io" }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": true },
           "permissions": [],
           "capabilities": []
         }))
-        .expect("legacy definition should parse");
+        .expect("current 0.1 definition should parse");
 
-        let lifted = super::node_definition_v01_to_v02(&definition);
-        assert_eq!(
-            lifted
-                .surface
-                .as_ref()
-                .and_then(|surface| surface.palette.as_deref()),
-            Some("cyan")
-        );
-        assert_eq!(lifted.ports[0].rate, Some(crate::PortRateV02::Audio));
-        assert_eq!(lifted.ports[1].rate, Some(crate::PortRateV02::Resource));
-        assert_eq!(lifted.ports[2].rate, Some(crate::PortRateV02::Io));
-
-        let lowered = super::node_definition_v02_to_v01(&lifted);
+        let lowered = super::lower_node_definition_for_execution(&definition);
         assert_eq!(
             lowered
                 .surface
@@ -5092,59 +5008,64 @@ mod tests {
                 .and_then(|surface| surface.palette.as_deref()),
             Some("cyan")
         );
+        assert_eq!(lowered.ports[0].data_type.flow, crate::DataFlow::Signal);
+        assert_eq!(lowered.ports[1].data_type.flow, crate::DataFlow::Resource);
+        assert_eq!(lowered.ports[2].data_type.flow, crate::DataFlow::Resource);
 
         let cases = [
             (
                 crate::ExecutionModel::Event,
-                skenion_contracts::ExecutionModelV02::Event,
+                skenion_contracts::ExecutionModelV01::Event,
             ),
             (
                 crate::ExecutionModel::Value,
-                skenion_contracts::ExecutionModelV02::Value,
+                skenion_contracts::ExecutionModelV01::Value,
             ),
             (
                 crate::ExecutionModel::Frame,
-                skenion_contracts::ExecutionModelV02::Frame,
+                skenion_contracts::ExecutionModelV01::Frame,
             ),
             (
                 crate::ExecutionModel::AudioBlock,
-                skenion_contracts::ExecutionModelV02::AudioBlock,
+                skenion_contracts::ExecutionModelV01::AudioBlock,
             ),
             (
                 crate::ExecutionModel::VideoFrame,
-                skenion_contracts::ExecutionModelV02::VideoFrame,
+                skenion_contracts::ExecutionModelV01::VideoFrame,
             ),
             (
                 crate::ExecutionModel::GpuPass,
-                skenion_contracts::ExecutionModelV02::GpuPass,
+                skenion_contracts::ExecutionModelV01::GpuPass,
             ),
             (
                 crate::ExecutionModel::AsyncResource,
-                skenion_contracts::ExecutionModelV02::AsyncResource,
+                skenion_contracts::ExecutionModelV01::AsyncResource,
             ),
             (
                 crate::ExecutionModel::ScriptControl,
-                skenion_contracts::ExecutionModelV02::ScriptControl,
+                skenion_contracts::ExecutionModelV01::ScriptControl,
             ),
             (
                 crate::ExecutionModel::NativePlugin,
-                skenion_contracts::ExecutionModelV02::NativePlugin,
+                skenion_contracts::ExecutionModelV01::NativePlugin,
             ),
         ];
-        for (legacy, active) in cases {
-            assert_eq!(super::execution_model_v01_to_v02(&legacy), active);
-            assert_eq!(super::execution_model_v02_to_v01(&active), legacy);
+        for (internal, active) in cases {
+            assert_eq!(
+                super::lower_execution_model_for_execution(&active),
+                internal
+            );
         }
-        assert_eq!(super::sanitize_id_fragment("bad id/value"), "bad_id_value");
     }
 
     #[test]
     fn paste_private_helpers_cover_fragment_and_edge_conflict_errors() {
-        let graph = sample_project_v02().graph;
+        let graph = sample_project_current().graph;
         let mut invalid_fragment = paste_operation("1").request;
         invalid_fragment.fragment.edges[0].target.node_id = "outside".to_owned();
-        let invalid = super::paste_graph_fragment_into_graph_v02(graph.clone(), &invalid_fragment)
-            .expect_err("outside endpoint should fail analysis");
+        let invalid =
+            super::paste_graph_fragment_into_graph_current(graph.clone(), &invalid_fragment)
+                .expect_err("outside endpoint should fail analysis");
         assert_eq!(
             invalid.0[0].code,
             "paste.fragment.fragment-edge-outside-selection"
@@ -5161,7 +5082,7 @@ mod tests {
         edge_conflict.fragment.edges[0].id = "edge_value_target".to_owned();
         edge_conflict.fragment.edges[0].source.node_id = "new_value".to_owned();
         edge_conflict.fragment.edges[0].target.node_id = "new_target".to_owned();
-        let edge_conflict = super::paste_graph_fragment_into_graph_v02(graph, &edge_conflict)
+        let edge_conflict = super::paste_graph_fragment_into_graph_current(graph, &edge_conflict)
             .expect_err("duplicate edge id should fail");
         assert_eq!(edge_conflict.0[0].code, "paste.edge-id-conflict");
         assert_eq!(edge_conflict.1.edge_id_map.get("edge_value_target"), None);
@@ -5175,8 +5096,8 @@ mod tests {
             owner_path: vec!["root".to_owned()],
             node_id: "subpatch".to_owned(),
         };
-        let unsupported = super::paste_graph_fragment_into_project_v02(
-            super::project_document_from_request_v02(&sample_project_v02()),
+        let unsupported = super::paste_graph_fragment_into_project_current(
+            super::project_document_from_request_current(&sample_project_current()),
             1,
             &unsupported,
         )
@@ -5187,8 +5108,8 @@ mod tests {
         missing_graph.target.path = skenion_contracts::PatchPath::ProjectPatchDefinition {
             patch_id: "missing".to_owned(),
         };
-        let missing_graph = super::paste_graph_fragment_into_project_v02(
-            super::project_document_from_request_v02(&sample_project_v02()),
+        let missing_graph = super::paste_graph_fragment_into_project_current(
+            super::project_document_from_request_current(&sample_project_current()),
             1,
             &missing_graph,
         )
@@ -5196,28 +5117,28 @@ mod tests {
         assert_eq!(missing_graph.0[0].code, "paste.target.missing-graph");
 
         let mut project_with_patch =
-            super::project_document_from_request_v02(&sample_project_v02());
+            super::project_document_from_request_current(&sample_project_current());
         project_with_patch
             .patch_library
-            .push(patch_definition_v02("identity"));
+            .push(patch_definition_current("identity"));
         let mut patch_paste = paste_operation("1").request;
         patch_paste.target.path = skenion_contracts::PatchPath::ProjectPatchDefinition {
             patch_id: "identity".to_owned(),
         };
         let (patched_project, _, _, revision_after) =
-            super::paste_graph_fragment_into_project_v02(project_with_patch, 1, &patch_paste)
+            super::paste_graph_fragment_into_project_current(project_with_patch, 1, &patch_paste)
                 .expect("project patch paste should apply");
         assert_eq!(revision_after, "2");
         assert_eq!(patched_project.patch_library[0].revision, "2");
 
-        let remapped = super::remap_edge_v02(
-            &EdgeSpecV02 {
+        let remapped = super::remap_edge_current(
+            &EdgeSpecCurrent {
                 id: "edge".to_owned(),
-                source: EdgeEndpointV02 {
+                source: EdgeEndpointCurrent {
                     node_id: "outside_source".to_owned(),
                     port_id: "out".to_owned(),
                 },
-                target: EdgeEndpointV02 {
+                target: EdgeEndpointCurrent {
                     node_id: "outside_target".to_owned(),
                     port_id: "in".to_owned(),
                 },
@@ -5241,8 +5162,10 @@ mod tests {
 
     #[test]
     fn collaboration_private_helpers_cover_patch_target_error_matrix() {
-        let mut project = super::project_document_from_request_v02(&sample_project_v02());
-        project.patch_library.push(patch_definition_v02("identity"));
+        let mut project = super::project_document_from_request_current(&sample_project_current());
+        project
+            .patch_library
+            .push(patch_definition_current("identity"));
         let root_target = skenion_contracts::GraphTargetRef {
             path: skenion_contracts::PatchPath::Root,
             base_revision: "1".to_owned(),
@@ -5256,14 +5179,14 @@ mod tests {
             target_revision: None,
         };
 
-        let patch_view_error = super::apply_collaboration_changes_to_project_v02(
+        let patch_view_error = super::apply_collaboration_changes_to_project_current(
             project.clone(),
             1,
             &patch_target,
             &[collaboration_change(json!({
               "op": "node.add",
               "changeId": "add-with-view",
-              "node": value_node_v02_json("patch_added"),
+              "node": value_node_current_json("patch_added"),
               "view": { "x": 1.0, "y": 2.0 }
             }))],
         )
@@ -5273,20 +5196,20 @@ mod tests {
             Some("collaboration.patch-view-unsupported")
         );
 
-        let patch_add = super::apply_collaboration_changes_to_project_v02(
+        let patch_add = super::apply_collaboration_changes_to_project_current(
             project.clone(),
             1,
             &patch_target,
             &[collaboration_change(json!({
               "op": "node.add",
               "changeId": "add-patch-node",
-              "node": value_node_v02_json("patch_added_without_view")
+              "node": value_node_current_json("patch_added_without_view")
             }))],
         )
         .expect("patch definition node add without view should apply");
         assert_eq!(patch_add.0.patch_library[0].revision, "2");
 
-        let patch_move_error = super::apply_collaboration_changes_to_project_v02(
+        let patch_move_error = super::apply_collaboration_changes_to_project_current(
             project.clone(),
             1,
             &patch_target,
@@ -5303,7 +5226,7 @@ mod tests {
             Some("collaboration.patch-view-unsupported")
         );
 
-        let missing_move = super::apply_collaboration_changes_to_project_v02(
+        let missing_move = super::apply_collaboration_changes_to_project_current(
             project.clone(),
             1,
             &root_target,
@@ -5320,7 +5243,7 @@ mod tests {
             Some("collaboration.node-missing")
         );
 
-        let view_conflict = super::apply_collaboration_changes_to_project_v02(
+        let view_conflict = super::apply_collaboration_changes_to_project_current(
             project.clone(),
             1,
             &root_target,
@@ -5338,7 +5261,7 @@ mod tests {
             Some("collaboration.view-conflict")
         );
 
-        let missing_delete = super::apply_collaboration_changes_to_project_v02(
+        let missing_delete = super::apply_collaboration_changes_to_project_current(
             project.clone(),
             1,
             &root_target,
@@ -5354,7 +5277,7 @@ mod tests {
             Some("collaboration.node-missing")
         );
 
-        let duplicate_edge = super::apply_collaboration_changes_to_project_v02(
+        let duplicate_edge = super::apply_collaboration_changes_to_project_current(
             project.clone(),
             1,
             &root_target,
@@ -5383,7 +5306,7 @@ mod tests {
             base_revision: "1".to_owned(),
             target_revision: None,
         };
-        let missing_graph = super::apply_collaboration_changes_to_project_v02(
+        let missing_graph = super::apply_collaboration_changes_to_project_current(
             project.clone(),
             1,
             &missing_graph_target,
@@ -5404,26 +5327,30 @@ mod tests {
             base_revision: "1".to_owned(),
             target_revision: None,
         };
-        let unsupported =
-            super::apply_collaboration_changes_to_project_v02(project, 1, &unsupported_target, &[])
-                .expect_err("package patch target should fail");
+        let unsupported = super::apply_collaboration_changes_to_project_current(
+            project,
+            1,
+            &unsupported_target,
+            &[],
+        )
+        .expect_err("package patch target should fail");
         assert_eq!(
             unsupported[0].code.as_deref(),
             Some("collaboration.target.unsupported")
         );
 
-        let mut unresolved_graph = sample_project_v02().graph;
+        let mut unresolved_graph = sample_project_current().graph;
         unresolved_graph.nodes.push(
             serde_json::from_value(json!({
-              "id": "unresolved_v02",
+              "id": "unresolved_current",
               "kind": "core.unresolved-object",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": []
             }))
-            .expect("unresolved v0.2 node should parse"),
+            .expect("unresolved current 0.1 node should parse"),
         );
-        let unresolved = super::unresolved_object_diagnostics_v02(&unresolved_graph);
+        let unresolved = super::unresolved_object_diagnostics_current(&unresolved_graph);
         assert!(
             unresolved[0]
                 .message
@@ -5434,7 +5361,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_applies_position_and_anchor_placement() {
         let mut positioned = RuntimeSession::default();
-        positioned.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut positioned);
         let mut position_operation = paste_operation("1");
         position_operation.request.placement =
             Some(skenion_contracts::PastePlacement::Position { x: 300.0, y: 400.0 });
@@ -5457,7 +5384,7 @@ mod tests {
         assert_eq!((pasted_target_view.x, pasted_target_view.y), (470.0, 400.0));
 
         let mut anchored = RuntimeSession::default();
-        anchored.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut anchored);
         let mut anchor_operation = paste_operation("1");
         anchor_operation.request.placement = Some(skenion_contracts::PastePlacement::Anchor {
             node_id: "value_1".to_owned(),
@@ -5480,7 +5407,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_reports_base_revision_conflict() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
 
         let response = session.apply_runtime_operation(paste_operation("0"));
 
@@ -5496,7 +5423,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_rejects_missing_help_working_copy_target() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.target.path = skenion_contracts::PatchPath::HelpWorkingCopy {
             working_copy_id: "missing-help-copy".to_owned(),
@@ -5517,7 +5444,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_allows_loaded_help_working_copy_target() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.target.path = skenion_contracts::PatchPath::HelpWorkingCopy {
             working_copy_id: "minimal-value".to_owned(),
@@ -5543,7 +5470,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_rejects_project_patch_definition_target() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.target.path = skenion_contracts::PatchPath::ProjectPatchDefinition {
             patch_id: "identity".to_owned(),
@@ -5567,7 +5494,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_rejects_embedded_patch_instance_target() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.target.path = skenion_contracts::PatchPath::EmbeddedPatchInstance {
             owner_path: vec!["root".to_owned()],
@@ -5587,7 +5514,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_rejects_outside_endpoint_by_default() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.fragment.edges[0].target.node_id = "outside".to_owned();
 
@@ -5609,12 +5536,12 @@ mod tests {
     #[test]
     fn paste_graph_fragment_omits_outside_endpoint_when_requested() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.fragment.edges[0].target.node_id = "outside".to_owned();
         operation.request.options = Some(skenion_contracts::PasteGraphFragmentOptions {
             outside_endpoint_policy: Some(
-                skenion_contracts::GraphFragmentOutsideEndpointPolicyV02::Omit,
+                skenion_contracts::GraphFragmentOutsideEndpointPolicyV01::Omit,
             ),
             id_conflict_policy: Some(skenion_contracts::IdConflictPolicy::Remap),
             preserve_relative_positions: Some(true),
@@ -5635,7 +5562,7 @@ mod tests {
     #[test]
     fn paste_graph_fragment_rejects_immutable_help_source_target() {
         let mut session = RuntimeSession::default();
-        session.import_legacy_project_v01(sample_project());
+        load_sample_project(&mut session);
         let mut operation = paste_operation("1");
         operation.request.target.path = skenion_contracts::PatchPath::PackagePatchDefinition {
             package_id: "skenion.core".to_owned(),
@@ -5654,7 +5581,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_graph_fragment_converts_v02_port_rates_for_lowered_v01_nodes() {
+    fn paste_graph_fragment_converts_current_port_rates_for_lowered_execution_nodes() {
         let cases = [
             (
                 json!({ "id": "event", "direction": "input", "type": "message.any", "rate": "event", "triggerMode": "trigger" }),
@@ -5707,8 +5634,8 @@ mod tests {
         ];
 
         for (value, expected_flow, expected_kind, expected_activation) in cases {
-            let port: PortSpecV02 = serde_json::from_value(value).expect("port should parse");
-            let lowered = port_v02_to_v01(&port);
+            let port: PortSpecCurrent = serde_json::from_value(value).expect("port should parse");
+            let lowered = lower_port_for_execution(&port);
             assert_eq!(lowered.data_type.flow, expected_flow);
             assert_eq!(lowered.data_type.data_kind, expected_kind);
             assert_eq!(lowered.activation, expected_activation);
@@ -5719,7 +5646,7 @@ mod tests {
         serde_json::from_value(value).expect("patch should parse")
     }
 
-    fn patch_graph(response: &RuntimePatchResponse) -> &GraphDocumentV02 {
+    fn patch_graph(response: &RuntimePatchResponse) -> &GraphDocumentCurrent {
         &response
             .snapshot
             .project
@@ -5737,13 +5664,13 @@ mod tests {
             .view_state
     }
 
-    fn assert_active_v01_graph_patch_rejected(response: &RuntimePatchResponse) {
+    fn assert_graph_patch_rejected(response: &RuntimePatchResponse) {
         assert!(!response.ok);
         assert!(!response.applied);
         assert!(!response.conflict);
         assert_eq!(
             response.diagnostics[0].code.as_deref(),
-            Some("project.active-v0.1-graph-patch-unsupported")
+            Some("project.graph-patch-unsupported")
         );
     }
 
@@ -5822,21 +5749,21 @@ mod tests {
     fn paste_fragment_json() -> Value {
         json!({
           "schema": "skenion.graph.fragment",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "nodes": [
             {
               "id": "value_1",
               "kind": "core.float",
               "kindVersion": "0.1.0",
               "params": {},
-              "ports": value_f32_ports_v02_json()
+              "ports": value_f32_ports_current_json()
             },
             {
               "id": "pasted_target",
               "kind": "core.float",
               "kindVersion": "0.1.0",
               "params": {},
-              "ports": value_f32_ports_v02_json()
+              "ports": value_f32_ports_current_json()
             }
           ],
           "edges": [
@@ -5855,30 +5782,31 @@ mod tests {
         })
     }
 
-    fn graph_node_v02(id: &str) -> crate::GraphNodeV02 {
-        serde_json::from_value(value_node_v02_json(id)).expect("v0.2 graph node should parse")
+    fn graph_node_current(id: &str) -> crate::GraphNodeCurrent {
+        serde_json::from_value(value_node_current_json(id))
+            .expect("current 0.1 graph node should parse")
     }
 
-    fn value_node_v02_json(id: &str) -> Value {
+    fn value_node_current_json(id: &str) -> Value {
         json!({
           "id": id,
           "kind": "core.float",
-          "kindVersion": "0.2.0",
+          "kindVersion": "0.1.0",
           "params": {},
-          "ports": value_f32_ports_v02_json()
+          "ports": value_f32_ports_current_json()
         })
     }
 
-    fn patch_definition_v02(id: &str) -> skenion_contracts::PatchDefinitionV02 {
+    fn patch_definition_current(id: &str) -> skenion_contracts::PatchDefinitionV01 {
         serde_json::from_value(json!({
           "id": id,
           "revision": "1",
           "graph": {
             "schema": "skenion.graph",
-            "schemaVersion": "0.2.0",
+            "schemaVersion": "0.1.0",
             "id": format!("{id}-graph"),
             "revision": "1",
-            "nodes": [value_node_v02_json("patch_value")],
+            "nodes": [value_node_current_json("patch_value")],
             "edges": []
           }
         }))
@@ -6013,31 +5941,35 @@ mod tests {
         }))
     }
 
-    fn sample_project() -> ProjectRequest {
-        serde_json::from_value(sample_project_json()).expect("sample project should parse")
+    fn load_sample_project(session: &mut RuntimeSession) -> super::RuntimeSessionResponse {
+        session.load_project_current(sample_project_current())
     }
 
-    fn sample_project_v02() -> ProjectRequestV02 {
+    fn sample_internal_graph() -> GraphDocument {
+        super::lower_graph_for_execution(&sample_project_current().graph)
+    }
+
+    fn sample_project_current() -> ProjectRequestCurrent {
         serde_json::from_value(json!({
           "graph": {
             "schema": "skenion.graph",
-            "schemaVersion": "0.2.0",
+            "schemaVersion": "0.1.0",
             "id": "minimal-value",
             "revision": "1",
             "nodes": [
               {
                 "id": "value_1",
                 "kind": "core.float",
-                "kindVersion": "0.2.0",
+                "kindVersion": "0.1.0",
                 "params": {},
-                "ports": value_f32_ports_v02_json()
+                "ports": value_f32_ports_current_json()
               },
               {
                 "id": "target_1",
                 "kind": "core.float",
-                "kindVersion": "0.2.0",
+                "kindVersion": "0.1.0",
                 "params": {},
-                "ports": value_f32_ports_v02_json()
+                "ports": value_f32_ports_current_json()
               }
             ],
             "edges": [
@@ -6052,12 +5984,12 @@ mod tests {
           "nodes": [
             {
               "schema": "skenion.node.definition",
-              "schemaVersion": "0.2.0",
+              "schemaVersion": "0.1.0",
               "id": "core.float",
-              "version": "0.2.0",
+              "version": "0.1.0",
               "displayName": "Float Value",
               "category": "Values",
-              "ports": value_f32_ports_v02_json(),
+              "ports": value_f32_ports_current_json(),
               "execution": { "model": "value" },
               "state": { "persistent": false },
               "permissions": [],
@@ -6075,110 +6007,71 @@ mod tests {
             }
           }
         }))
-        .expect("v0.2 sample project should parse")
+        .expect("current 0.1 sample project should parse")
     }
 
-    fn sample_project_with_unresolved_definition() -> ProjectRequest {
-        let mut value = sample_project_json();
-        value["nodes"]
-            .as_array_mut()
-            .expect("nodes should be an array")
-            .push(unresolved_definition_json());
-        serde_json::from_value(value).expect("sample project should parse")
+    fn sample_project_current_with_unresolved_definition() -> ProjectRequestCurrent {
+        let mut request = sample_project_current();
+        request.nodes.push(
+            serde_json::from_value(unresolved_definition_current_json())
+                .expect("unresolved current 0.1 definition should parse"),
+        );
+        request
     }
 
-    fn unresolved_project() -> ProjectRequest {
-        let mut value = sample_project_json();
-        value["graph"]["nodes"]
-            .as_array_mut()
-            .expect("graph nodes should be an array")
-            .push(unresolved_node_json("unresolved_1", "user.manipulator"));
-        value["nodes"]
-            .as_array_mut()
-            .expect("nodes should be an array")
-            .push(unresolved_definition_json());
-        serde_json::from_value(value).expect("unresolved project should parse")
+    fn unresolved_project_current() -> ProjectRequestCurrent {
+        let mut request = sample_project_current();
+        request.graph.nodes.push(
+            serde_json::from_value(unresolved_node_json("unresolved_1", "user.manipulator"))
+                .expect("unresolved current 0.1 node should parse"),
+        );
+        request.nodes.push(
+            serde_json::from_value(unresolved_definition_current_json())
+                .expect("unresolved current 0.1 definition should parse"),
+        );
+        request
     }
 
-    fn object_routing_project() -> ProjectRequest {
-        let mut value = sample_project_json();
-        value["graph"]["nodes"][0]["params"] = json!({ "sendName": "speed" });
-        serde_json::from_value(value).expect("object routing project should parse")
+    fn object_routing_project_current() -> ProjectRequestCurrent {
+        let mut request = sample_project_current();
+        request.graph.nodes[0]
+            .params
+            .insert("sendName".to_owned(), json!("speed"));
+        request
     }
 
-    fn sample_project_json() -> Value {
-        json!({
-          "graph": {
-            "schema": "skenion.graph",
-            "schemaVersion": "0.1.0",
-            "id": "minimal-value",
-            "revision": "1",
-            "nodes": [
-              {
-                "id": "value_1",
-                "kind": "core.float",
+    fn debug_sink_project_current() -> ProjectRequestCurrent {
+        let mut request = sample_project_current();
+        request.graph.nodes.push(
+            serde_json::from_value(json!({
+                "id": "debug_1",
+                "kind": "debug.sink",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": value_f32_ports_json()
-              },
-              {
-                "id": "target_1",
-                "kind": "core.float",
-                "kindVersion": "0.1.0",
-                "params": {},
-                "ports": value_f32_ports_json()
-              }
-            ],
-            "edges": [
-              { "from": { "node": "value_1", "port": "value" }, "to": { "node": "target_1", "port": "in" } }
-            ]
-          },
-          "nodes": [
-            {
-              "schema": "skenion.node.definition",
-              "schemaVersion": "0.1.0",
-              "id": "core.float",
-              "version": "0.1.0",
-              "displayName": "Float Value",
-              "category": "Values",
-              "ports": value_f32_ports_json(),
-              "execution": { "model": "value" },
-              "state": { "persistent": false },
-              "permissions": [],
-              "capabilities": []
-            }
-          ]
-        })
+                "ports": []
+            }))
+            .expect("debug current 0.1 node should parse"),
+        );
+        request.nodes.push(
+            serde_json::from_value(json!({
+                "schema": "skenion.node.definition",
+                "schemaVersion": "0.1.0",
+                "id": "debug.sink",
+                "version": "0.1.0",
+                "displayName": "Debug Sink",
+                "category": "Debug",
+                "ports": [],
+                "execution": { "model": "value" },
+                "state": { "persistent": false },
+                "permissions": [],
+                "capabilities": []
+            }))
+            .expect("debug current 0.1 definition should parse"),
+        );
+        request
     }
 
-    fn value_f32_ports_json() -> Value {
-        json!([
-          {
-            "id": "in",
-            "direction": "input",
-            "label": "In",
-            "type": { "flow": "event", "dataKind": "message.any" },
-            "required": false,
-            "activation": "trigger"
-          },
-          {
-            "id": "cold",
-            "direction": "input",
-            "label": "Cold",
-            "type": { "flow": "value", "dataKind": "number.float" },
-            "required": false,
-            "activation": "latched"
-          },
-          {
-            "id": "value",
-            "direction": "output",
-            "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.float" }
-          }
-        ])
-    }
-
-    fn value_f32_ports_v02_json() -> Value {
+    fn value_f32_ports_current_json() -> Value {
         json!([
           {
             "id": "in",
@@ -6222,7 +6115,7 @@ mod tests {
         })
     }
 
-    fn unresolved_definition_json() -> Value {
+    fn unresolved_definition_current_json() -> Value {
         json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",

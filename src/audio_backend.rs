@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     AudioDspPlanOptions, AudioRealtimeDspError, AudioRealtimeDspExecutor, AudioRealtimeDspOptions,
-    GraphDocument, NodeRegistry,
+    ProjectRequestCurrent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +59,7 @@ pub enum AudioBackendError {
 }
 
 pub fn start_default_audio_output_backend(
-    graph: &GraphDocument,
-    registry: &NodeRegistry,
+    request: &ProjectRequestCurrent,
     config: AudioBackendConfig,
 ) -> Result<RunningAudioBackend, AudioBackendError> {
     let host = cpal::default_host();
@@ -78,8 +77,7 @@ pub fn start_default_audio_output_backend(
     let channels = output_config.channels();
     let stream_config = output_config.config();
     let mut executor = AudioRealtimeDspExecutor::new(
-        graph,
-        registry,
+        request,
         AudioRealtimeDspOptions {
             plan: AudioDspPlanOptions {
                 block_size: config.block_size,

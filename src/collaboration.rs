@@ -15,7 +15,9 @@ use skenion_contracts::{
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-use crate::{Edge, runtime_time::created_at_now};
+#[cfg(test)]
+use crate::Edge;
+use crate::runtime_time::created_at_now;
 
 pub const COLLABORATION_EVENT_REPLAY_LIMIT: usize = 256;
 
@@ -35,6 +37,7 @@ pub struct RuntimeCollaborationLog {
     idempotency_results: Mutex<BTreeMap<String, RuntimeCollaborationOperationResult>>,
     presence: Mutex<BTreeMap<String, RuntimeCollaborationPresenceEnvelope>>,
     selection: Mutex<BTreeMap<String, RuntimeCollaborationSelectionEnvelope>>,
+    #[cfg(test)]
     edge_ids: Mutex<BTreeMap<String, Edge>>,
 }
 
@@ -50,6 +53,7 @@ impl RuntimeCollaborationLog {
             idempotency_results: Mutex::new(BTreeMap::new()),
             presence: Mutex::new(BTreeMap::new()),
             selection: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
             edge_ids: Mutex::new(BTreeMap::new()),
         })
     }
@@ -92,28 +96,32 @@ impl RuntimeCollaborationLog {
             .contains_key(idempotency_key)
     }
 
-    pub fn remember_edge_id(&self, edge_id: String, edge: Edge) {
+    #[cfg(test)]
+    fn remember_edge_id(&self, edge_id: String, edge: Edge) {
         self.edge_ids
             .lock()
             .expect("runtime collaboration edge id lock should not be poisoned")
             .insert(edge_id, edge);
     }
 
-    pub fn forget_edge_id(&self, edge_id: &str) {
+    #[cfg(test)]
+    fn forget_edge_id(&self, edge_id: &str) {
         self.edge_ids
             .lock()
             .expect("runtime collaboration edge id lock should not be poisoned")
             .remove(edge_id);
     }
 
-    pub fn forget_incident_edge_ids(&self, node_id: &str) {
+    #[cfg(test)]
+    fn forget_incident_edge_ids(&self, node_id: &str) {
         self.edge_ids
             .lock()
             .expect("runtime collaboration edge id lock should not be poisoned")
             .retain(|_, edge| edge.from.node != node_id && edge.to.node != node_id);
     }
 
-    pub fn edge_by_id(&self, edge_id: &str) -> Option<Edge> {
+    #[cfg(test)]
+    fn edge_by_id(&self, edge_id: &str) -> Option<Edge> {
         self.edge_ids
             .lock()
             .expect("runtime collaboration edge id lock should not be poisoned")
