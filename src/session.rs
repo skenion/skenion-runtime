@@ -969,11 +969,7 @@ impl RuntimeSession {
         normalize_mutation_base_revisions(
             &mut inverse_mutation,
             next_graph.revision.clone(),
-            if view_changed {
-                self.view_revision + 1
-            } else {
-                self.view_revision
-            },
+            self.view_revision + 1,
         );
         let history_entry = self.create_runtime_history_entry(
             kind,
@@ -2082,6 +2078,23 @@ fn paste_graph_fragment_into_project_v02(
     request: &PasteGraphFragmentRequest,
 ) -> PasteProjectResult {
     let target_path = request.target.path.clone();
+    if matches!(
+        target_path,
+        PatchPath::PackagePatchDefinition { .. } | PatchPath::EmbeddedPatchInstance { .. }
+    ) {
+        return Err((
+            vec![operation_error(
+                "paste.target.unsupported",
+                "paste target cannot be mutated in the active Runtime session",
+                Some(request.target.clone()),
+                None,
+                None,
+                None,
+                None,
+            )],
+            empty_id_remap(),
+        ));
+    }
     let (next_graph, id_remap) = {
         let graph = match graph_for_path_v02(&project, &target_path) {
             Some(graph) => graph,
@@ -2104,81 +2117,35 @@ fn paste_graph_fragment_into_project_v02(
     };
     let revision_after = next_graph.revision.clone();
     let mut next_view_revision = view_revision;
-    match &target_path {
-        PatchPath::Root | PatchPath::HelpWorkingCopy { .. } => {
-            let graph_v01 = graph_document_v02_to_v01(&next_graph);
-            let view_patch =
-                lower_fragment_view_patch(view_revision, request, &id_remap.node_id_map);
-            let view_state = if let Some(view_patch) = view_patch {
-                match apply_view_patch_to_view_state(
-                    &graph_v01,
-                    reconcile_view_state_with_graph(&graph_v01, Some(project.view_state.clone())),
-                    &view_patch,
-                ) {
-                    Ok((view_state, _)) => {
-                        next_view_revision += 1;
-                        view_state
-                    }
-                    Err(diagnostics) => {
-                        return Err((
-                            diagnostics
-                                .iter()
-                                .map(|diagnostic| {
-                                    runtime_diagnostic_to_operation_diagnostic(
-                                        diagnostic,
-                                        &request.target,
-                                    )
-                                })
-                                .collect(),
-                            id_remap,
-                        ));
-                    }
-                }
-            } else {
-                reconcile_view_state_with_graph(&graph_v01, Some(project.view_state.clone()))
-            };
-            project.graph = next_graph;
-            project.revision = project.graph.revision.clone();
-            project.view_state = view_state;
-        }
-        PatchPath::ProjectPatchDefinition { patch_id } => {
-            let Some(patch) = project
-                .patch_library
-                .iter_mut()
-                .find(|patch| patch.id == *patch_id)
-            else {
-                return Err((
-                    vec![operation_error(
-                        "paste.target.missing-project-patch-definition",
-                        format!(
-                            "project patch definition {patch_id} is not loaded in this runtime session"
-                        ),
-                        Some(request.target.clone()),
-                        None,
-                        None,
-                        None,
-                        None,
-                    )],
-                    id_remap,
-                ));
-            };
-            patch.graph = next_graph;
-            patch.revision = patch.graph.revision.clone();
-        }
-        PatchPath::PackagePatchDefinition { .. } | PatchPath::EmbeddedPatchInstance { .. } => {
-            return Err((
-                vec![operation_error(
-                    "paste.target.unsupported",
-                    "paste target cannot be mutated in the active Runtime session",
-                    Some(request.target.clone()),
-                    None,
-                    None,
-                    None,
-                    None,
-                )],
-                id_remap,
-            ));
-        }
+    if matches!(
+        &target_path,
+        PatchPath::Root | PatchPath::HelpWorkingCopy { .. }
+    ) {
+        let graph_v01 = graph_document_v02_to_v01(&next_graph);
+        let view_patch = lower_fragment_view_patch(view_revision, request, &id_remap.node_id_map);
+        let view_state = if let Some(view_patch) = view_patch {
+            let (view_state, _) = apply_view_patch_to_view_state(
+                &graph_v01,
+                reconcile_view_state_with_graph(&graph_v01, Some(project.view_state.clone())),
+                &view_patch,
+            )
+            .expect("lowered fragment view patch should reference pasted graph nodes");
+            next_view_revision += 1;
+            view_state
+        } else {
+            reconcile_view_state_with_graph(&graph_v01, Some(project.view_state.clone()))
+        };
+        project.graph = next_graph;
+        project.revision = project.graph.revision.clone();
+        project.view_state = view_state;
+    } else if let PatchPath::ProjectPatchDefinition { patch_id } = &target_path {
+        let patch = project
+            .patch_library
+            .iter_mut()
+            .find(|patch| patch.id == *patch_id)
+            .expect("project patch definition lookup was already proven");
+        patch.graph = next_graph;
+        patch.revision = patch.graph.revision.clone();
     }
 
     Ok((project, next_view_revision, id_remap, revision_after))
@@ -2190,6 +2157,16 @@ fn apply_collaboration_changes_to_project_v02(
     target: &GraphTargetRef,
     changes: &[RuntimeCollaborationChange],
 ) -> Result<(ProjectDocumentV02, u64), Vec<RuntimeDiagnostic>> {
+    if matches!(
+        &target.path,
+        PatchPath::PackagePatchDefinition { .. } | PatchPath::EmbeddedPatchInstance { .. }
+    ) {
+        return Err(vec![RuntimeDiagnostic::structured_error(
+            "collaboration.target.unsupported",
+            "collaboration target cannot be mutated in the active Runtime session",
+            serde_json::json!({ "target": target }),
+        )]);
+    }
     let mut graph = graph_for_path_v02(&project, &target.path).ok_or_else(|| {
         vec![RuntimeDiagnostic::structured_error(
             "collaboration.target.missing-graph",
@@ -2331,43 +2308,28 @@ fn apply_collaboration_changes_to_project_v02(
         graph.revision = next_graph_revision(&graph.revision);
     }
     let mut next_view_revision = view_revision;
-    match &target.path {
-        PatchPath::Root | PatchPath::HelpWorkingCopy { .. } => {
-            let graph_v01 = graph_document_v02_to_v01(&graph);
-            project.graph = graph;
-            project.revision = project.graph.revision.clone();
-            project.view_state = runtime_owned_view_state(reconcile_view_state_with_graph(
-                &graph_v01,
-                Some(view_state),
-            ));
-            if view_changed {
-                next_view_revision += 1;
-            }
+    if matches!(
+        &target.path,
+        PatchPath::Root | PatchPath::HelpWorkingCopy { .. }
+    ) {
+        let graph_v01 = graph_document_v02_to_v01(&graph);
+        project.graph = graph;
+        project.revision = project.graph.revision.clone();
+        project.view_state = runtime_owned_view_state(reconcile_view_state_with_graph(
+            &graph_v01,
+            Some(view_state),
+        ));
+        if view_changed {
+            next_view_revision += 1;
         }
-        PatchPath::ProjectPatchDefinition { patch_id } => {
-            let Some(patch) = project
-                .patch_library
-                .iter_mut()
-                .find(|patch| patch.id == *patch_id)
-            else {
-                return Err(vec![RuntimeDiagnostic::structured_error(
-                    "collaboration.target.missing-project-patch-definition",
-                    format!(
-                        "project patch definition {patch_id} is not loaded in this runtime session"
-                    ),
-                    serde_json::json!({ "patchId": patch_id, "target": target }),
-                )]);
-            };
-            patch.graph = graph;
-            patch.revision = patch.graph.revision.clone();
-        }
-        PatchPath::PackagePatchDefinition { .. } | PatchPath::EmbeddedPatchInstance { .. } => {
-            return Err(vec![RuntimeDiagnostic::structured_error(
-                "collaboration.target.unsupported",
-                "collaboration target cannot be mutated in the active Runtime session",
-                serde_json::json!({ "target": target }),
-            )]);
-        }
+    } else if let PatchPath::ProjectPatchDefinition { patch_id } = &target.path {
+        let patch = project
+            .patch_library
+            .iter_mut()
+            .find(|patch| patch.id == *patch_id)
+            .expect("project patch definition lookup was already proven");
+        patch.graph = graph;
+        patch.revision = patch.graph.revision.clone();
     }
 
     Ok((project, next_view_revision))
@@ -2963,7 +2925,7 @@ fn created_at_now() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
 
     use serde_json::{Value, json};
 
@@ -4706,7 +4668,7 @@ mod tests {
             },
         )
         .expect_err("package patch target should not be mutable");
-        assert_eq!(paste_error.0[0].code, "paste.target.missing-graph");
+        assert_eq!(paste_error.0[0].code, "paste.target.unsupported");
 
         let unresolved = super::unresolved_object_diagnostics(&GraphDocument {
             schema: "skenion.graph".to_owned(),
@@ -4725,6 +4687,714 @@ mod tests {
             ],
             edges: Vec::new(),
         });
+        assert!(
+            unresolved[0]
+                .message
+                .contains("object text could not be resolved")
+        );
+    }
+
+    #[test]
+    fn active_v02_failure_paths_cover_registry_restore_and_history_rejection() {
+        let mut duplicate_request = sample_project_v02();
+        duplicate_request
+            .nodes
+            .push(duplicate_request.nodes[0].clone());
+        let mut duplicate_session = RuntimeSession::default();
+        let duplicate_load = duplicate_session.load_project_v02(duplicate_request);
+        assert!(!duplicate_load.ok);
+        assert!(
+            duplicate_load.diagnostics[0]
+                .message
+                .contains("duplicate node definition")
+        );
+
+        let mut invalid_request = sample_project_v02();
+        let mut invalid_document = super::project_document_from_request_v02(&invalid_request);
+        invalid_document.graph.nodes[0].kind = "missing.kind".to_owned();
+        invalid_request.document = Some(invalid_document.clone());
+        let mut invalid_session = RuntimeSession {
+            project: Some(invalid_document),
+            nodes_v02: invalid_request.nodes,
+            revision: 1,
+            view_revision: 1,
+            ..RuntimeSession::default()
+        };
+
+        let validation = invalid_session.validate_current();
+        let plan = invalid_session.plan_current();
+        assert!(!validation.ok);
+        assert!(!plan.ok);
+        assert!(plan.snapshot.plan.is_none());
+        assert!(
+            plan.diagnostics[0]
+                .message
+                .contains("missing node definition")
+        );
+
+        let mut update_session = RuntimeSession::default();
+        assert!(update_session.load_project_v02(sample_project_v02()).ok);
+        let before = update_session
+            .project_document_v02()
+            .expect("project should load");
+        let mut after = before.clone();
+        after.graph.revision = "2".to_owned();
+        after.revision = "2".to_owned();
+        update_session
+            .nodes_v02
+            .push(update_session.nodes_v02[0].clone());
+        let update = update_session.apply_project_document_update(
+            before,
+            after,
+            1,
+            described_runtime_mutation("apply described project document"),
+            None,
+        );
+        assert!(!update.ok);
+        assert!(
+            update.diagnostics[0]
+                .message
+                .contains("duplicate node definition")
+        );
+
+        let mut restore_plan_session = RuntimeSession::default();
+        assert!(
+            restore_plan_session
+                .load_project_v02(sample_project_v02())
+                .ok
+        );
+        let mut invalid_restore = restore_plan_session
+            .project_document_v02()
+            .expect("project should load");
+        invalid_restore.graph.nodes[0].kind = "missing.kind".to_owned();
+        let restored = restore_plan_session.restore_project_document_state(
+            invalid_restore,
+            1,
+            RuntimeHistoryEntryKind::Undo,
+            described_runtime_mutation("restore invalid project"),
+            empty_runtime_mutation(),
+            None,
+        );
+        assert!(!restored.ok);
+        assert!(
+            restored.diagnostics[0]
+                .message
+                .contains("missing node definition")
+        );
+
+        let mut restore_registry_session = RuntimeSession::default();
+        assert!(
+            restore_registry_session
+                .load_project_v02(sample_project_v02())
+                .ok
+        );
+        let restore_project = restore_registry_session
+            .project_document_v02()
+            .expect("project should load");
+        restore_registry_session
+            .nodes_v02
+            .push(restore_registry_session.nodes_v02[0].clone());
+        let restored = restore_registry_session.restore_project_document_state(
+            restore_project,
+            1,
+            RuntimeHistoryEntryKind::Redo,
+            described_runtime_mutation("restore registry project"),
+            empty_runtime_mutation(),
+            None,
+        );
+        assert!(!restored.ok);
+        assert!(
+            restored.diagnostics[0]
+                .message
+                .contains("duplicate node definition")
+        );
+
+        let mut history_session = RuntimeSession::default();
+        assert!(history_session.load_project_v02(sample_project_v02()).ok);
+        let before = history_session
+            .project_document_v02()
+            .expect("project should load");
+        let mut after = before.clone();
+        after.graph.nodes[0].kind = "missing.kind".to_owned();
+        let entry = HistoryEntry::ProjectDocument {
+            event_id: "event".to_owned(),
+            actor_id: None,
+            before: Box::new(before),
+            after: Box::new(after),
+            before_view_revision: 1,
+            after_view_revision: 2,
+            mutation: empty_runtime_mutation(),
+            inverse_mutation: empty_runtime_mutation(),
+        };
+
+        let outcome = history_session.apply_history_entry(entry, super::HistoryDirection::Redo);
+        assert!(!outcome.applied);
+
+        let mut view_session = RuntimeSession::default();
+        let loaded = view_session.load_project_v02(sample_project_v02());
+        assert!(loaded.ok);
+        let start = loaded
+            .snapshot
+            .view_state()
+            .expect("v0.2 load should include view state")
+            .canvas
+            .nodes["value_1"]
+            .clone();
+        let mut moved = start.clone();
+        moved.x += 12.0;
+        let view_patch = view_session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: "value_1".to_owned(),
+                    from: Some(start),
+                    to: moved,
+                }],
+            }),
+            actor_id: None,
+            client_id: None,
+            description: Some("v0.2 active view move".to_owned()),
+        });
+        assert!(view_patch.ok);
+        assert!(view_patch.applied);
+
+        let mut mutation = graph_mutation(set_value_patch("old", 1.0));
+        mutation.view_patch = Some(RuntimeViewPatch {
+            base_view_revision: 1,
+            ops: Vec::new(),
+        });
+        super::normalize_mutation_base_revisions(&mut mutation, "graph-new".to_owned(), 9);
+        assert_eq!(
+            mutation
+                .graph_patch
+                .as_ref()
+                .map(|patch| patch.base_revision.as_str()),
+            Some("graph-new")
+        );
+        assert_eq!(
+            mutation
+                .view_patch
+                .as_ref()
+                .map(|patch| patch.base_view_revision),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn history_delta_helpers_merge_non_top_project_patch_and_view_edits() {
+        let mut before = super::project_document_from_request_v02(&sample_project_v02());
+        before.patch_library = vec![
+            patch_definition_v02("identity"),
+            patch_definition_v02("before-only"),
+        ];
+        before.view_state.canvas.nodes.insert(
+            "before_only_view".to_owned(),
+            crate::CanvasNodeView {
+                x: 11.0,
+                y: 12.0,
+                width: None,
+                height: None,
+                collapsed: None,
+            },
+        );
+
+        let mut after = before.clone();
+        after.graph.nodes.push(graph_node_v02("root_added"));
+        after.graph.revision = "2".to_owned();
+        after.revision = "2".to_owned();
+        after.view_state.canvas.nodes.insert(
+            "root_added".to_owned(),
+            crate::CanvasNodeView {
+                x: 400.0,
+                y: 96.0,
+                width: None,
+                height: None,
+                collapsed: None,
+            },
+        );
+        after.view_state.canvas.nodes.remove("before_only_view");
+        after
+            .patch_library
+            .retain(|patch| patch.id != "before-only");
+        after.patch_library[0]
+            .graph
+            .nodes
+            .push(graph_node_v02("patch_added"));
+        after.patch_library[0].graph.revision = "2".to_owned();
+        after.patch_library[0].revision = "2".to_owned();
+
+        let mut current = after.clone();
+        current.graph.nodes.push(graph_node_v02("other_actor_root"));
+        current
+            .patch_library
+            .push(patch_definition_v02("current-only"));
+        current
+            .patch_library
+            .push(patch_definition_v02("before-only"));
+        current.patch_library[0]
+            .graph
+            .nodes
+            .push(graph_node_v02("other_actor_patch"));
+        current.view_state.canvas.nodes.insert(
+            "other_actor_root".to_owned(),
+            crate::CanvasNodeView {
+                x: 800.0,
+                y: 96.0,
+                width: None,
+                height: None,
+                collapsed: None,
+            },
+        );
+
+        let undone = super::project_document_history_delta(
+            &current,
+            &before,
+            &after,
+            super::HistoryDirection::Undo,
+        );
+        assert!(
+            !undone
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.id == "root_added")
+        );
+        assert!(
+            undone
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.id == "other_actor_root")
+        );
+        assert!(
+            !undone.patch_library[0]
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.id == "patch_added")
+        );
+        assert!(
+            undone.patch_library[0]
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.id == "other_actor_patch")
+        );
+        assert!(
+            undone
+                .view_state
+                .canvas
+                .nodes
+                .contains_key("other_actor_root")
+        );
+
+        let redone = super::project_document_history_delta(
+            &undone,
+            &before,
+            &after,
+            super::HistoryDirection::Redo,
+        );
+        assert!(
+            redone
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.id == "root_added")
+        );
+        assert!(
+            redone
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.id == "other_actor_root")
+        );
+        assert!(
+            redone.patch_library[0]
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.id == "patch_added")
+        );
+
+        let mut before_graph = before.graph.clone();
+        before_graph.nodes.push(graph_node_v02("before_only"));
+        let mut after_graph = before_graph.clone();
+        after_graph.nodes.retain(|node| node.id != "before_only");
+        let mut current_graph = after_graph.clone();
+        current_graph.nodes.push(graph_node_v02("before_only"));
+        current_graph.nodes.push(graph_node_v02("not_in_before"));
+        assert!(super::undo_graph_history_delta_v02(
+            &mut current_graph.clone(),
+            &before_graph,
+            &after_graph
+        ));
+        assert!(super::redo_graph_history_delta_v02(
+            &mut current_graph,
+            &before_graph,
+            &after_graph
+        ));
+
+        let _ = super::view_state_history_delta_v02(
+            &before.view_state,
+            &before.view_state,
+            &after.view_state,
+            super::HistoryDirection::Undo,
+        );
+        let _ = super::view_state_history_delta_v02(
+            &before.view_state,
+            &before.view_state,
+            &after.view_state,
+            super::HistoryDirection::Redo,
+        );
+    }
+
+    #[test]
+    fn legacy_conversion_helpers_cover_surface_ports_models_and_id_sanitizing() {
+        let definition: crate::NodeDefinition = serde_json::from_value(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.matrix",
+          "version": "0.1.0",
+          "displayName": "Matrix",
+          "category": "Test",
+          "surface": { "palette": "cyan" },
+          "ports": [
+            { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" } },
+            { "id": "resource", "direction": "input", "type": { "flow": "resource", "dataKind": "resource.buffer" } },
+            { "id": "stream", "direction": "output", "type": { "flow": "stream", "dataKind": "io.midi" } }
+          ],
+          "execution": { "model": "audio_block" },
+          "state": { "persistent": true },
+          "permissions": [],
+          "capabilities": []
+        }))
+        .expect("legacy definition should parse");
+
+        let lifted = super::node_definition_v01_to_v02(&definition);
+        assert_eq!(
+            lifted
+                .surface
+                .as_ref()
+                .and_then(|surface| surface.palette.as_deref()),
+            Some("cyan")
+        );
+        assert_eq!(lifted.ports[0].rate, Some(crate::PortRateV02::Audio));
+        assert_eq!(lifted.ports[1].rate, Some(crate::PortRateV02::Resource));
+        assert_eq!(lifted.ports[2].rate, Some(crate::PortRateV02::Io));
+
+        let lowered = super::node_definition_v02_to_v01(&lifted);
+        assert_eq!(
+            lowered
+                .surface
+                .as_ref()
+                .and_then(|surface| surface.palette.as_deref()),
+            Some("cyan")
+        );
+
+        let cases = [
+            (
+                crate::ExecutionModel::Event,
+                skenion_contracts::ExecutionModelV02::Event,
+            ),
+            (
+                crate::ExecutionModel::Value,
+                skenion_contracts::ExecutionModelV02::Value,
+            ),
+            (
+                crate::ExecutionModel::Frame,
+                skenion_contracts::ExecutionModelV02::Frame,
+            ),
+            (
+                crate::ExecutionModel::AudioBlock,
+                skenion_contracts::ExecutionModelV02::AudioBlock,
+            ),
+            (
+                crate::ExecutionModel::VideoFrame,
+                skenion_contracts::ExecutionModelV02::VideoFrame,
+            ),
+            (
+                crate::ExecutionModel::GpuPass,
+                skenion_contracts::ExecutionModelV02::GpuPass,
+            ),
+            (
+                crate::ExecutionModel::AsyncResource,
+                skenion_contracts::ExecutionModelV02::AsyncResource,
+            ),
+            (
+                crate::ExecutionModel::ScriptControl,
+                skenion_contracts::ExecutionModelV02::ScriptControl,
+            ),
+            (
+                crate::ExecutionModel::NativePlugin,
+                skenion_contracts::ExecutionModelV02::NativePlugin,
+            ),
+        ];
+        for (legacy, active) in cases {
+            assert_eq!(super::execution_model_v01_to_v02(&legacy), active);
+            assert_eq!(super::execution_model_v02_to_v01(&active), legacy);
+        }
+        assert_eq!(super::sanitize_id_fragment("bad id/value"), "bad_id_value");
+    }
+
+    #[test]
+    fn paste_private_helpers_cover_fragment_and_edge_conflict_errors() {
+        let graph = sample_project_v02().graph;
+        let mut invalid_fragment = paste_operation("1").request;
+        invalid_fragment.fragment.edges[0].target.node_id = "outside".to_owned();
+        let invalid = super::paste_graph_fragment_into_graph_v02(graph.clone(), &invalid_fragment)
+            .expect_err("outside endpoint should fail analysis");
+        assert_eq!(
+            invalid.0[0].code,
+            "paste.fragment.fragment-edge-outside-selection"
+        );
+
+        let mut edge_conflict = paste_operation("1").request;
+        edge_conflict.options = Some(skenion_contracts::PasteGraphFragmentOptions {
+            outside_endpoint_policy: None,
+            id_conflict_policy: Some(skenion_contracts::IdConflictPolicy::Reject),
+            preserve_relative_positions: None,
+        });
+        edge_conflict.fragment.nodes[0].id = "new_value".to_owned();
+        edge_conflict.fragment.nodes[1].id = "new_target".to_owned();
+        edge_conflict.fragment.edges[0].id = "edge_value_target".to_owned();
+        edge_conflict.fragment.edges[0].source.node_id = "new_value".to_owned();
+        edge_conflict.fragment.edges[0].target.node_id = "new_target".to_owned();
+        let edge_conflict = super::paste_graph_fragment_into_graph_v02(graph, &edge_conflict)
+            .expect_err("duplicate edge id should fail");
+        assert_eq!(edge_conflict.0[0].code, "paste.edge-id-conflict");
+        assert_eq!(edge_conflict.1.edge_id_map.get("edge_value_target"), None);
+
+        let mut used_edges = HashSet::new();
+        used_edges.insert("edge_2".to_owned());
+        assert_eq!(super::next_available_edge_id("edge", &used_edges), "edge_3");
+
+        let mut unsupported = paste_operation("1").request;
+        unsupported.target.path = skenion_contracts::PatchPath::EmbeddedPatchInstance {
+            owner_path: vec!["root".to_owned()],
+            node_id: "subpatch".to_owned(),
+        };
+        let unsupported = super::paste_graph_fragment_into_project_v02(
+            super::project_document_from_request_v02(&sample_project_v02()),
+            1,
+            &unsupported,
+        )
+        .expect_err("embedded patch target should fail");
+        assert_eq!(unsupported.0[0].code, "paste.target.unsupported");
+
+        let mut missing_graph = paste_operation("1").request;
+        missing_graph.target.path = skenion_contracts::PatchPath::ProjectPatchDefinition {
+            patch_id: "missing".to_owned(),
+        };
+        let missing_graph = super::paste_graph_fragment_into_project_v02(
+            super::project_document_from_request_v02(&sample_project_v02()),
+            1,
+            &missing_graph,
+        )
+        .expect_err("missing project patch should fail");
+        assert_eq!(missing_graph.0[0].code, "paste.target.missing-graph");
+
+        let remapped = super::remap_edge_v02(
+            &EdgeSpecV02 {
+                id: "edge".to_owned(),
+                source: EdgeEndpointV02 {
+                    node_id: "outside_source".to_owned(),
+                    port_id: "out".to_owned(),
+                },
+                target: EdgeEndpointV02 {
+                    node_id: "outside_target".to_owned(),
+                    port_id: "in".to_owned(),
+                },
+                resolved_type: None,
+                order: None,
+                enabled: None,
+                adapter: None,
+                feedback: None,
+                style_override: None,
+                label: None,
+                description: None,
+            },
+            &BTreeMap::new(),
+            "edge_2".to_owned(),
+        );
+        assert_eq!(remapped.source.node_id, "outside_source");
+        assert_eq!(remapped.target.node_id, "outside_target");
+        assert_eq!(super::next_graph_revision("2"), "3");
+        assert_eq!(super::next_graph_revision("rev"), "rev+1");
+    }
+
+    #[test]
+    fn collaboration_private_helpers_cover_patch_target_error_matrix() {
+        let mut project = super::project_document_from_request_v02(&sample_project_v02());
+        project.patch_library.push(patch_definition_v02("identity"));
+        let root_target = skenion_contracts::GraphTargetRef {
+            path: skenion_contracts::PatchPath::Root,
+            base_revision: "1".to_owned(),
+            target_revision: None,
+        };
+        let patch_target = skenion_contracts::GraphTargetRef {
+            path: skenion_contracts::PatchPath::ProjectPatchDefinition {
+                patch_id: "identity".to_owned(),
+            },
+            base_revision: "1".to_owned(),
+            target_revision: None,
+        };
+
+        let patch_view_error = super::apply_collaboration_changes_to_project_v02(
+            project.clone(),
+            1,
+            &patch_target,
+            &[collaboration_change(json!({
+              "op": "node.add",
+              "changeId": "add-with-view",
+              "node": value_node_v02_json("patch_added"),
+              "view": { "x": 1.0, "y": 2.0 }
+            }))],
+        )
+        .expect_err("patch definition views are not active Runtime state");
+        assert_eq!(
+            patch_view_error[0].code.as_deref(),
+            Some("collaboration.patch-view-unsupported")
+        );
+
+        let patch_move_error = super::apply_collaboration_changes_to_project_v02(
+            project.clone(),
+            1,
+            &patch_target,
+            &[collaboration_change(json!({
+              "op": "node.move",
+              "changeId": "move-patch-node",
+              "nodeId": "patch_value",
+              "to": { "x": 1.0, "y": 2.0 }
+            }))],
+        )
+        .expect_err("patch definition move view should fail");
+        assert_eq!(
+            patch_move_error[0].code.as_deref(),
+            Some("collaboration.patch-view-unsupported")
+        );
+
+        let missing_move = super::apply_collaboration_changes_to_project_v02(
+            project.clone(),
+            1,
+            &root_target,
+            &[collaboration_change(json!({
+              "op": "node.move",
+              "changeId": "move-missing",
+              "nodeId": "missing",
+              "to": { "x": 1.0, "y": 2.0 }
+            }))],
+        )
+        .expect_err("moving a missing node should fail");
+        assert_eq!(
+            missing_move[0].code.as_deref(),
+            Some("collaboration.node-missing")
+        );
+
+        let view_conflict = super::apply_collaboration_changes_to_project_v02(
+            project.clone(),
+            1,
+            &root_target,
+            &[collaboration_change(json!({
+              "op": "node.move",
+              "changeId": "move-conflict",
+              "nodeId": "value_1",
+              "from": { "x": -1.0, "y": -1.0 },
+              "to": { "x": 1.0, "y": 2.0 }
+            }))],
+        )
+        .expect_err("move from mismatch should fail");
+        assert_eq!(
+            view_conflict[0].code.as_deref(),
+            Some("collaboration.view-conflict")
+        );
+
+        let missing_delete = super::apply_collaboration_changes_to_project_v02(
+            project.clone(),
+            1,
+            &root_target,
+            &[collaboration_change(json!({
+              "op": "node.delete",
+              "changeId": "delete-missing",
+              "nodeId": "missing"
+            }))],
+        )
+        .expect_err("deleting a missing node should fail");
+        assert_eq!(
+            missing_delete[0].code.as_deref(),
+            Some("collaboration.node-missing")
+        );
+
+        let duplicate_edge = super::apply_collaboration_changes_to_project_v02(
+            project.clone(),
+            1,
+            &root_target,
+            &[collaboration_change(json!({
+              "op": "edge.connect",
+              "changeId": "connect-duplicate",
+              "edge": {
+                "id": "edge_value_target",
+                "source": { "nodeId": "value_1", "portId": "value" },
+                "target": { "nodeId": "target_1", "portId": "cold" }
+              }
+            }))],
+        )
+        .expect_err("duplicate edge id should fail");
+        assert_eq!(
+            duplicate_edge[0].code.as_deref(),
+            Some("collaboration.edge-id-conflict")
+        );
+
+        let missing_graph_target = skenion_contracts::GraphTargetRef {
+            path: skenion_contracts::PatchPath::HelpWorkingCopy {
+                working_copy_id: "missing-help".to_owned(),
+                source_package_id: None,
+                source_patch_id: None,
+            },
+            base_revision: "1".to_owned(),
+            target_revision: None,
+        };
+        let missing_graph = super::apply_collaboration_changes_to_project_v02(
+            project.clone(),
+            1,
+            &missing_graph_target,
+            &[],
+        )
+        .expect_err("missing help graph should fail");
+        assert_eq!(
+            missing_graph[0].code.as_deref(),
+            Some("collaboration.target.missing-graph")
+        );
+
+        let unsupported_target = skenion_contracts::GraphTargetRef {
+            path: skenion_contracts::PatchPath::PackagePatchDefinition {
+                package_id: "pkg".to_owned(),
+                patch_id: "help".to_owned(),
+                version: None,
+            },
+            base_revision: "1".to_owned(),
+            target_revision: None,
+        };
+        let unsupported =
+            super::apply_collaboration_changes_to_project_v02(project, 1, &unsupported_target, &[])
+                .expect_err("package patch target should fail");
+        assert_eq!(
+            unsupported[0].code.as_deref(),
+            Some("collaboration.target.unsupported")
+        );
+
+        let mut unresolved_graph = sample_project_v02().graph;
+        unresolved_graph.nodes.push(
+            serde_json::from_value(json!({
+              "id": "unresolved_v02",
+              "kind": "core.unresolved-object",
+              "kindVersion": "0.2.0",
+              "params": {},
+              "ports": []
+            }))
+            .expect("unresolved v0.2 node should parse"),
+        );
+        let unresolved = super::unresolved_object_diagnostics_v02(&unresolved_graph);
         assert!(
             unresolved[0]
                 .message
@@ -5064,6 +5734,26 @@ mod tests {
         }
     }
 
+    fn empty_runtime_mutation() -> RuntimeMutationRequest {
+        RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: None,
+            actor_id: None,
+            client_id: None,
+            description: None,
+        }
+    }
+
+    fn described_runtime_mutation(description: &str) -> RuntimeMutationRequest {
+        RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: None,
+            actor_id: None,
+            client_id: None,
+            description: Some(description.to_owned()),
+        }
+    }
+
     fn set_value_patch(base_revision: &str, value: f64) -> GraphPatch {
         graph_patch(json!({
           "schema": "skenion.graph.patch",
@@ -5134,6 +5824,40 @@ mod tests {
             }
           }
         })
+    }
+
+    fn graph_node_v02(id: &str) -> crate::GraphNodeV02 {
+        serde_json::from_value(value_node_v02_json(id)).expect("v0.2 graph node should parse")
+    }
+
+    fn value_node_v02_json(id: &str) -> Value {
+        json!({
+          "id": id,
+          "kind": "core.float",
+          "kindVersion": "0.2.0",
+          "params": {},
+          "ports": value_f32_ports_v02_json()
+        })
+    }
+
+    fn patch_definition_v02(id: &str) -> skenion_contracts::PatchDefinitionV02 {
+        serde_json::from_value(json!({
+          "id": id,
+          "revision": "1",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.2.0",
+            "id": format!("{id}-graph"),
+            "revision": "1",
+            "nodes": [value_node_v02_json("patch_value")],
+            "edges": []
+          }
+        }))
+        .expect("patch definition should parse")
+    }
+
+    fn collaboration_change(value: Value) -> RuntimeCollaborationChange {
+        serde_json::from_value(value).expect("collaboration change should parse")
     }
 
     fn f32_value(value: f64) -> ControlValue {
