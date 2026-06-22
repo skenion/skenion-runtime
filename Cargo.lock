@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "skenion-runtime"
-version = "0.41.1"
+version = "0.43.0"
 dependencies = [
  "axum",
  "bytemuck",

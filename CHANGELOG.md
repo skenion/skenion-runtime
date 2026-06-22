@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.43.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.41.1...skenion-runtime-v0.43.0) (2026-06-22)
+
+
+### Features
+
+* **runtime:** build multi-arch release assets ([ff4311b](https://github.com/echovisionlab/skenion-runtime/commit/ff4311b96ff293c0bf9325150abd3af7560d2a24)), closes [#106](https://github.com/echovisionlab/skenion-runtime/issues/106)
+* **runtime:** use current 0.1 contract surface ([84ff11c](https://github.com/echovisionlab/skenion-runtime/commit/84ff11cf6144ebfbbb7703784b1105e50f6a36ff))
+
+
+### Bug Fixes
+
+* **ci:** force train release-as ([902f340](https://github.com/echovisionlab/skenion-runtime/commit/902f34030ec5471c9bdd3e49ac73d2d70ad734f2))
+* **ci:** require train release dispatch ([1a725b4](https://github.com/echovisionlab/skenion-runtime/commit/1a725b40e3c6a3c40ff8ba0ce91c1fd7ce7ba4a5))
+* **runtime:** align contracts dependency with 0.43.0 ([9c7e96b](https://github.com/echovisionlab/skenion-runtime/commit/9c7e96bdf2c7e8921f7a2a334d6ec07fdbf474ca))
+
 ## [0.41.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.41.0...skenion-runtime-v0.41.1) (2026-06-22)
 
 
