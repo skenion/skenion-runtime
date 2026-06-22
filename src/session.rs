@@ -928,18 +928,19 @@ impl RuntimeSession {
         ));
         let mut next_view_state =
             reconcile_view_state_with_graph(&next_graph, Some(previous_view_state.clone()));
-        let mut inverse_view_patch = None;
-        if let Some(view_patch) = &mutation.view_patch {
+        let view_patch = mutation
+            .view_patch
+            .as_ref()
+            .expect("view patch should exist after no-op and active v0.1 graph patch rejection");
+        let (patched_view_state, inverse_patch) =
             match apply_view_patch_to_view_state(&next_graph, next_view_state, view_patch) {
-                Ok((patched_view_state, inverse_patch)) => {
-                    next_view_state = patched_view_state;
-                    inverse_view_patch = Some(inverse_patch);
-                }
+                Ok(result) => result,
                 Err(diagnostics) => {
                     return self.patch_response(false, false, false, diagnostics);
                 }
-            }
-        }
+            };
+        next_view_state = patched_view_state;
+        let inverse_view_patch = Some(inverse_patch);
         next_view_state = runtime_owned_view_state(next_view_state);
         let view_changed = previous_view_state != next_view_state;
 
@@ -5194,6 +5195,21 @@ mod tests {
         .expect_err("missing project patch should fail");
         assert_eq!(missing_graph.0[0].code, "paste.target.missing-graph");
 
+        let mut project_with_patch =
+            super::project_document_from_request_v02(&sample_project_v02());
+        project_with_patch
+            .patch_library
+            .push(patch_definition_v02("identity"));
+        let mut patch_paste = paste_operation("1").request;
+        patch_paste.target.path = skenion_contracts::PatchPath::ProjectPatchDefinition {
+            patch_id: "identity".to_owned(),
+        };
+        let (patched_project, _, _, revision_after) =
+            super::paste_graph_fragment_into_project_v02(project_with_patch, 1, &patch_paste)
+                .expect("project patch paste should apply");
+        assert_eq!(revision_after, "2");
+        assert_eq!(patched_project.patch_library[0].revision, "2");
+
         let remapped = super::remap_edge_v02(
             &EdgeSpecV02 {
                 id: "edge".to_owned(),
@@ -5256,6 +5272,19 @@ mod tests {
             patch_view_error[0].code.as_deref(),
             Some("collaboration.patch-view-unsupported")
         );
+
+        let patch_add = super::apply_collaboration_changes_to_project_v02(
+            project.clone(),
+            1,
+            &patch_target,
+            &[collaboration_change(json!({
+              "op": "node.add",
+              "changeId": "add-patch-node",
+              "node": value_node_v02_json("patch_added_without_view")
+            }))],
+        )
+        .expect("patch definition node add without view should apply");
+        assert_eq!(patch_add.0.patch_library[0].revision, "2");
 
         let patch_move_error = super::apply_collaboration_changes_to_project_v02(
             project.clone(),
