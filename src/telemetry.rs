@@ -573,7 +573,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        DiagnosticSeverity, GraphDocument, GraphNode, RuntimeDiagnostic, RuntimeProjectSnapshot,
+        DiagnosticSeverity, GraphDocument, GraphNode, ProjectDocumentV02, RuntimeDiagnostic,
         create_default_view_state_for_graph,
     };
 
@@ -964,11 +964,7 @@ mod tests {
             }],
             edges: Vec::new(),
         });
-        let project = graph.map(|graph| RuntimeProjectSnapshot {
-            view_state: create_default_view_state_for_graph(&graph),
-            graph,
-            nodes: Vec::new(),
-        });
+        let project = graph.as_ref().map(project_document);
         RuntimeSessionSnapshot {
             session_revision: if loaded { 5 } else { 0 },
             view_revision: if loaded { 1 } else { 0 },
@@ -977,6 +973,32 @@ mod tests {
             diagnostics: Vec::new(),
             plan: None,
         }
+    }
+
+    fn project_document(graph: &GraphDocument) -> ProjectDocumentV02 {
+        serde_json::from_value(json!({
+            "schema": "skenion.project",
+            "schemaVersion": "0.2.0",
+            "id": format!("{}-project", graph.id),
+            "revision": graph.revision.clone(),
+            "graph": {
+                "schema": "skenion.graph",
+                "schemaVersion": "0.2.0",
+                "id": graph.id.clone(),
+                "revision": graph.revision.clone(),
+                "nodes": graph.nodes.iter().map(|node| json!({
+                    "id": node.id.clone(),
+                    "kind": node.kind.clone(),
+                    "kindVersion": node.kind_version.clone(),
+                    "params": node.params.clone(),
+                    "ports": []
+                })).collect::<Vec<_>>(),
+                "edges": []
+            },
+            "viewState": create_default_view_state_for_graph(graph),
+            "patchLibrary": []
+        }))
+        .expect("runtime telemetry test project document should parse")
     }
 
     fn preview_status(state: PreviewState) -> RuntimePreviewStatusResponse {

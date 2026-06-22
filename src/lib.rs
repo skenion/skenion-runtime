@@ -160,8 +160,8 @@ pub use server::{
 };
 pub use session::{
     RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
-    RuntimePatchResponse, RuntimeProjectSnapshot, RuntimeSession, RuntimeSessionResponse,
-    RuntimeSessionSnapshot, RuntimeViewPatch, RuntimeViewPatchOperation, SessionRunRequest,
+    RuntimePatchResponse, RuntimeSession, RuntimeSessionResponse, RuntimeSessionSnapshot,
+    RuntimeViewPatch, RuntimeViewPatchOperation, SessionRunRequest,
 };
 pub use session_registry::{
     DEFAULT_SESSION_ID, RuntimeSessionEvent, RuntimeSessionEventKind, RuntimeSessionRecord,

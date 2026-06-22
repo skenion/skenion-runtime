@@ -589,7 +589,7 @@ mod tests {
     use crate::{
         ExecutionGroup, ExecutionModel, GraphDocument, GraphNode, PREVIEW_TELEMETRY_SCHEMA,
         PREVIEW_TELEMETRY_SCHEMA_VERSION, PlanEdge, PlanNode, Port, PreviewTelemetryHeartbeat,
-        RuntimeProjectSnapshot, RuntimeSessionSnapshot, create_default_view_state_for_graph,
+        ProjectDocumentV02, RuntimeSessionSnapshot, create_default_view_state_for_graph,
         preview_manager::PreviewHandle, read_preview_control_state_snapshot,
         telemetry::write_preview_telemetry_heartbeat,
     };
@@ -1327,14 +1327,36 @@ fn fs_main() -> @location(0) vec4<f32> {
             session_revision,
             view_revision: 0,
             control_revision: 0,
-            project: Some(RuntimeProjectSnapshot {
-                view_state: create_default_view_state_for_graph(&graph),
-                graph,
-                nodes: Vec::new(),
-            }),
+            project: Some(project_document(&graph)),
             diagnostics: Vec::new(),
             plan: Some(plan(graph_revision)),
         }
+    }
+
+    fn project_document(graph: &GraphDocument) -> ProjectDocumentV02 {
+        serde_json::from_value(json!({
+            "schema": "skenion.project",
+            "schemaVersion": "0.2.0",
+            "id": format!("{}-project", graph.id),
+            "revision": graph.revision.clone(),
+            "graph": {
+                "schema": "skenion.graph",
+                "schemaVersion": "0.2.0",
+                "id": graph.id.clone(),
+                "revision": graph.revision.clone(),
+                "nodes": graph.nodes.iter().map(|node| json!({
+                    "id": node.id.clone(),
+                    "kind": node.kind.clone(),
+                    "kindVersion": node.kind_version.clone(),
+                    "params": node.params.clone(),
+                    "ports": []
+                })).collect::<Vec<_>>(),
+                "edges": []
+            },
+            "viewState": create_default_view_state_for_graph(graph),
+            "patchLibrary": []
+        }))
+        .expect("runtime test project document should parse")
     }
 
     fn empty_snapshot() -> RuntimeSessionSnapshot {

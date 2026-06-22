@@ -4,12 +4,14 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
     AudioBackendConfig, AudioDspPlan, AudioDspPlanOptions, DEFAULT_HOST, DEFAULT_PORT,
-    ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit, ServeRuntimeOptions,
-    build_audio_dsp_plan, build_execution_plan, format_dummy_execution_text,
-    format_midi_clock_fixture_report_text, format_plan_text, load_graph_document,
-    load_node_definition, run_dummy_execution, run_midi_clock_fixture_file, run_preview_window,
-    run_render_preview_window, serve_runtime, serve_runtime_with_options,
-    start_default_audio_output_backend, validate_project,
+    ExecutionPlan, NodeDefinitionV02, NodeRegistry, PreviewDocument, PreviewFrameLimit,
+    ProjectDocumentV02, ProjectRequestV02, RunProjectRequestV02, RuntimeDiagnostic,
+    ServeRuntimeOptions, build_audio_dsp_plan, build_execution_plan,
+    build_execution_plan_request_v02, build_execution_plan_run_request_v02,
+    format_dummy_execution_text, format_midi_clock_fixture_report_text, format_plan_text,
+    load_graph_document, load_node_definition, run_dummy_execution, run_midi_clock_fixture_file,
+    run_preview_window, run_render_preview_window, serve_runtime, serve_runtime_with_options,
+    start_default_audio_output_backend, validate_project, validate_project_request_v02,
 };
 
 #[derive(Debug, Parser)]
@@ -21,18 +23,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Validate a Skenion Node Definition Manifest v0.1 JSON file.
-    ValidateNode {
+    /// Validate a legacy Skenion Node Definition Manifest v0.1 JSON file.
+    LegacyValidateNode {
         /// Path to the node definition manifest.
         path: PathBuf,
     },
-    /// Validate a Skenion Graph Document v0.1 JSON file.
-    ValidateGraph {
+    /// Validate a legacy Skenion Graph Document v0.1 JSON file.
+    LegacyValidateGraph {
         /// Path to the graph document.
         path: PathBuf,
     },
-    /// Validate a graph against a node definition registry.
-    ValidateProject {
+    /// Validate a legacy graph v0.1 document against a node definition registry.
+    LegacyValidateProject {
         /// Path to the graph document.
         #[arg(long)]
         graph: PathBuf,
@@ -40,20 +42,23 @@ enum Command {
         #[arg(long)]
         nodes: PathBuf,
     },
-    /// Build an execution plan skeleton for a graph and node registry.
+    /// Validate an active ProjectDocumentV02 or v0.2 project request file.
+    ValidateProject {
+        /// Path to the v0.2 project JSON file.
+        #[arg(long)]
+        project: PathBuf,
+    },
+    /// Build an execution plan skeleton for an active v0.2 project file.
     Plan {
-        /// Path to the graph document.
+        /// Path to the v0.2 project JSON file.
         #[arg(long)]
-        graph: PathBuf,
-        /// Directory containing node definition manifests.
-        #[arg(long)]
-        nodes: PathBuf,
+        project: PathBuf,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Build an audio DSP plan with endpoint, clock-domain, and bridge metadata.
-    AudioPlan {
+    /// Build a legacy v0.1 audio DSP plan with endpoint, clock-domain, and bridge metadata.
+    LegacyAudioPlan {
         /// Path to the graph document.
         #[arg(long)]
         graph: PathBuf,
@@ -72,12 +77,9 @@ enum Command {
     },
     /// Run a deterministic dummy execution from an execution plan.
     Run {
-        /// Path to the graph document.
+        /// Path to the v0.2 project JSON file.
         #[arg(long)]
-        graph: PathBuf,
-        /// Directory containing node definition manifests.
-        #[arg(long)]
-        nodes: PathBuf,
+        project: PathBuf,
         /// Number of dummy frames to simulate.
         #[arg(long, default_value_t = 1)]
         frames: usize,
@@ -85,8 +87,8 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Open a local placeholder preview window driven by the execution plan.
-    Preview {
+    /// Open a local placeholder preview window from a legacy v0.1 graph.
+    LegacyPreview {
         /// Path to the graph document.
         #[arg(long)]
         graph: PathBuf,
@@ -127,8 +129,8 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         frames: usize,
     },
-    /// Run the CPAL default output backend for an audio.output DSP graph.
-    AudioOutput {
+    /// Run the CPAL default output backend for a legacy v0.1 audio.output DSP graph.
+    LegacyAudioOutput {
         /// Path to the graph document.
         #[arg(long)]
         graph: PathBuf,
@@ -183,32 +185,47 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::ValidateNode { path } => load_node_definition(&path)
+        Command::LegacyValidateNode { path } => load_node_definition(&path)
             .map(|definition| {
                 println!(
-                    "valid node definition: {} {}",
+                    "valid legacy node definition: {} {}",
                     definition.id, definition.version
                 );
             })
             .map_err(Into::into),
-        Command::ValidateGraph { path } => load_graph_document(&path)
+        Command::LegacyValidateGraph { path } => load_graph_document(&path)
             .map(|graph| {
-                println!("valid graph: {} {}", graph.id, graph.revision);
+                println!("valid legacy graph: {} {}", graph.id, graph.revision);
             })
             .map_err(Into::into),
-        Command::ValidateProject { graph, nodes } => {
+        Command::LegacyValidateProject { graph, nodes } => {
             let graph = load_graph_document(&graph)?;
             let registry = NodeRegistry::load_dir(&nodes)?;
             validate_project(&graph, &registry)?;
-            println!("valid project: {} {}", graph.id, graph.revision);
+            println!("valid legacy project: {} {}", graph.id, graph.revision);
             Ok(())
         }
-        Command::Plan {
-            graph,
-            nodes,
-            format,
-        } => {
-            let plan = load_plan(graph, nodes)?;
+        Command::ValidateProject { project } => {
+            let request = load_project_request_v02(project)?;
+            if let Err(diagnostics) = validate_project_request_v02(&request) {
+                return Err(format_runtime_diagnostics(&diagnostics).into());
+            }
+            println!(
+                "valid project: {} {}",
+                request.graph.id, request.graph.revision
+            );
+            Ok(())
+        }
+        Command::Plan { project, format } => {
+            let request = load_project_request_v02(project)?;
+            let (plan, diagnostics) = build_execution_plan_request_v02(&request)
+                .map_err(|diagnostics| format_runtime_diagnostics(&diagnostics))?;
+            if diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.is_some())
+            {
+                eprintln!("{}", format_runtime_diagnostics(&diagnostics));
+            }
             match format {
                 OutputFormat::Text => {
                     print!("{}", format_plan_text(&plan));
@@ -219,7 +236,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
-        Command::AudioPlan {
+        Command::LegacyAudioPlan {
             graph,
             nodes,
             block_size,
@@ -245,12 +262,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Command::Run {
-            graph,
-            nodes,
+            project,
             frames,
             format,
         } => {
-            let plan = load_plan(graph, nodes)?;
+            let request = load_run_project_request_v02(project, frames)?;
+            let (plan, diagnostics) = build_execution_plan_run_request_v02(&request)
+                .map_err(|diagnostics| format_runtime_diagnostics(&diagnostics))?;
+            if diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.is_some())
+            {
+                eprintln!("{}", format_runtime_diagnostics(&diagnostics));
+            }
             let report = run_dummy_execution(&plan, frames);
             match format {
                 OutputFormat::Text => {
@@ -262,7 +286,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
-        Command::Preview {
+        Command::LegacyPreview {
             graph,
             nodes,
             frames,
@@ -298,7 +322,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             run_render_preview_window(document, frame_limit, telemetry, control_state)
         }
-        Command::AudioOutput {
+        Command::LegacyAudioOutput {
             graph,
             nodes,
             block_size,
@@ -332,6 +356,81 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+}
+
+fn load_project_request_v02(
+    path: PathBuf,
+) -> Result<ProjectRequestV02, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if is_project_document_v02(&value) {
+        decode_project_document_request_v02(value)
+    } else {
+        let request: ProjectRequestV02 = serde_json::from_value(value)?;
+        if request.graph.schema_version != "0.2.0" {
+            return Err(format!(
+                "active project requests require graph.schemaVersion 0.2.0, got {}",
+                request.graph.schema_version
+            )
+            .into());
+        }
+        Ok(request)
+    }
+}
+
+fn load_run_project_request_v02(
+    path: PathBuf,
+    frames: usize,
+) -> Result<RunProjectRequestV02, Box<dyn std::error::Error>> {
+    let request = load_project_request_v02(path)?;
+    Ok(RunProjectRequestV02 {
+        document: request.document,
+        graph: request.graph,
+        nodes: request.nodes,
+        patch_library: request.patch_library,
+        view_state: request.view_state,
+        frames: Some(frames),
+    })
+}
+
+fn is_project_document_v02(value: &serde_json::Value) -> bool {
+    value
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|schema| schema == "skenion.project")
+        && value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|version| version == "0.2.0")
+}
+
+fn decode_project_document_request_v02(
+    mut value: serde_json::Value,
+) -> Result<ProjectRequestV02, Box<dyn std::error::Error>> {
+    let nodes = value
+        .as_object_mut()
+        .and_then(|object| object.remove("nodes"))
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let nodes = serde_json::from_value::<Vec<NodeDefinitionV02>>(nodes)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("frames");
+    }
+    let document = serde_json::from_value::<ProjectDocumentV02>(value)?;
+    if let Err(report) = skenion_contracts::validate_project_document_v02(&document) {
+        return Err(report.to_string().into());
+    }
+    Ok(ProjectRequestV02::from_project_document(document, nodes))
+}
+
+fn format_runtime_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(|diagnostic| match &diagnostic.code {
+            Some(code) => format!("{code}: {}", diagnostic.message),
+            None => diagnostic.message.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn load_plan(graph: PathBuf, nodes: PathBuf) -> Result<ExecutionPlan, Box<dyn std::error::Error>> {

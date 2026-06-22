@@ -8,7 +8,7 @@ use crate::{
     CycleValidationV02, EdgeSpecV02, ExecutionGroup, ExecutionModel, ExecutionModelV02,
     FanOutPolicyV02, GraphDocumentV02, GraphNodeV02, GraphValidationResultV02, MergePolicyV02,
     NodeDefinitionV02, PatchDefinitionV02, PlanEdge, PlanEdgeMetadata, PlanNode,
-    ProjectDocumentV02, RuntimeDiagnostic,
+    ProjectDocumentV02, RuntimeDiagnostic, ViewState,
 };
 
 const SUBPATCH_KIND: &str = "core.subpatch";
@@ -20,30 +20,40 @@ const MAX_SUBPATCH_DEPTH: usize = 16;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRequestV02 {
+    #[serde(skip)]
+    pub document: Option<ProjectDocumentV02>,
     pub graph: GraphDocumentV02,
     #[serde(default)]
     pub nodes: Vec<NodeDefinitionV02>,
     #[serde(default)]
     pub patch_library: Vec<PatchDefinitionV02>,
+    #[serde(default)]
+    pub view_state: Option<ViewState>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunProjectRequestV02 {
+    #[serde(skip)]
+    pub document: Option<ProjectDocumentV02>,
     pub graph: GraphDocumentV02,
     #[serde(default)]
     pub nodes: Vec<NodeDefinitionV02>,
     #[serde(default)]
     pub patch_library: Vec<PatchDefinitionV02>,
+    #[serde(default)]
+    pub view_state: Option<ViewState>,
     pub frames: Option<usize>,
 }
 
 impl From<ProjectDocumentV02> for ProjectRequestV02 {
     fn from(document: ProjectDocumentV02) -> Self {
         Self {
-            graph: document.graph,
+            graph: document.graph.clone(),
             nodes: Vec::new(),
-            patch_library: document.patch_library,
+            patch_library: document.patch_library.clone(),
+            view_state: Some(document.view_state.clone()),
+            document: Some(document),
         }
     }
 }
@@ -51,9 +61,11 @@ impl From<ProjectDocumentV02> for ProjectRequestV02 {
 impl From<ProjectDocumentV02> for RunProjectRequestV02 {
     fn from(document: ProjectDocumentV02) -> Self {
         Self {
-            graph: document.graph,
+            graph: document.graph.clone(),
             nodes: Vec::new(),
-            patch_library: document.patch_library,
+            patch_library: document.patch_library.clone(),
+            view_state: Some(document.view_state.clone()),
+            document: Some(document),
             frames: None,
         }
     }
@@ -65,9 +77,11 @@ impl ProjectRequestV02 {
         nodes: Vec<NodeDefinitionV02>,
     ) -> Self {
         Self {
-            graph: document.graph,
+            graph: document.graph.clone(),
             nodes,
-            patch_library: document.patch_library,
+            patch_library: document.patch_library.clone(),
+            view_state: Some(document.view_state.clone()),
+            document: Some(document),
         }
     }
 }
@@ -79,9 +93,11 @@ impl RunProjectRequestV02 {
         frames: Option<usize>,
     ) -> Self {
         Self {
-            graph: document.graph,
+            graph: document.graph.clone(),
             nodes,
-            patch_library: document.patch_library,
+            patch_library: document.patch_library.clone(),
+            view_state: Some(document.view_state.clone()),
+            document: Some(document),
             frames,
         }
     }
@@ -1358,9 +1374,11 @@ mod tests {
     #[test]
     fn expands_subpatches_before_v02_validation_and_planning() {
         let request = ProjectRequestV02 {
+            document: None,
             graph: subpatch_graph(),
             nodes: vec![clear_definition(), output_definition(), pass_definition()],
             patch_library: vec![identity_patch()],
+            view_state: None,
         };
 
         let expanded = expand_project_graph_v02(&request.graph, &request.patch_library)
@@ -1477,9 +1495,11 @@ mod tests {
     #[test]
     fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
         let duplicate = ProjectRequestV02 {
+            document: None,
             graph: render_graph(),
             nodes: vec![clear_definition(), output_definition()],
             patch_library: vec![identity_patch(), identity_patch()],
+            view_state: None,
         };
         let duplicate_diagnostics =
             validate_project_request_v02(&duplicate).expect_err("duplicate patch ids should fail");
@@ -1717,9 +1737,11 @@ mod tests {
     #[test]
     fn reports_missing_recursive_and_invalid_patch_library_diagnostics() {
         let missing = ProjectRequestV02 {
+            document: None,
             graph: subpatch_graph(),
             nodes: vec![clear_definition(), output_definition(), pass_definition()],
             patch_library: Vec::new(),
+            view_state: None,
         };
         let missing_diagnostics =
             validate_project_request_v02(&missing).expect_err("missing patch should fail");
@@ -1750,6 +1772,7 @@ mod tests {
         }))
         .expect("recursive patch should parse");
         let recursive = ProjectRequestV02 {
+            document: None,
             graph: graph(json!({
               "schema": "skenion.graph",
               "schemaVersion": "0.2.0",
@@ -1768,6 +1791,7 @@ mod tests {
             })),
             nodes: Vec::new(),
             patch_library: vec![recursive_patch],
+            view_state: None,
         };
         let recursive_diagnostics =
             validate_project_request_v02(&recursive).expect_err("recursive patch should fail");
@@ -1779,9 +1803,11 @@ mod tests {
         let mut duplicate_boundary = identity_patch();
         duplicate_boundary.graph.nodes[2].params["portId"] = json!("in");
         let invalid = ProjectRequestV02 {
+            document: None,
             graph: render_graph(),
             nodes: vec![clear_definition(), output_definition()],
             patch_library: vec![duplicate_boundary],
+            view_state: None,
         };
         let invalid_diagnostics =
             validate_project_request_v02(&invalid).expect_err("invalid patch should fail");

@@ -5,41 +5,51 @@ output, plugin hosting, control, and telemetry.
 
 Runtime internals live in a Cargo workspace until external consumers justify extraction.
 
-## Initial Surface
+## Active Surface
 
-The first runtime surface is a contract loader, not the renderer.
+The active runtime surface is a ProjectDocumentV02 loader, planner, session API,
+and local preview process manager. Graph v0.1 is not an active authoring or
+runtime API; legacy v0.1 commands exist only as migration diagnostics while the
+remaining internals are being lifted to v0.2.
 
 It can validate and plan:
 
-- Skenion Node Definition Manifest v0.1 JSON files
-- Skenion Graph Document v0.1 JSON files
-- graph documents resolved against a node definition registry
+- Skenion ProjectDocumentV02 JSON files
+- graph v0.2 documents resolved against v0.2 node definition manifests
+- v0.2 patch libraries and subpatch expansion
 - duplicate node and port ids
 - edge endpoint existence
 - output-to-input edge direction
-- `flow + dataKind` compatibility
-- input-only `activation`
-- unsupported node permissions
+- `type + rate` compatibility
+- fan-in/fan-out policy checks
 - node kind/kindVersion resolution
 - graph port snapshots against authoritative node definitions
 - topological execution plan skeletons
 - cycle detection
 - deterministic dummy execution reports
-- a local winit placeholder preview window
+- a local session-driven preview process manager
 
 ```sh
-cargo run -- validate-node path/to/node-definition.json
-cargo run -- validate-graph path/to/graph.json
-cargo run -- validate-project --graph path/to/graph.json --nodes path/to/node-definitions
-cargo run -- plan --graph path/to/graph.json --nodes path/to/node-definitions --format text
-cargo run -- plan --graph path/to/graph.json --nodes path/to/node-definitions --format json
-cargo run -- run --graph path/to/graph.json --nodes path/to/node-definitions --frames 2 --format json
-cargo run -- preview --graph path/to/graph.json --nodes path/to/node-definitions --frames 300
+cargo run -- validate-project --project path/to/project-v0.2.json
+cargo run -- plan --project path/to/project-v0.2.json --format text
+cargo run -- plan --project path/to/project-v0.2.json --format json
+cargo run -- run --project path/to/project-v0.2.json --frames 2 --format json
 ```
 
-The preview window is a visual shell only. It advances a placeholder frame
-counter from the execution plan and does not perform GPU rendering, video/audio
-processing, or script execution yet.
+The preview process manager is exposed through the Runtime session HTTP API.
+Standalone preview child commands consume prepared plan or preview-document
+artifacts and are not the active graph authoring API.
+
+Legacy v0.1 loader checks are intentionally named as legacy commands:
+
+```sh
+cargo run -- legacy-validate-node path/to/node-definition-v0.1.json
+cargo run -- legacy-validate-graph path/to/graph-v0.1.json
+cargo run -- legacy-validate-project --graph path/to/graph-v0.1.json --nodes path/to/node-definitions-v0.1
+cargo run -- legacy-preview --graph path/to/graph-v0.1.json --nodes path/to/node-definitions-v0.1 --frames 300
+cargo run -- legacy-audio-plan --graph path/to/graph-v0.1.json --nodes path/to/node-definitions-v0.1 --format json
+cargo run -- legacy-audio-output --graph path/to/graph-v0.1.json --nodes path/to/node-definitions-v0.1 --duration-ms 1000
+```
 
 ## Status
 

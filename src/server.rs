@@ -44,20 +44,18 @@ use tokio_stream::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    CanvasNodeView, DummyExecutionReport, Edge, ExecutionPlan, GeneratedShaderResponse,
-    GraphDocument, GraphPatch, GraphPatchOperation, NodeDefinition, NodeDefinitionV02,
-    NodeRegistry, PreviewDocument, ProjectDocumentV02, ProjectRequestV02, RunProjectRequestV02,
-    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
-    RuntimeControlReadResponse, RuntimeControlStateResponse, RuntimeExtensionListResponse,
-    RuntimeExtensionManager, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
-    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope,
-    RuntimePatchResponse, RuntimePreviewStartRequest, RuntimeTelemetrySnapshot, RuntimeViewPatch,
-    RuntimeViewPatchOperation, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
-    ShaderDiagnosticSource, ViewState, build_execution_plan, build_execution_plan_request_v02,
+    DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, GraphDocument, NodeDefinition,
+    NodeDefinitionV02, NodeRegistry, PreviewDocument, ProjectDocumentV02, ProjectRequestV02,
+    RunProjectRequestV02, RuntimeControlEventRequest, RuntimeControlEventResponse,
+    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
+    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeIoDeviceListResponse,
+    RuntimeIoDeviceManager, RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest,
+    RuntimeOperationEnvelope, RuntimePatchResponse, RuntimePreviewStartRequest,
+    RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
+    ShaderDiagnosticSource, ViewState, build_execution_plan_request_v02,
     build_execution_plan_run_request_v02, collaboration_broadcast_event_after_high_water,
     collaboration_event, generated_shader_response_from_preview_document, run_dummy_execution,
     runtime_time::created_at_now,
-    session::{edge_v02_to_v01, graph_node_v02_to_v01},
     session_registry::{
         DEFAULT_SESSION_ID, RuntimeSessionEventKind, RuntimeSessionRecord, RuntimeSessionRegistry,
         SessionEventsQuery, capture_session_replay, event_cursor_from_headers,
@@ -69,7 +67,7 @@ use crate::{
         RuntimeSidecarStartupResponse, runtime_connection_profile, sidecar_health_response,
         sidecar_shutdown_response, sidecar_startup_response,
     },
-    validate_project, validate_project_request_v02,
+    validate_project_request_v02,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -131,16 +129,12 @@ enum CollaborationOperationResponse {
 
 #[derive(Debug)]
 struct LoweredCollaborationChangeSet {
-    mutation: RuntimeMutationRequest,
+    target: crate::GraphTargetRef,
+    changes: Vec<RuntimeCollaborationChange>,
+    actor_id: Option<String>,
+    client_id: Option<String>,
+    description: Option<String>,
     transformed_payload: RuntimeCollaborationOperationPayload,
-    edge_updates: Vec<CollaborationEdgeMapUpdate>,
-}
-
-#[derive(Debug)]
-enum CollaborationEdgeMapUpdate {
-    Remember { edge_id: String, edge: Edge },
-    Forget { edge_id: String },
-    ForgetIncident { node_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +271,10 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         )
         .route("/v0/sessions/{session_id}/load", post(load_session_by_id))
         .route(
+            "/v0/sessions/{session_id}/import/legacy-v0.1",
+            post(import_legacy_session_by_id),
+        )
+        .route(
             "/v0/sessions/{session_id}/validate",
             post(validate_session_by_id),
         )
@@ -356,6 +354,10 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/info", get(session_info))
         .route("/v0/session/events/stream", get(session_events_stream))
         .route("/v0/session/load", post(load_session))
+        .route(
+            "/v0/session/import/legacy-v0.1",
+            post(import_legacy_session),
+        )
         .route("/v0/session/validate", post(validate_session))
         .route("/v0/session/plan", post(plan_session))
         .route("/v0/session/run", post(run_session))
@@ -424,7 +426,10 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "project.plan.v0.2",
             "dummy.run",
             "session.load",
+            "session.load.v0.2",
+            "session.import.legacy.v0.1",
             "session.project",
+            "session.project.v0.2",
             "session.events.stream",
             "session.validate",
             "session.plan",
@@ -714,11 +719,8 @@ async fn validate_project_endpoint(
     Json(value): Json<serde_json::Value>,
 ) -> Json<RuntimeApiResponse> {
     let response = match decode_project_payload(value) {
-        Ok(ProjectPayload::V01(request)) => {
-            match validate_project_request(&request.graph, request.nodes) {
-                Ok(()) => RuntimeApiResponse::ok(),
-                Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
-            }
+        Ok(ProjectPayload::V01(_)) => {
+            RuntimeApiResponse::diagnostics(vec![unsupported_active_v01_diagnostic()])
         }
         Ok(ProjectPayload::V02(request)) => match validate_project_request_v02(&request) {
             Ok((diagnostics, _)) => RuntimeApiResponse {
@@ -739,30 +741,10 @@ async fn plan_project_endpoint(
     Json(value): Json<serde_json::Value>,
 ) -> Json<RuntimeApiResponse> {
     match decode_project_payload(value) {
-        Ok(ProjectPayload::V01(request)) => {
-            let registry = match registry_from_nodes(request.nodes) {
-                Ok(registry) => registry,
-                Err(diagnostics) => {
-                    return runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics));
-                }
-            };
-
-            if let Err(diagnostics) = validate_graph_with_registry(&request.graph, &registry) {
-                return runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics));
-            }
-
-            let plan = build_execution_plan(&request.graph, &registry)
-                .expect("validated project should plan");
-            runtime_api_json(
-                &state,
-                RuntimeApiResponse {
-                    ok: true,
-                    diagnostics: Vec::new(),
-                    plan: Some(plan),
-                    report: None,
-                },
-            )
-        }
+        Ok(ProjectPayload::V01(_)) => runtime_api_json(
+            &state,
+            RuntimeApiResponse::diagnostics(vec![unsupported_active_v01_diagnostic()]),
+        ),
         Ok(ProjectPayload::V02(request)) => match build_execution_plan_request_v02(&request) {
             Ok((plan, diagnostics)) => runtime_api_json(
                 &state,
@@ -786,31 +768,10 @@ async fn run_project_endpoint(
     Json(value): Json<serde_json::Value>,
 ) -> Json<RuntimeApiResponse> {
     match decode_run_project_payload(value) {
-        Ok(RunProjectPayload::V01(request)) => {
-            let registry = match registry_from_nodes(request.nodes) {
-                Ok(registry) => registry,
-                Err(diagnostics) => {
-                    return runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics));
-                }
-            };
-
-            if let Err(diagnostics) = validate_graph_with_registry(&request.graph, &registry) {
-                return runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics));
-            }
-
-            let plan = build_execution_plan(&request.graph, &registry)
-                .expect("validated project should plan");
-            let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
-            runtime_api_json(
-                &state,
-                RuntimeApiResponse {
-                    ok: true,
-                    diagnostics: Vec::new(),
-                    plan: Some(plan),
-                    report: Some(report),
-                },
-            )
-        }
+        Ok(RunProjectPayload::V01(_)) => runtime_api_json(
+            &state,
+            RuntimeApiResponse::diagnostics(vec![unsupported_active_v01_diagnostic()]),
+        ),
         Ok(RunProjectPayload::V02(request)) => {
             match build_execution_plan_run_request_v02(&request) {
                 Ok((plan, diagnostics)) => {
@@ -879,20 +840,68 @@ fn session_info_for(
 
 async fn load_session(
     State(state): State<RuntimeServerState>,
-    Json(request): Json<ProjectRequest>,
+    Json(value): Json<serde_json::Value>,
 ) -> Json<crate::RuntimeSessionResponse> {
-    load_session_for(&state, state.sessions.default_record(), request)
+    load_session_for(&state, state.sessions.default_record(), value)
 }
 
 async fn load_session_by_id(
     State(state): State<RuntimeServerState>,
     Path(session_id): Path<String>,
-    Json(request): Json<ProjectRequest>,
+    Json(value): Json<serde_json::Value>,
 ) -> Json<crate::RuntimeSessionResponse> {
-    load_session_for(&state, state.sessions.get_or_create(&session_id), request)
+    load_session_for(&state, state.sessions.get_or_create(&session_id), value)
 }
 
 fn load_session_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+    value: serde_json::Value,
+) -> Json<crate::RuntimeSessionResponse> {
+    let _coordination_guard = record.collaboration.operation_guard();
+    let mut session = record
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    let request = match decode_project_payload(value) {
+        Ok(ProjectPayload::V02(request)) => request,
+        Ok(ProjectPayload::V01(_)) => {
+            let response = session.response(false, vec![unsupported_active_v01_diagnostic()], None);
+            return session_json(state, response);
+        }
+        Err(diagnostics) => {
+            let response = session.response(false, diagnostics, None);
+            return session_json(state, response);
+        }
+    };
+    let response = session.load_project_v02(*request);
+    if response.ok && response.snapshot.loaded() {
+        publish_session_event(
+            &record,
+            RuntimeSessionEventKind::Load,
+            &session,
+            response.diagnostics.clone(),
+        );
+    }
+    session_json(state, response)
+}
+
+async fn import_legacy_session(
+    State(state): State<RuntimeServerState>,
+    Json(request): Json<ProjectRequest>,
+) -> Json<crate::RuntimeSessionResponse> {
+    import_legacy_session_for(&state, state.sessions.default_record(), request)
+}
+
+async fn import_legacy_session_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ProjectRequest>,
+) -> Json<crate::RuntimeSessionResponse> {
+    import_legacy_session_for(&state, state.sessions.get_or_create(&session_id), request)
+}
+
+fn import_legacy_session_for(
     state: &RuntimeServerState,
     record: RuntimeSessionRecord,
     request: ProjectRequest,
@@ -902,7 +911,7 @@ fn load_session_for(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    let response = session.load_project(request);
+    let response = session.import_legacy_project_v01(request);
     if response.ok && response.snapshot.loaded() {
         publish_session_event(
             &record,
@@ -1376,7 +1385,8 @@ fn apply_collaboration_operation(
         );
     }
 
-    let current_revision = current_session_graph_revision(record);
+    let payload_target = collaboration_payload_target(&operation.payload);
+    let current_revision = current_session_target_revision(record, payload_target);
     let payload_requires_rebase = collaboration_payload_base_revision(&operation.payload)
         .is_some_and(|base_revision| base_revision != current_revision);
     let requires_rebase =
@@ -1416,24 +1426,21 @@ fn apply_collaboration_operation(
             };
             apply_collaboration_paste_operation(record, operation, runtime_operation, rebase)
         }
-        RuntimeCollaborationOperationPayload::ChangeSet { .. } => {
-            match lower_collaboration_change_set(record, &operation, &transformed_payload) {
-                Ok(lowered) => {
-                    apply_collaboration_change_set_operation(record, operation, lowered, rebase)
-                }
-                Err(message) => publish_collaboration_operation_result(
-                    record,
-                    invalid_collaboration_operation_result_with_rebase(
-                        record,
-                        &operation.operation_id,
-                        &operation.participant_id,
-                        &operation.idempotency_key,
-                        operation.causal.clone(),
-                        message,
-                        rebase,
-                    ),
-                ),
-            }
+        RuntimeCollaborationOperationPayload::ChangeSet {
+            target,
+            changes,
+            description,
+            ..
+        } => {
+            let lowered = LoweredCollaborationChangeSet {
+                target: target.clone(),
+                changes: changes.clone(),
+                actor_id: Some(operation.participant_id.clone()),
+                client_id: operation.correlation_id.clone(),
+                description: description.clone(),
+                transformed_payload: transformed_payload.clone(),
+            };
+            apply_collaboration_change_set_operation(record, operation, lowered, rebase)
         }
         RuntimeCollaborationOperationPayload::UndoRedo { action, .. } => {
             apply_collaboration_undo_redo_operation(record, operation, action.clone(), rebase)
@@ -1455,6 +1462,18 @@ fn collaboration_payload_base_revision(
     }
 }
 
+fn collaboration_payload_target(
+    payload: &RuntimeCollaborationOperationPayload,
+) -> Option<&crate::GraphTargetRef> {
+    match payload {
+        RuntimeCollaborationOperationPayload::ChangeSet { target, .. } => Some(target),
+        RuntimeCollaborationOperationPayload::PasteGraphFragment { request, .. } => {
+            Some(&request.target)
+        }
+        RuntimeCollaborationOperationPayload::UndoRedo { .. } => None,
+    }
+}
+
 fn transform_collaboration_payload_to_revision(
     payload: &RuntimeCollaborationOperationPayload,
     revision: &str,
@@ -1470,151 +1489,6 @@ fn transform_collaboration_payload_to_revision(
         RuntimeCollaborationOperationPayload::UndoRedo { .. } => {}
     }
     payload
-}
-
-fn lower_collaboration_change_set(
-    record: &RuntimeSessionRecord,
-    operation: &RuntimeCollaborationOperationEnvelope,
-    payload: &RuntimeCollaborationOperationPayload,
-) -> Result<LoweredCollaborationChangeSet, String> {
-    let RuntimeCollaborationOperationPayload::ChangeSet {
-        target,
-        changes,
-        description,
-        ..
-    } = payload
-    else {
-        return Err("collaboration operation payload is not a changeSet".to_owned());
-    };
-    let snapshot = record
-        .session
-        .read()
-        .expect("runtime session lock should not be poisoned")
-        .snapshot();
-    let graph_revision = snapshot
-        .graph_revision()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| target.base_revision.clone());
-    let mut graph_ops = Vec::new();
-    let mut view_ops = Vec::new();
-    let mut edge_updates = Vec::new();
-
-    for change in changes {
-        match change {
-            RuntimeCollaborationChange::NodeAdd { node, view, .. } => {
-                graph_ops.push(GraphPatchOperation::AddNode {
-                    node: graph_node_v02_to_v01(node, &node.id),
-                });
-                if let Some(view) = view {
-                    view_ops.push(RuntimeViewPatchOperation::SetNodeView {
-                        node_id: node.id.clone(),
-                        view: CanvasNodeView {
-                            x: view.x,
-                            y: view.y,
-                            width: None,
-                            height: None,
-                            collapsed: None,
-                        },
-                    });
-                }
-            }
-            RuntimeCollaborationChange::NodeMove {
-                node_id, from, to, ..
-            } => {
-                view_ops.push(RuntimeViewPatchOperation::MoveNodeView {
-                    node_id: node_id.clone(),
-                    from: from.as_ref().map(|position| CanvasNodeView {
-                        x: position.x,
-                        y: position.y,
-                        width: None,
-                        height: None,
-                        collapsed: None,
-                    }),
-                    to: CanvasNodeView {
-                        x: to.x,
-                        y: to.y,
-                        width: None,
-                        height: None,
-                        collapsed: None,
-                    },
-                });
-            }
-            RuntimeCollaborationChange::NodeDelete { node_id, .. } => {
-                graph_ops.push(GraphPatchOperation::RemoveNode {
-                    node_id: node_id.clone(),
-                });
-                edge_updates.push(CollaborationEdgeMapUpdate::ForgetIncident {
-                    node_id: node_id.clone(),
-                });
-            }
-            RuntimeCollaborationChange::EdgeConnect { edge, .. } => {
-                let runtime_edge = edge_v02_to_v01(edge);
-                graph_ops.push(GraphPatchOperation::AddEdge {
-                    edge: runtime_edge.clone(),
-                });
-                edge_updates.push(CollaborationEdgeMapUpdate::Remember {
-                    edge_id: edge.id.clone(),
-                    edge: runtime_edge,
-                });
-            }
-            RuntimeCollaborationChange::EdgeDisconnect { edge_id, .. } => {
-                let Some(edge) = record.collaboration.edge_by_id(edge_id) else {
-                    return Err(format!(
-                        "collaboration edge.disconnect cannot resolve edge id {edge_id}; only edges created through collaboration edge.connect have runtime edge ids"
-                    ));
-                };
-                graph_ops.push(GraphPatchOperation::RemoveEdge { edge });
-                edge_updates.push(CollaborationEdgeMapUpdate::Forget {
-                    edge_id: edge_id.clone(),
-                });
-            }
-        }
-    }
-
-    let graph_patch = (!graph_ops.is_empty()).then(|| GraphPatch {
-        schema: "skenion.graph.patch".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        id: format!("collaboration_{}", operation.operation_id),
-        base_revision: graph_revision,
-        client_id: operation.correlation_id.clone(),
-        created_at: Some(operation.submitted_at.clone()),
-        description: description.clone(),
-        ops: graph_ops,
-    });
-    let view_patch = (!view_ops.is_empty()).then_some(RuntimeViewPatch {
-        base_view_revision: snapshot.view_revision,
-        ops: view_ops,
-    });
-    Ok(LoweredCollaborationChangeSet {
-        mutation: RuntimeMutationRequest {
-            graph_patch,
-            view_patch,
-            actor_id: Some(operation.participant_id.clone()),
-            client_id: operation.correlation_id.clone(),
-            description: description.clone(),
-        },
-        transformed_payload: payload.clone(),
-        edge_updates,
-    })
-}
-
-fn apply_collaboration_edge_updates(
-    record: &RuntimeSessionRecord,
-    updates: Vec<CollaborationEdgeMapUpdate>,
-) {
-    for update in updates {
-        match update {
-            CollaborationEdgeMapUpdate::Remember { edge_id, edge } => {
-                record.collaboration.remember_edge_id(edge_id, edge);
-            }
-            CollaborationEdgeMapUpdate::Forget { edge_id } => {
-                record.collaboration.forget_edge_id(&edge_id);
-            }
-            CollaborationEdgeMapUpdate::ForgetIncident { node_id } => {
-                record.collaboration.forget_incident_edge_ids(&node_id);
-            }
-        }
-    }
 }
 
 fn apply_collaboration_paste_operation(
@@ -1708,7 +1582,14 @@ fn apply_collaboration_change_set_operation(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    let response = session.apply_mutation(lowered.mutation);
+    let target = lowered.target.clone();
+    let response = session.apply_collaboration_change_set_v02(
+        target.clone(),
+        lowered.changes,
+        lowered.actor_id,
+        lowered.client_id,
+        lowered.description,
+    );
     if response.ok && response.applied {
         publish_session_event(
             record,
@@ -1716,14 +1597,18 @@ fn apply_collaboration_change_set_operation(
             &session,
             Vec::new(),
         );
-        apply_collaboration_edge_updates(record, lowered.edge_updates);
     }
+    let target_revision = session
+        .target_revision_v02(&target)
+        .or_else(|| response.snapshot.graph_revision().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "0".to_owned());
     collaboration_result_from_patch_response(
         record,
         operation,
         response,
         sequence,
         rebase,
+        Some(target_revision),
         Some(lowered.transformed_payload),
     )
 }
@@ -1755,7 +1640,9 @@ fn apply_collaboration_undo_redo_operation(
             Vec::new(),
         );
     }
-    collaboration_result_from_patch_response(record, operation, response, sequence, rebase, None)
+    collaboration_result_from_patch_response(
+        record, operation, response, sequence, rebase, None, None,
+    )
 }
 
 fn collaboration_result_from_patch_response(
@@ -1764,13 +1651,16 @@ fn collaboration_result_from_patch_response(
     response: RuntimePatchResponse,
     sequence: u64,
     rebase: Option<RuntimeCollaborationRebase>,
+    revision_override: Option<String>,
     transformed_payload: Option<RuntimeCollaborationOperationPayload>,
 ) -> RuntimeCollaborationOperationResult {
-    let revision = response
-        .snapshot
-        .graph_revision()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "0".to_owned());
+    let revision = revision_override.unwrap_or_else(|| {
+        response
+            .snapshot
+            .graph_revision()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "0".to_owned())
+    });
     let diagnostics: Vec<_> = response
         .diagnostics
         .iter()
@@ -1930,27 +1820,6 @@ fn invalid_collaboration_operation_result(
         diagnostics: Vec::new(),
         created_at: created_at_now(),
     }
-}
-
-fn invalid_collaboration_operation_result_with_rebase(
-    record: &RuntimeSessionRecord,
-    operation_id: &str,
-    participant_id: &str,
-    idempotency_key: &str,
-    causal: RuntimeCollaborationCausalMetadata,
-    message: String,
-    rebase: Option<RuntimeCollaborationRebase>,
-) -> RuntimeCollaborationOperationResult {
-    let mut result = invalid_collaboration_operation_result(
-        record,
-        operation_id,
-        participant_id,
-        idempotency_key,
-        causal,
-        message,
-    );
-    result.rebase = rebase;
-    result
 }
 
 fn invalid_collaboration_batch_result(
@@ -2159,6 +2028,27 @@ fn current_session_graph_revision(record: &RuntimeSessionRecord) -> String {
         .graph_revision()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| "0".to_owned())
+}
+
+fn current_session_target_revision(
+    record: &RuntimeSessionRecord,
+    target: Option<&crate::GraphTargetRef>,
+) -> String {
+    let session = record
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    match target {
+        Some(target) => session
+            .target_revision_v02(target)
+            .or_else(|| target.target_revision.clone())
+            .unwrap_or_else(|| target.base_revision.clone()),
+        None => session
+            .snapshot()
+            .graph_revision()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "0".to_owned()),
+    }
 }
 
 async fn session_history(State(state): State<RuntimeServerState>) -> Json<crate::RuntimeHistory> {
@@ -2853,15 +2743,6 @@ fn asset_kind(mime_type: &str) -> String {
 }
 
 impl RuntimeApiResponse {
-    fn ok() -> Self {
-        Self {
-            ok: true,
-            diagnostics: Vec::new(),
-            plan: None,
-            report: None,
-        }
-    }
-
     fn diagnostics(diagnostics: Vec<RuntimeDiagnostic>) -> Self {
         Self {
             ok: false,
@@ -2903,33 +2784,40 @@ impl RuntimeDiagnostic {
             details: Some(details),
         }
     }
-}
 
-fn validate_project_request(
-    graph: &GraphDocument,
-    nodes: Vec<NodeDefinition>,
-) -> Result<(), Vec<RuntimeDiagnostic>> {
-    let registry = registry_from_nodes(nodes)?;
-    validate_graph_with_registry(graph, &registry)
+    pub(crate) fn structured_warning(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Warning,
+            message: message.into(),
+            code: Some(code.into()),
+            details: Some(details),
+        }
+    }
 }
 
 enum ProjectPayload {
-    V01(ProjectRequest),
-    V02(ProjectRequestV02),
+    V01(()),
+    V02(Box<ProjectRequestV02>),
 }
 
 enum RunProjectPayload {
-    V01(RunProjectRequest),
-    V02(RunProjectRequestV02),
+    V01(()),
+    V02(Box<RunProjectRequestV02>),
 }
 
 fn decode_project_payload(
     value: serde_json::Value,
 ) -> Result<ProjectPayload, Vec<RuntimeDiagnostic>> {
     match project_schema_version(&value).as_deref() {
-        Some("0.2.0") => decode_project_payload_v02(value).map(ProjectPayload::V02),
-        Some("0.1.0") => serde_json::from_value(value)
-            .map(ProjectPayload::V01)
+        Some("0.2.0") => decode_project_payload_v02(value)
+            .map(Box::new)
+            .map(ProjectPayload::V02),
+        Some("0.1.0") => serde_json::from_value::<ProjectRequest>(value)
+            .map(|_| ProjectPayload::V01(()))
             .map_err(invalid_project_payload),
         Some(version) => Err(vec![RuntimeDiagnostic::error(format!(
             "unsupported graph schemaVersion: {version}"
@@ -2944,9 +2832,11 @@ fn decode_run_project_payload(
     value: serde_json::Value,
 ) -> Result<RunProjectPayload, Vec<RuntimeDiagnostic>> {
     match project_schema_version(&value).as_deref() {
-        Some("0.2.0") => decode_run_project_payload_v02(value).map(RunProjectPayload::V02),
-        Some("0.1.0") => serde_json::from_value(value)
-            .map(RunProjectPayload::V01)
+        Some("0.2.0") => decode_run_project_payload_v02(value)
+            .map(Box::new)
+            .map(RunProjectPayload::V02),
+        Some("0.1.0") => serde_json::from_value::<RunProjectRequest>(value)
+            .map(|_| RunProjectPayload::V01(()))
             .map_err(invalid_project_payload),
         Some(version) => Err(vec![RuntimeDiagnostic::error(format!(
             "unsupported graph schemaVersion: {version}"
@@ -3067,6 +2957,17 @@ fn invalid_project_payload(error: serde_json::Error) -> Vec<RuntimeDiagnostic> {
     ))]
 }
 
+fn unsupported_active_v01_diagnostic() -> RuntimeDiagnostic {
+    RuntimeDiagnostic::structured_error(
+        "project.active-v0.1-unsupported",
+        "v0.1 graph/project payloads are legacy import inputs only; active Runtime paths require ProjectDocumentV02 or v0.2 project requests",
+        serde_json::json!({
+            "activeSchemaVersion": "0.2.0",
+            "legacyImportPath": "/v0/session/import/legacy-v0.1",
+        }),
+    )
+}
+
 pub(crate) fn registry_from_nodes(
     nodes: Vec<NodeDefinition>,
 ) -> Result<NodeRegistry, Vec<RuntimeDiagnostic>> {
@@ -3084,19 +2985,6 @@ pub(crate) fn registry_from_nodes(
     } else {
         Err(diagnostics)
     }
-}
-
-pub(crate) fn validate_graph_with_registry(
-    graph: &GraphDocument,
-    registry: &NodeRegistry,
-) -> Result<(), Vec<RuntimeDiagnostic>> {
-    validate_project(graph, registry).map_err(|report| {
-        report
-            .errors()
-            .iter()
-            .map(|error| RuntimeDiagnostic::error(error.message.clone()))
-            .collect()
-    })
 }
 
 fn preview_start_request(body: &[u8]) -> Result<RuntimePreviewStartRequest, RuntimeDiagnostic> {
@@ -3149,8 +3037,9 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse, RuntimeLogEvent, RuntimeLogSource,
-        RuntimeSession, RuntimeSessionEvent, io_device_manager::RuntimeIoDeviceRegistry,
+        CanvasNodeView, RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse, RuntimeLogEvent,
+        RuntimeLogSource, RuntimeSession, RuntimeSessionEvent, RuntimeViewPatch,
+        RuntimeViewPatchOperation, io_device_manager::RuntimeIoDeviceRegistry,
     };
 
     use super::*;
@@ -3192,6 +3081,8 @@ mod tests {
             "project.plan.v0.2",
             "dummy.run",
             "session.load",
+            "session.load.v0.2",
+            "session.import.legacy.v0.1",
             "session.mutate",
             "session.operation",
             "session.history",
@@ -3288,7 +3179,12 @@ mod tests {
         let registry = RuntimeSessionRegistry::dry_preview();
         assert_eq!(registry.get_or_create("").id, DEFAULT_SESSION_ID);
 
-        post_json_with(app.clone(), "/v0/sessions/gamma/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/gamma/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         let alias_info = get_json_with(app.clone(), "/v0/session/info").await;
         let gamma_info = get_json_with(app.clone(), "/v0/sessions/gamma/info").await;
         assert_eq!(alias_info["sessionId"], DEFAULT_SESSION_ID);
@@ -3383,7 +3279,7 @@ mod tests {
         post_json_with(
             app.clone(),
             "/v0/sessions/shader/load",
-            sample_shader_project(),
+            sample_shader_project_v02(),
         )
         .await;
         assert_eq!(
@@ -3391,7 +3287,12 @@ mod tests {
             true
         );
 
-        post_json_with(app.clone(), "/v0/sessions/delta/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/delta/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         assert_eq!(
             post_json_with(
                 app.clone(),
@@ -3405,8 +3306,8 @@ mod tests {
         assert_eq!(
             post_json_with(
                 app.clone(),
-                "/v0/sessions/gamma/mutate",
-                graph_mutation(set_value_patch("1"))
+                "/v0/sessions/gamma/operation",
+                paste_operation("1")
             )
             .await["ok"],
             true
@@ -3583,11 +3484,16 @@ mod tests {
     async fn session_event_stream_replays_after_query_and_last_event_id() {
         let state = runtime_state_with_dry_preview();
         let app = runtime_router_with_state(state.clone());
-        post_json_with(app.clone(), "/v0/sessions/alpha/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/alpha/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         post_json_with(
             app.clone(),
             "/v0/sessions/alpha/load",
-            sample_shader_project(),
+            sample_shader_project_v02(),
         )
         .await;
 
@@ -3693,8 +3599,13 @@ mod tests {
         let state = runtime_state_with_dry_preview();
         let app = runtime_router_with_state(state.clone());
 
-        post_json_with(app.clone(), "/v0/sessions/alpha/load", sample_project()).await;
-        post_json_with(app, "/v0/sessions/beta/load", sample_shader_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/alpha/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
+        post_json_with(app, "/v0/sessions/beta/load", sample_shader_project_v02()).await;
 
         let alpha = state.sessions.get_or_create("alpha");
         let beta = state.sessions.get_or_create("beta");
@@ -4049,142 +3960,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_project_validation_response() {
-        let response = post_json("/v0/validate", sample_project()).await;
+    async fn project_endpoints_reject_v01_active_payloads() {
+        for path in ["/v0/validate", "/v0/plan", "/v0/run"] {
+            let response = post_json(path, sample_project()).await;
 
-        assert_eq!(response["ok"], true);
-        assert_eq!(response["diagnostics"].as_array().unwrap().len(), 0);
-        assert_eq!(response["plan"], Value::Null);
-        assert_eq!(response["report"], Value::Null);
-    }
-
-    #[tokio::test]
-    async fn invalid_project_validation_response() {
-        let mut request = sample_project();
-        request["nodes"] = json!([]);
-        let response = post_json("/v0/validate", request).await;
-
-        assert_eq!(response["ok"], false);
-        assert!(
-            response["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("missing node definition")
-        );
-    }
-
-    #[tokio::test]
-    async fn validation_response_reports_registry_errors() {
-        let mut request = sample_project();
-        let duplicate = request["nodes"][0].clone();
-        request["nodes"].as_array_mut().unwrap().push(duplicate);
-
-        let response = post_json("/v0/validate", request).await;
-
-        assert_eq!(response["ok"], false);
-        assert!(
-            response["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("duplicate node definition")
-        );
-    }
-
-    #[tokio::test]
-    async fn plan_endpoint_returns_execution_plan() {
-        let response = post_json("/v0/plan", sample_project()).await;
-
-        assert_eq!(response["ok"], true);
-        assert_eq!(response["plan"]["graphId"], "minimal-value");
-        assert_eq!(response["plan"]["nodes"][0]["nodeId"], "value_1");
-        assert_eq!(response["report"], Value::Null);
-    }
-
-    #[tokio::test]
-    async fn plan_endpoint_reports_registry_errors() {
-        let mut request = sample_project();
-        request["nodes"][0]["schemaVersion"] = json!("9.9.9");
-
-        let response = post_json("/v0/plan", request).await;
-
-        assert_eq!(response["ok"], false);
-        assert!(
-            response["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("invalid node definition")
-        );
-    }
-
-    #[tokio::test]
-    async fn plan_endpoint_reports_graph_errors() {
-        let mut request = sample_project();
-        request["nodes"] = json!([]);
-
-        let response = post_json("/v0/plan", request).await;
-
-        assert_eq!(response["ok"], false);
-        assert!(
-            response["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("missing node definition")
-        );
-    }
-
-    #[tokio::test]
-    async fn run_endpoint_returns_dummy_execution_report() {
-        let mut request = sample_project();
-        request["frames"] = json!(2);
-        let response = post_json("/v0/run", request).await;
-
-        assert_eq!(response["ok"], true);
-        assert_eq!(response["report"]["frameCount"], 2);
-        assert_eq!(
-            response["report"]["frames"][0]["executedNodes"][0]["status"],
-            "simulated"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_endpoint_defaults_to_one_frame() {
-        let response = post_json("/v0/run", sample_project()).await;
-
-        assert_eq!(response["ok"], true);
-        assert_eq!(response["report"]["frameCount"], 1);
-        assert_eq!(response["report"]["frames"].as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn run_endpoint_reports_registry_errors() {
-        let mut request = sample_project();
-        request["nodes"][0]["schemaVersion"] = json!("9.9.9");
-
-        let response = post_json("/v0/run", request).await;
-
-        assert_eq!(response["ok"], false);
-        assert!(
-            response["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("invalid node definition")
-        );
-    }
-
-    #[tokio::test]
-    async fn run_endpoint_reports_graph_errors() {
-        let mut request = sample_project();
-        request["nodes"] = json!([]);
-
-        let response = post_json("/v0/run", request).await;
-
-        assert_eq!(response["ok"], false);
-        assert!(
-            response["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("missing node definition")
-        );
+            assert_eq!(response["ok"], false);
+            assert_eq!(
+                response["diagnostics"][0]["code"],
+                "project.active-v0.1-unsupported"
+            );
+            assert_eq!(response["plan"], Value::Null);
+            assert_eq!(response["report"], Value::Null);
+        }
     }
 
     #[tokio::test]
@@ -4422,45 +4209,128 @@ mod tests {
         assert_eq!(empty["ok"], true);
         assert_eq!(empty["snapshot"]["project"], Value::Null);
 
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/load",
+            sample_project_document_v02(),
+        )
+        .await;
         let project = get_json_with(app, "/v0/session").await;
 
         assert_eq!(project["ok"], true);
         assert_eq!(
+            project["snapshot"]["project"]["id"],
+            "minimal-value-project"
+        );
+        assert_eq!(
             project["snapshot"]["project"]["graph"]["id"],
             "minimal-value"
         );
-        assert_eq!(
-            project["snapshot"]["project"]["nodes"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(project["snapshot"]["project"]["nodes"].is_null());
     }
 
     #[tokio::test]
     async fn session_load_stores_valid_project() {
         let app = runtime_router();
-        let response = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        let mut project = sample_subpatch_project_document_v02();
+        project["metadata"] = json!({
+            "title": "Loaded Subpatch Project",
+            "source": "session-load-test"
+        });
+        project["tutorial"] = json!({
+            "steps": [{ "id": "intro", "title": "Intro" }]
+        });
+        project["help"] = json!({
+            "topics": ["core.subpatch"]
+        });
+        let response = post_json_with(app.clone(), "/v0/session/load", project).await;
 
         assert_eq!(response["ok"], true);
+        assert_eq!(response["snapshot"]["project"]["id"], "subpatch-project");
+        assert_eq!(
+            response["snapshot"]["project"]["metadata"]["title"],
+            "Loaded Subpatch Project"
+        );
+        assert_eq!(
+            response["snapshot"]["project"]["metadata"]["source"],
+            "session-load-test"
+        );
+        assert_eq!(
+            response["snapshot"]["project"]["tutorial"]["steps"][0]["id"],
+            "intro"
+        );
+        assert_eq!(
+            response["snapshot"]["project"]["help"]["topics"][0],
+            "core.subpatch"
+        );
+        assert_eq!(
+            response["snapshot"]["project"]["patchLibrary"][0]["id"],
+            "identity"
+        );
         assert_eq!(
             response["snapshot"]["project"]["graph"]["id"],
-            "minimal-value"
+            "subpatch-project-root"
         );
         assert_eq!(response["snapshot"]["project"]["graph"]["revision"], "1");
         assert_eq!(response["snapshot"]["sessionRevision"], 1);
-        assert_eq!(response["snapshot"]["plan"]["graphId"], "minimal-value");
+        assert_eq!(
+            response["snapshot"]["plan"]["graphId"],
+            "subpatch-project-root"
+        );
 
         let snapshot = get_json_with(app, "/v0/session").await;
         assert_eq!(
             snapshot["snapshot"]["project"]["graph"]["id"],
-            "minimal-value"
+            "subpatch-project-root"
+        );
+        assert!(
+            snapshot["snapshot"]["plan"]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["nodeId"] == "fx::pass")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_rejects_v01_active_payloads() {
+        let app = runtime_router();
+        let response = post_json_with(app, "/v0/session/load", sample_project()).await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["snapshot"]["project"], Value::Null);
+        assert_eq!(
+            response["diagnostics"][0]["code"],
+            "project.active-v0.1-unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_legacy_import_migrates_v01_to_active_v02_with_warning() {
+        let app = runtime_router();
+        let response = post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["snapshot"]["project"]["schemaVersion"], "0.2.0");
+        assert_eq!(
+            response["snapshot"]["project"]["graph"]["schemaVersion"],
+            "0.2.0"
         );
         assert_eq!(
-            snapshot["snapshot"]["plan"]["nodes"][0]["nodeId"],
-            "value_1"
+            response["diagnostics"][0]["code"],
+            "project.legacy-v0.1-import"
+        );
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["schemaVersion"], "0.2.0");
+        assert_eq!(
+            snapshot["snapshot"]["diagnostics"][0]["code"],
+            "project.legacy-v0.1-import"
         );
     }
 
@@ -4468,7 +4338,12 @@ mod tests {
     async fn default_alias_and_explicit_default_session_share_behavior() {
         let app = runtime_router();
 
-        let alias = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        let alias = post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         let explicit = get_json_with(app.clone(), "/v0/sessions/default").await;
         let info = get_json_with(app, "/v0/sessions/default/info").await;
 
@@ -4490,17 +4365,22 @@ mod tests {
     async fn explicit_sessions_keep_graph_control_and_history_state_separate() {
         let app = runtime_router();
 
-        post_json_with(app.clone(), "/v0/sessions/alpha/load", sample_project()).await;
         post_json_with(
             app.clone(),
-            "/v0/sessions/beta/load",
-            sample_shader_project(),
+            "/v0/sessions/alpha/import/legacy-v0.1",
+            sample_project(),
         )
         .await;
         post_json_with(
             app.clone(),
-            "/v0/sessions/alpha/mutate",
-            graph_mutation(set_value_patch("1")),
+            "/v0/sessions/beta/load",
+            sample_shader_project_v02(),
+        )
+        .await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/alpha/operation",
+            paste_operation("1"),
         )
         .await;
         let alpha_control = post_json_with(
@@ -4536,11 +4416,16 @@ mod tests {
     #[tokio::test]
     async fn invalid_session_load_does_not_replace_existing_session() {
         let app = runtime_router();
-        let loaded = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        let loaded = post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         let mut invalid = sample_project();
         invalid["nodes"] = json!([]);
 
-        let response = post_json_with(app.clone(), "/v0/session/load", invalid).await;
+        let response = post_json_with(app.clone(), "/v0/session/import/legacy-v0.1", invalid).await;
 
         assert_eq!(loaded["snapshot"]["sessionRevision"], 1);
         assert_eq!(response["ok"], false);
@@ -4562,13 +4447,21 @@ mod tests {
             snapshot["snapshot"]["project"]["graph"]["id"],
             "minimal-value"
         );
-        assert_eq!(snapshot["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            snapshot["snapshot"]["diagnostics"][0]["code"],
+            "project.legacy-v0.1-import"
+        );
     }
 
     #[tokio::test]
-    async fn session_validate_plan_and_run_use_loaded_project() {
+    async fn session_validate_plan_and_run_use_loaded_project_document_patch_library() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/load",
+            sample_subpatch_project_document_v02(),
+        )
+        .await;
 
         let validation = post_empty_with(app.clone(), "/v0/session/validate").await;
         assert_eq!(validation["ok"], true);
@@ -4576,7 +4469,19 @@ mod tests {
 
         let plan = post_empty_with(app.clone(), "/v0/session/plan").await;
         assert_eq!(plan["ok"], true);
-        assert_eq!(plan["snapshot"]["plan"]["graphId"], "minimal-value");
+        assert_eq!(plan["snapshot"]["project"]["id"], "subpatch-project");
+        assert_eq!(
+            plan["snapshot"]["project"]["patchLibrary"][0]["id"],
+            "identity"
+        );
+        assert_eq!(plan["snapshot"]["plan"]["graphId"], "subpatch-project-root");
+        assert!(
+            plan["snapshot"]["plan"]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["nodeId"] == "fx::pass")
+        );
 
         let run = post_json_with(app, "/v0/session/run", json!({ "frames": 2 })).await;
         assert_eq!(run["ok"], true);
@@ -4588,77 +4493,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_mutate_endpoint_applies_and_rejects_conflicts() {
+    async fn session_operation_endpoint_applies_and_rejects_conflicts() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
-
-        let patched = post_json_with(
+        post_json_with(
             app.clone(),
-            "/v0/session/mutate",
-            graph_mutation(set_value_patch("1")),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
         )
         .await;
+
+        let patched =
+            post_json_with(app.clone(), "/v0/session/operation", paste_operation("1")).await;
         assert_eq!(patched["ok"], true);
         assert_eq!(patched["applied"], true);
         assert_eq!(patched["conflict"], false);
-        assert_eq!(patched["snapshot"]["project"]["graph"]["revision"], "2");
-        assert_eq!(patched["history"]["entries"][0]["kind"], "apply");
-        assert_eq!(
-            patched["history"]["entries"][0]["mutation"]["graphPatch"]["baseRevision"],
-            "1"
-        );
-        assert_eq!(
-            patched["history"]["entries"][0]["inverseMutation"]["graphPatch"]["baseRevision"],
-            "2"
-        );
-        assert_eq!(patched["history"]["undoDepth"], 1);
-        assert_eq!(patched["history"]["redoDepth"], 0);
-        assert_eq!(patched["snapshot"]["sessionRevision"], 2);
-        assert_eq!(patched["snapshot"]["plan"]["graphRevision"], "2");
+        assert_eq!(patched["revisionBefore"], "1");
+        assert_eq!(patched["revisionAfter"], "2");
 
-        let conflict = post_json_with(
-            app,
-            "/v0/session/mutate",
-            graph_mutation(set_value_patch("1")),
-        )
-        .await;
+        let snapshot = get_json_with(app.clone(), "/v0/session").await;
+        let history = get_json_with(app.clone(), "/v0/session/history").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
+        assert_eq!(history["entries"][0]["kind"], "apply");
+        assert_eq!(history["undoDepth"], 1);
+        assert_eq!(history["redoDepth"], 0);
+        assert_eq!(snapshot["snapshot"]["sessionRevision"], 2);
+        assert_eq!(snapshot["snapshot"]["plan"]["graphRevision"], "2");
+
+        let conflict = post_json_with(app, "/v0/session/operation", paste_operation("1")).await;
         assert_eq!(conflict["ok"], false);
         assert_eq!(conflict["applied"], false);
         assert_eq!(conflict["conflict"], true);
-        assert_eq!(conflict["snapshot"]["project"]["graph"]["revision"], "2");
-        assert_eq!(conflict["history"]["entries"].as_array().unwrap().len(), 1);
         assert!(
             conflict["diagnostics"][0]["message"]
                 .as_str()
                 .unwrap()
-                .contains("does not match session graph revision")
+                .contains("does not match target graph revision")
         );
     }
 
     #[tokio::test]
     async fn actor_attribution_is_optional_and_client_metadata_is_preserved() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
-
-        let omitted = post_json_with(
+        post_json_with(
             app.clone(),
-            "/v0/session/mutate",
-            graph_mutation(set_value_patch("1")),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
         )
         .await;
-        let mut attributed_mutation = graph_mutation(set_value_patch("2"));
-        attributed_mutation["clientId"] = json!("studio-window-a");
-        let attributed = post_json_with(app, "/v0/session/mutate", attributed_mutation).await;
+
+        let mut omitted_operation = paste_operation("1");
+        omitted_operation
+            .as_object_mut()
+            .expect("operation should be an object")
+            .remove("attribution");
+        let omitted = post_json_with(app.clone(), "/v0/session/operation", omitted_operation).await;
+        let mut attributed_operation = paste_operation("2");
+        attributed_operation["attribution"]["clientId"] = json!("studio-window-a");
+        let attributed =
+            post_json_with(app.clone(), "/v0/session/operation", attributed_operation).await;
+        let history = get_json_with(app, "/v0/session/history").await;
 
         assert_eq!(omitted["ok"], true);
-        assert_eq!(omitted["history"]["entries"][0]["clientId"], Value::Null);
         assert_eq!(attributed["ok"], true);
+        assert_eq!(history["entries"][0]["clientId"], Value::Null);
+        assert_eq!(history["entries"][1]["clientId"], "studio-window-a");
         assert_eq!(
-            attributed["history"]["entries"][1]["clientId"],
-            "studio-window-a"
-        );
-        assert_eq!(
-            attributed["history"]["entries"][1]["mutation"]["clientId"],
+            history["entries"][1]["mutation"]["clientId"],
             "studio-window-a"
         );
     }
@@ -4666,7 +4566,12 @@ mod tests {
     #[tokio::test]
     async fn session_operation_endpoint_pastes_graph_fragment() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let response =
             post_json_with(app.clone(), "/v0/session/operation", paste_operation("1")).await;
@@ -4692,11 +4597,56 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|edge| {
-                    edge["from"]["node"] == "value_1_2"
-                        && edge["from"]["port"] == "value"
-                        && edge["to"]["node"] == "pasted_target"
-                        && edge["to"]["port"] == "cold"
+                    edge["source"]["nodeId"] == "value_1_2"
+                        && edge["source"]["portId"] == "value"
+                        && edge["target"]["nodeId"] == "pasted_target"
+                        && edge["target"]["portId"] == "cold"
                 })
+        );
+    }
+
+    #[tokio::test]
+    async fn session_operation_endpoint_pastes_into_project_patch_definition_target() {
+        let app = runtime_router();
+        post_json_with(
+            app.clone(),
+            "/v0/session/load",
+            sample_subpatch_project_document_v02(),
+        )
+        .await;
+
+        let response = post_json_with(
+            app.clone(),
+            "/v0/session/operation",
+            patch_definition_paste_operation("1"),
+        )
+        .await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["applied"], true);
+        assert_eq!(response["revisionBefore"], "1");
+        assert_eq!(response["revisionAfter"], "2");
+        assert_eq!(
+            response["target"]["path"]["kind"],
+            "project-patch-definition"
+        );
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "1");
+        assert_eq!(
+            snapshot["snapshot"]["project"]["patchLibrary"][0]["revision"],
+            "2"
+        );
+        assert_eq!(
+            snapshot["snapshot"]["project"]["patchLibrary"][0]["graph"]["revision"],
+            "2"
+        );
+        assert!(
+            snapshot["snapshot"]["project"]["patchLibrary"][0]["graph"]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["id"] == "patch_debug")
         );
     }
 
@@ -4724,7 +4674,12 @@ mod tests {
     #[tokio::test]
     async fn session_operations_endpoint_accepts_runtime_paste_operation_alias() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let response =
             post_json_with(app.clone(), "/v0/session/operations", paste_operation("1")).await;
@@ -4743,7 +4698,12 @@ mod tests {
     async fn collaboration_operations_apply_paste_and_publish_result_events() {
         let state = runtime_state_with_dry_preview();
         let app = runtime_router_with_state(state.clone());
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let response = post_json_with(
             app.clone(),
@@ -4782,7 +4742,12 @@ mod tests {
     #[tokio::test]
     async fn collaboration_operations_report_duplicate_idempotency_without_reapplying() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         post_json_with(
             app.clone(),
             "/v0/session/operations",
@@ -4816,7 +4781,12 @@ mod tests {
     #[tokio::test]
     async fn collaboration_operations_serialize_concurrent_idempotency() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let first = post_json_with(
             app.clone(),
@@ -4861,7 +4831,12 @@ mod tests {
     #[tokio::test]
     async fn collaboration_operations_transform_stale_paste_to_current_revision() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         post_json_with(
             app.clone(),
             "/v0/session/operations",
@@ -4908,7 +4883,12 @@ mod tests {
     #[tokio::test]
     async fn collaboration_operation_batches_report_mixed_accept_and_rebase_results() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let response = post_json_with(
             app.clone(),
@@ -4951,7 +4931,12 @@ mod tests {
     #[tokio::test]
     async fn collaboration_change_sets_apply_node_view_and_edge_operations() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let accepted = post_json_with(
             app.clone(),
@@ -5023,7 +5008,9 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|edge| edge["to"]["node"] == "gain" && edge["to"]["port"] == "cold")
+                .any(
+                    |edge| edge["target"]["nodeId"] == "gain" && edge["target"]["portId"] == "cold"
+                )
         );
         assert_eq!(
             snapshot["snapshot"]["project"]["viewState"]["canvas"]["nodes"]["value_1"]["x"],
@@ -5093,9 +5080,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn collaboration_change_sets_resolve_patch_definition_target_revision() {
+        let app = runtime_router();
+        post_json_with(
+            app.clone(),
+            "/v0/session/load",
+            sample_subpatch_project_document_v02(),
+        )
+        .await;
+        let root_bump = post_json_with(
+            app.clone(),
+            "/v0/session/operation",
+            root_render_paste_operation("1"),
+        )
+        .await;
+        assert_eq!(root_bump["ok"], true);
+
+        let accepted = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_patch_change_set_operation(
+                "1",
+                "op-patch-change",
+                "idem-patch-change",
+                "participant-a",
+                vec![json!({
+                  "op": "node.add",
+                  "changeId": "change-add-patch-debug",
+                  "node": render_clear_color_node_v02_json("patch_debug_collab")
+                })],
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(accepted).expect("patch change-set result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("patch change-set result should validate");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
+        assert!(result.rebase.is_none());
+        assert_eq!(
+            result.ack.as_ref().map(|ack| ack.revision.as_str()),
+            Some("2")
+        );
+
+        let stale = post_json_with(
+            app.clone(),
+            "/v0/session/operations",
+            collaboration_patch_change_set_operation(
+                "1",
+                "op-patch-stale-change",
+                "idem-patch-stale-change",
+                "participant-a",
+                vec![json!({
+                  "op": "node.add",
+                  "changeId": "change-add-patch-debug-rebased",
+                  "node": render_clear_color_node_v02_json("patch_debug_rebased")
+                })],
+            ),
+        )
+        .await;
+        let result: RuntimeCollaborationOperationResult =
+            serde_json::from_value(stale).expect("stale patch change-set result should parse");
+        validate_runtime_collaboration_operation_result(&result)
+            .expect("stale patch change-set result should validate");
+        assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rebased);
+        assert_eq!(
+            result
+                .rebase
+                .as_ref()
+                .and_then(|rebase| rebase.transformed_payload.as_ref())
+                .and_then(collaboration_payload_base_revision),
+            Some("2")
+        );
+        assert_eq!(
+            result.ack.as_ref().map(|ack| ack.revision.as_str()),
+            Some("3")
+        );
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
+        assert_eq!(
+            snapshot["snapshot"]["project"]["patchLibrary"][0]["graph"]["revision"],
+            "3"
+        );
+        let patch_nodes = snapshot["snapshot"]["project"]["patchLibrary"][0]["graph"]["nodes"]
+            .as_array()
+            .unwrap();
+        assert!(
+            patch_nodes
+                .iter()
+                .any(|node| node["id"] == "patch_debug_collab")
+        );
+        assert!(
+            patch_nodes
+                .iter()
+                .any(|node| node["id"] == "patch_debug_rebased")
+        );
+    }
+
+    #[tokio::test]
     async fn collaboration_undo_redo_uses_participant_scoped_history() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         post_json_with(
             app.clone(),
             "/v0/session/operations",
@@ -5139,7 +5230,12 @@ mod tests {
         assert!(nodes.iter().any(|node| node["id"] == "pasted_target_2"));
 
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         post_json_with(
             app.clone(),
             "/v0/session/operations",
@@ -5437,7 +5533,12 @@ mod tests {
             serde_json::from_value(mismatch).expect("mismatch result should parse");
         assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rejected);
 
-        post_json_with(app.clone(), "/v0/sessions/gamma/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/gamma/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         let mut by_id_operation =
             collaboration_paste_operation_for("1", "op-by-id", "idem-by-id", "participant-a");
         by_id_operation["sessionId"] = json!("gamma");
@@ -5465,7 +5566,7 @@ mod tests {
                   "node": {
                     "id": "gain",
                     "kind": "core.float",
-                    "kindVersion": "0.1.0",
+                    "kindVersion": "0.2.0",
                     "params": {},
                     "ports": value_f32_ports_v02_json()
                   }
@@ -5505,7 +5606,12 @@ mod tests {
                 .contains("paste.target.no-project")
         );
 
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         let unknown_edge = post_json_with(
             app.clone(),
             "/v0/session/operations",
@@ -5582,21 +5688,34 @@ mod tests {
             ))
             .expect("operation should parse");
 
-        let err = lower_collaboration_change_set(&record, &operation, &operation.payload)
-            .expect_err("undoRedo payload should not lower as changeSet");
-        assert!(err.contains("not a changeSet"));
-
         let project: ProjectRequest =
             serde_json::from_value(sample_project()).expect("sample project should parse");
-        let patch: GraphPatch =
-            serde_json::from_value(set_value_patch("1")).expect("patch should parse");
         let response = {
             let mut session = record
                 .session
                 .write()
                 .expect("runtime session lock should not be poisoned");
-            assert!(session.load_project(project).ok);
-            session.apply_patch(patch)
+            assert!(session.import_legacy_project_v01(project).ok);
+            session.apply_mutation(RuntimeMutationRequest {
+                graph_patch: None,
+                view_patch: Some(RuntimeViewPatch {
+                    base_view_revision: 1,
+                    ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                        node_id: "value_1".to_owned(),
+                        from: None,
+                        to: CanvasNodeView {
+                            x: 120.0,
+                            y: 120.0,
+                            width: None,
+                            height: None,
+                            collapsed: None,
+                        },
+                    }],
+                }),
+                actor_id: Some("participant-a".to_owned()),
+                client_id: Some("studio-test".to_owned()),
+                description: Some("view-only helper mutation".to_owned()),
+            })
         };
         let rebase = collaboration_rebase(
             &record,
@@ -5612,6 +5731,7 @@ mod tests {
             response,
             record.collaboration.reserve_sequence(),
             Some(rebase),
+            None,
             Some(operation.payload.clone()),
         );
         assert_eq!(result.status, RuntimeCollaborationOperationStatus::Rebased);
@@ -5664,22 +5784,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_mutate_endpoint_reports_unsupported_operations() {
+    async fn session_mutate_endpoint_rejects_active_v01_graph_patches() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let response = post_json_with(
             app,
             "/v0/session/mutate",
-            graph_mutation(json!({
-              "schema": "skenion.graph.patch",
-              "schemaVersion": "0.1.0",
-              "id": "unsupported",
-              "baseRevision": "1",
-              "ops": [
-                { "op": "moveNode", "nodeId": "value_1" }
-              ]
-            })),
+            graph_mutation(set_value_patch("1")),
         )
         .await;
 
@@ -5688,12 +5805,100 @@ mod tests {
         assert_eq!(response["conflict"], false);
         assert_eq!(response["snapshot"]["project"]["graph"]["revision"], "1");
         assert_eq!(response["history"]["entries"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            response["diagnostics"][0]["code"],
+            "project.active-v0.1-graph-patch-unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_and_addressed_mutate_cover_decode_and_event_branches() {
+        let state = runtime_state_with_dry_preview();
+        let app = runtime_router_with_state(state.clone());
+
+        let bad_load = post_json_with(
+            app.clone(),
+            "/v0/session/load",
+            json!({ "graph": { "schemaVersion": "0.2.0" } }),
+        )
+        .await;
+        assert_eq!(bad_load["ok"], false);
         assert!(
-            response["diagnostics"][0]["message"]
+            bad_load["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid project request")
+        );
+
+        let bad_mutation = post_json_with(
+            app.clone(),
+            "/v0/sessions/gamma/mutate",
+            json!({ "viewPatch": { "baseViewRevision": "wrong", "ops": [] } }),
+        )
+        .await;
+        assert_eq!(bad_mutation["ok"], false);
+        assert!(
+            bad_mutation["diagnostics"][0]["message"]
                 .as_str()
                 .unwrap()
                 .contains("invalid runtime mutation")
         );
+
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/gamma/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
+        let moved = post_json_with(
+            app.clone(),
+            "/v0/sessions/gamma/mutate",
+            json!({
+              "viewPatch": {
+                "baseViewRevision": 1,
+                "ops": [
+                  {
+                    "op": "moveNodeView",
+                    "nodeId": "value_1",
+                    "to": { "x": 128.0, "y": 64.0 }
+                  }
+                ]
+              },
+              "clientId": "studio-test",
+              "description": "move through addressed route"
+            }),
+        )
+        .await;
+        assert_eq!(moved["ok"], true);
+        assert_eq!(moved["applied"], true);
+        assert_eq!(
+            moved["snapshot"]["project"]["viewState"]["canvas"]["nodes"]["value_1"]["x"],
+            128.0
+        );
+
+        let gamma = state.sessions.get_or_create("gamma");
+        let events = gamma
+            .event_store
+            .lock()
+            .expect("event store should not be poisoned")
+            .clone();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == RuntimeSessionEventKind::Mutate)
+        );
+    }
+
+    #[test]
+    fn registry_from_nodes_reports_duplicate_definitions() {
+        let project: ProjectRequest =
+            serde_json::from_value(sample_project()).expect("sample project should parse");
+        let duplicate_nodes = vec![project.nodes[0].clone(), project.nodes[0].clone()];
+
+        let diagnostics =
+            registry_from_nodes(duplicate_nodes).expect_err("duplicate definitions should fail");
+
+        assert!(diagnostics[0].message.contains("duplicate node definition"));
     }
 
     #[tokio::test]
@@ -5706,13 +5911,13 @@ mod tests {
         assert_eq!(empty["canUndo"], false);
         assert_eq!(empty["canRedo"], false);
 
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
         post_json_with(
             app.clone(),
-            "/v0/session/mutate",
-            graph_mutation(set_value_patch("1")),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
         )
         .await;
+        post_json_with(app.clone(), "/v0/session/operation", paste_operation("1")).await;
         let history = get_json_with(app, "/v0/session/history").await;
 
         assert_eq!(history["entries"].as_array().unwrap().len(), 1);
@@ -5724,13 +5929,13 @@ mod tests {
     #[tokio::test]
     async fn session_undo_and_redo_endpoints_update_graph_and_history() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
         post_json_with(
             app.clone(),
-            "/v0/session/mutate",
-            graph_mutation(set_value_patch("1")),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
         )
         .await;
+        post_json_with(app.clone(), "/v0/session/operation", paste_operation("1")).await;
 
         let undo = post_empty_with(app.clone(), "/v0/session/undo").await;
         assert_eq!(undo["ok"], true);
@@ -5779,7 +5984,12 @@ mod tests {
     #[tokio::test]
     async fn session_control_event_and_state_endpoints_follow_value_semantics() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let set = post_json_with(
             app.clone(),
@@ -5880,7 +6090,12 @@ mod tests {
     async fn session_control_event_reports_running_preview_snapshot_update_warnings() {
         let state = runtime_state_with_dry_preview();
         let app = runtime_router_with_state(state.clone());
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         post_empty_with(app.clone(), "/v0/session/preview/start").await;
         let blocker = std::env::temp_dir().join(format!(
             "skenion-preview-control-update-blocker-{}-{}",
@@ -5979,7 +6194,12 @@ mod tests {
     #[tokio::test]
     async fn session_clear_removes_loaded_project() {
         let app = runtime_router();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let response = delete_json_with(app, "/v0/session").await;
 
@@ -6023,7 +6243,12 @@ mod tests {
     #[tokio::test]
     async fn preview_start_stop_and_restart_use_session_plan() {
         let app = runtime_router_with_dry_preview();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let started = post_empty_with(app.clone(), "/v0/session/preview/start").await;
         assert_eq!(started["ok"], true);
@@ -6048,14 +6273,14 @@ mod tests {
     #[tokio::test]
     async fn preview_start_request_restart_replaces_existing_preview() {
         let app = runtime_router_with_dry_preview();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
-        post_empty_with(app.clone(), "/v0/session/preview/start").await;
         post_json_with(
             app.clone(),
-            "/v0/session/mutate",
-            graph_mutation(set_value_patch("1")),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
         )
         .await;
+        post_empty_with(app.clone(), "/v0/session/preview/start").await;
+        post_json_with(app.clone(), "/v0/session/operation", paste_operation("1")).await;
 
         let stale = get_json_with(app.clone(), "/v0/session/preview").await;
         assert_eq!(stale["state"], "running");
@@ -6075,7 +6300,12 @@ mod tests {
     #[tokio::test]
     async fn preview_start_rejects_invalid_request_json() {
         let app = runtime_router_with_dry_preview();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let response = post_raw_with(app, "/v0/session/preview/start", b"{".to_vec()).await;
 
@@ -6092,7 +6322,12 @@ mod tests {
     #[tokio::test]
     async fn session_clear_stops_preview() {
         let app = runtime_router_with_dry_preview();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         post_empty_with(app.clone(), "/v0/session/preview/start").await;
 
         let cleared = delete_json_with(app.clone(), "/v0/session").await;
@@ -6126,7 +6361,12 @@ mod tests {
     #[tokio::test]
     async fn telemetry_endpoint_reports_loaded_session_without_preview() {
         let app = runtime_router_with_dry_preview();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
 
         let response = get_json_with(app, "/v0/session/telemetry").await;
 
@@ -6143,7 +6383,12 @@ mod tests {
     #[tokio::test]
     async fn telemetry_endpoint_reports_dry_run_preview() {
         let app = runtime_router_with_dry_preview();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
+        )
+        .await;
         post_empty_with(app.clone(), "/v0/session/preview/start").await;
 
         let response = get_json_with(app, "/v0/session/telemetry").await;
@@ -6161,14 +6406,14 @@ mod tests {
     #[tokio::test]
     async fn telemetry_endpoint_marks_preview_stale_after_patch() {
         let app = runtime_router_with_dry_preview();
-        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
-        post_empty_with(app.clone(), "/v0/session/preview/start").await;
         post_json_with(
             app.clone(),
-            "/v0/session/mutate",
-            graph_mutation(set_value_patch("1")),
+            "/v0/session/import/legacy-v0.1",
+            sample_project(),
         )
         .await;
+        post_empty_with(app.clone(), "/v0/session/preview/start").await;
+        post_json_with(app.clone(), "/v0/session/operation", paste_operation("1")).await;
 
         let response = get_json_with(app, "/v0/session/telemetry").await;
 
@@ -6181,7 +6426,7 @@ mod tests {
     #[tokio::test]
     async fn generated_shader_endpoint_returns_source_and_source_map() {
         let app = runtime_router_with_dry_preview();
-        post_json_with(app.clone(), "/v0/session/load", sample_shader_project()).await;
+        post_json_with(app.clone(), "/v0/session/load", sample_shader_project_v02()).await;
 
         let response = get_json_with(app, "/v0/session/render/generated-shader").await;
         assert_eq!(response["ok"], true);
@@ -6215,7 +6460,7 @@ mod tests {
         assert_eq!(empty["diagnostics"][0]["phase"], json!("source-sync"));
 
         let app = runtime_router_with_dry_preview();
-        let mut project = sample_shader_project();
+        let mut project = sample_shader_project_v02();
         project["graph"]["nodes"][0]["params"]["source"] = json!(
             "// @skenion.uniform bad vec3\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
         );
@@ -6454,6 +6699,71 @@ mod tests {
         })
     }
 
+    fn sample_project_document_v02() -> Value {
+        json!({
+          "schema": "skenion.project",
+          "schemaVersion": "0.2.0",
+          "id": "minimal-value-project",
+          "revision": "1",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.2.0",
+            "id": "minimal-value",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "value_1",
+                "kind": "core.float",
+                "kindVersion": "0.2.0",
+                "params": {},
+                "ports": value_f32_ports_v02_json()
+              },
+              {
+                "id": "target_1",
+                "kind": "core.float",
+                "kindVersion": "0.2.0",
+                "params": {},
+                "ports": value_f32_ports_v02_json()
+              }
+            ],
+            "edges": [
+              {
+                "id": "edge_value_target",
+                "source": { "nodeId": "value_1", "portId": "value" },
+                "target": { "nodeId": "target_1", "portId": "cold" },
+                "resolvedType": "number.float"
+              }
+            ]
+          },
+          "viewState": {
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": {
+              "nodes": {
+                "value_1": { "x": 96.0, "y": 96.0 },
+                "target_1": { "x": 260.0, "y": 96.0 }
+              }
+            }
+          },
+          "patchLibrary": [],
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.2.0",
+              "id": "core.float",
+              "version": "0.2.0",
+              "displayName": "Float Value",
+              "category": "Values",
+              "ports": value_f32_ports_v02_json(),
+              "execution": { "model": "value" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": []
+            }
+          ]
+        })
+    }
+
     fn value_f32_ports_json() -> Value {
         json!([
           {
@@ -6481,18 +6791,18 @@ mod tests {
         ])
     }
 
-    fn sample_shader_project() -> Value {
+    fn sample_shader_project_v02() -> Value {
         json!({
           "graph": {
             "schema": "skenion.graph",
-            "schemaVersion": "0.1.0",
+            "schemaVersion": "0.2.0",
             "id": "shader-diagnostics",
             "revision": "1",
             "nodes": [
               {
                 "id": "shader_1",
                 "kind": "render.fullscreen-shader",
-                "kindVersion": "0.1.0",
+                "kindVersion": "0.2.0",
                 "params": {
                   "language": "wgsl",
                   "source": "// @skenion.uniform speed number.float default=0.5\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(skenion.speed, 0.0, 1.0, 1.0); }"
@@ -6502,21 +6812,18 @@ mod tests {
                     "id": "speed",
                     "direction": "input",
                     "label": "Speed",
-                    "type": { "flow": "value", "dataKind": "number.float", "format": "f32" },
+                    "type": "number.float",
+                    "rate": "control",
                     "required": false,
-                    "default": 0.5,
-                    "activation": "latched"
+                    "defaultValue": 0.5,
+                    "triggerMode": "latched"
                   },
                   {
                     "id": "out",
                     "direction": "output",
                     "label": "Out",
-                    "type": {
-                      "flow": "resource",
-                      "dataKind": "gpu.texture2d",
-                      "format": "rgba8unorm",
-                      "colorSpace": "srgb"
-                    }
+                    "type": "gpu.texture2d",
+                    "rate": "resource"
                   }
                 ]
               }
@@ -6526,25 +6833,31 @@ mod tests {
           "nodes": [
             {
               "schema": "skenion.node.definition",
-              "schemaVersion": "0.1.0",
+              "schemaVersion": "0.2.0",
               "id": "render.fullscreen-shader",
-              "version": "0.1.0",
+              "version": "0.2.0",
               "displayName": "Fullscreen Shader",
               "category": "Render",
               "ports": [
                 {
+                  "id": "speed",
+                  "direction": "input",
+                  "label": "Speed",
+                  "type": "number.float",
+                  "rate": "control",
+                  "required": false,
+                  "defaultValue": 0.5,
+                  "triggerMode": "latched"
+                },
+                {
                   "id": "out",
                   "direction": "output",
                   "label": "Out",
-                  "type": {
-                    "flow": "resource",
-                    "dataKind": "gpu.texture2d",
-                    "format": "rgba8unorm",
-                    "colorSpace": "srgb"
-                  }
+                  "type": "gpu.texture2d",
+                  "rate": "resource"
                 }
               ],
-              "execution": { "model": "gpu_pass" },
+              "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
               "capabilities": []
@@ -6943,6 +7256,48 @@ mod tests {
         })
     }
 
+    fn root_render_paste_operation(base_revision: &str) -> Value {
+        paste_render_node_operation(base_revision, json!({ "kind": "root" }), "root_debug")
+    }
+
+    fn patch_definition_paste_operation(base_revision: &str) -> Value {
+        paste_render_node_operation(
+            base_revision,
+            json!({ "kind": "project-patch-definition", "patchId": "identity" }),
+            "patch_debug",
+        )
+    }
+
+    fn paste_render_node_operation(base_revision: &str, path: Value, node_id: &str) -> Value {
+        json!({
+          "schema": "skenion.runtime.operation",
+          "schemaVersion": "0.1.0",
+          "id": format!("op-paste-{node_id}"),
+          "kind": "pasteGraphFragment",
+          "request": {
+            "target": {
+              "path": path,
+              "baseRevision": base_revision
+            },
+            "fragment": {
+              "schema": "skenion.graph.fragment",
+              "schemaVersion": "0.2.0",
+              "nodes": [
+                render_clear_color_node_v02_json(node_id)
+              ],
+              "edges": []
+            },
+            "options": {
+              "idConflictPolicy": "remap"
+            }
+          },
+          "attribution": {
+            "clientId": "studio-test",
+            "label": "Paste render test node"
+          }
+        })
+    }
+
     fn collaboration_paste_operation(
         base_revision: &str,
         operation_id: &str,
@@ -7026,6 +7381,41 @@ mod tests {
         participant_id: &str,
         changes: Vec<Value>,
     ) -> Value {
+        collaboration_change_set_operation_with_path(
+            base_revision,
+            operation_id,
+            idempotency_key,
+            participant_id,
+            json!({ "kind": "root" }),
+            changes,
+        )
+    }
+
+    fn collaboration_patch_change_set_operation(
+        base_revision: &str,
+        operation_id: &str,
+        idempotency_key: &str,
+        participant_id: &str,
+        changes: Vec<Value>,
+    ) -> Value {
+        collaboration_change_set_operation_with_path(
+            base_revision,
+            operation_id,
+            idempotency_key,
+            participant_id,
+            json!({ "kind": "project-patch-definition", "patchId": "identity" }),
+            changes,
+        )
+    }
+
+    fn collaboration_change_set_operation_with_path(
+        base_revision: &str,
+        operation_id: &str,
+        idempotency_key: &str,
+        participant_id: &str,
+        path: Value,
+        changes: Vec<Value>,
+    ) -> Value {
         json!({
           "schema": "skenion.runtime.collaboration.operation",
           "schemaVersion": "0.1.0",
@@ -7041,7 +7431,7 @@ mod tests {
           "payload": {
             "kind": "changeSet",
             "target": {
-              "path": { "kind": "root" },
+              "path": path,
               "baseRevision": base_revision
             },
             "changes": changes,
@@ -7049,6 +7439,18 @@ mod tests {
           },
           "correlationId": "studio-test",
           "submittedAt": "2026-06-22T00:00:00.000Z"
+        })
+    }
+
+    fn render_clear_color_node_v02_json(node_id: &str) -> Value {
+        json!({
+          "id": node_id,
+          "kind": "render.clear-color",
+          "kindVersion": "0.2.0",
+          "params": { "color": [0.02, 0.04, 0.08, 1.0] },
+          "ports": [
+            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+          ]
         })
     }
 

@@ -21,7 +21,7 @@ midir = "0.11"
 pollster = "0.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-skenion-contracts = { version = "0.38.0", path = "../Skenion-contracts/packages/rust" }
+skenion-contracts = { version = "0.39.0", path = "../Skenion-contracts/packages/rust" }
 thiserror = "2.0.17"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }

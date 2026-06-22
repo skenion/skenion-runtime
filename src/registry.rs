@@ -250,6 +250,13 @@ mod tests {
         assert!(!registry.is_empty());
         assert!(registry.get("core.node", "0.1.0").is_some());
         assert!(registry.get("core.node", "0.2.0").is_none());
+        assert_eq!(
+            registry
+                .definitions()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["core.node"]
+        );
     }
 
     #[test]
