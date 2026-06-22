@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.41.1...skenion-runtime-v0.42.0) (2026-06-22)
+
+
+### Features
+
+* **runtime:** use current 0.1 contract surface ([84ff11c](https://github.com/echovisionlab/skenion-runtime/commit/84ff11cf6144ebfbbb7703784b1105e50f6a36ff))
+
 ## [0.41.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.41.0...skenion-runtime-v0.41.1) (2026-06-22)
 
 
