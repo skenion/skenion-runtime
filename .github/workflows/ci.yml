@@ -5,12 +5,16 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
 
 permissions:
   contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RUNTIME_BIN: target/debug/skenion-runtime
 
 jobs:
   runtime:
@@ -40,16 +44,20 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
-      - run: cargo build --bin skenion-runtime --all-features
-      - run: target/debug/skenion-runtime validate-project --project fixtures/current-0.1/valid/clear-color-render.project.json
-      - run: target/debug/skenion-runtime plan --project fixtures/current-0.1/valid/clear-color-render.project.json --format json
-      - run: target/debug/skenion-runtime run --project fixtures/current-0.1/valid/clear-color-render.project.json --frames 2 --format json
-      - run: target/debug/skenion-runtime serve --help
-      - run: target/debug/skenion-runtime preview-plan --help
-      - run: target/debug/skenion-runtime preview-document --help
-      - run: target/debug/skenion-runtime clock-midi --help
-      - run: |
-          SKENION_PREVIEW_DRY_RUN=1 target/debug/skenion-runtime serve --host 127.0.0.1 --port 3761 &
+      - name: Build runtime smoke binary
+        run: cargo build --bin skenion-runtime --all-features
+      - name: Smoke runtime CLI
+        run: |
+          "${RUNTIME_BIN}" validate-project --project fixtures/current-0.1/valid/clear-color-render.project.json
+          "${RUNTIME_BIN}" plan --project fixtures/current-0.1/valid/clear-color-render.project.json --format json
+          "${RUNTIME_BIN}" run --project fixtures/current-0.1/valid/clear-color-render.project.json --frames 2 --format json
+          "${RUNTIME_BIN}" serve --help
+          "${RUNTIME_BIN}" preview-plan --help
+          "${RUNTIME_BIN}" preview-document --help
+          "${RUNTIME_BIN}" clock-midi --help
+      - name: Smoke runtime health endpoint
+        run: |
+          SKENION_PREVIEW_DRY_RUN=1 "${RUNTIME_BIN}" serve --host 127.0.0.1 --port 3761 &
           SERVER_PID=$!
           trap "kill $SERVER_PID" EXIT
           for attempt in $(seq 1 20); do
@@ -60,8 +68,9 @@ jobs:
           done
           echo "runtime health endpoint did not become ready" >&2
           exit 1
-      - run: |
-          SKENION_PREVIEW_DRY_RUN=1 target/debug/skenion-runtime serve --host 127.0.0.1 --port 3761 &
+      - name: Smoke runtime HTTP API
+        run: |
+          SKENION_PREVIEW_DRY_RUN=1 "${RUNTIME_BIN}" serve --host 127.0.0.1 --port 3761 &
           SERVER_PID=$!
           trap "kill $SERVER_PID" EXIT
           READY=false
@@ -115,8 +124,31 @@ jobs:
             -X POST \
             http://127.0.0.1:3761/v0/sessions/default/preview/stop)"
           python3 -c 'import json, sys; r=json.loads(sys.argv[1]); assert r["ok"] is True; assert r["state"] == "stopped"; assert r["stale"] is False' "${PREVIEW_STOP}"
-      - run: |
-          if target/debug/skenion-runtime validate-project --project fixtures/current-0.1/invalid/incompatible-edge.project.json; then
+      - name: Smoke invalid fixture rejection
+        run: |
+          if "${RUNTIME_BIN}" validate-project --project fixtures/current-0.1/invalid/incompatible-edge.project.json; then
             echo "incompatible edge fixture unexpectedly passed" >&2
             exit 1
           fi
+
+  coverage:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: actions/checkout@v6
+        with:
+          repository: echovisionlab/skenion-contracts
+          path: .deps/skenion-contracts
+      - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: skenion-runtime-rust-coverage
+          cache-all-crates: "true"
+          cache-on-failure: "true"
+      - run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run coverage quality gate
+        run: cargo llvm-cov --all-targets --all-features --workspace --ignore-filename-regex '(src/main\.rs|src/visual\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 100 --fail-under-functions 100 --summary-only
