@@ -12,7 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: publish-${{ github.event.release.tag_name || inputs.tag }}
@@ -23,10 +23,17 @@ env:
   RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
-  crates:
-    name: crates.io
+  release:
+    name: release metadata
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'skenion-runtime-v')
+    outputs:
+      tag: ${{ steps.request.outputs.tag }}
+      tag_ref: ${{ steps.request.outputs.tag_ref }}
+      version: ${{ steps.package.outputs.version }}
+      contracts_version: ${{ steps.package.outputs.contracts_version }}
+      contracts_tag: ${{ steps.package.outputs.contracts_tag }}
+      contracts_tag_ref: ${{ steps.package.outputs.contracts_tag_ref }}
     steps:
       - id: request
         name: Validate release tag input
@@ -189,6 +196,29 @@ jobs:
             echo "::error::skenion-contracts ${{ steps.package.outputs.contracts_version }} is not published on crates.io."
             exit 1
           fi
+
+  crates:
+    name: crates.io
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag_ref }}
+      - uses: actions/checkout@v6
+        with:
+          repository: echovisionlab/skenion-contracts
+          ref: ${{ needs.release.outputs.contracts_tag_ref }}
+          path: .deps/skenion-contracts
+      - name: Validate contracts release checkout
+        env:
+          EXPECTED_CONTRACTS_TAG: ${{ needs.release.outputs.contracts_tag }}
+        run: |
+          actual_tag="$(git -C .deps/skenion-contracts describe --tags --exact-match)"
+          if [[ "${actual_tag}" != "${EXPECTED_CONTRACTS_TAG}" ]]; then
+            echo "::error::checked out Contracts tag ${actual_tag} does not match ${EXPECTED_CONTRACTS_TAG}."
+            exit 1
+          fi
       - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - run: rustup show
@@ -200,13 +230,13 @@ jobs:
       - name: Verify cargo metadata version
         run: |
           version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
-          if [[ "${version}" != "${{ steps.package.outputs.version }}" ]]; then
-            echo "::error::cargo metadata version ${version} does not match ${{ steps.package.outputs.version }}."
+          if [[ "${version}" != "${{ needs.release.outputs.version }}" ]]; then
+            echo "::error::cargo metadata version ${version} does not match ${{ needs.release.outputs.version }}."
             exit 1
           fi
       - id: registry
         run: |
-          if curl --fail --silent "https://crates.io/api/v1/crates/skenion-runtime/${{ steps.package.outputs.version }}" >/dev/null; then
+          if curl --fail --silent "https://crates.io/api/v1/crates/skenion-runtime/${{ needs.release.outputs.version }}" >/dev/null; then
             echo "published=true" >> "${GITHUB_OUTPUT}"
           else
             echo "published=false" >> "${GITHUB_OUTPUT}"
@@ -220,3 +250,103 @@ jobs:
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  runtime-assets:
+    name: runtime asset (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    needs: release
+    continue-on-error: ${{ matrix.release_blocking == false }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            release_blocking: true
+            tier: release-blocking
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            release_blocking: true
+            tier: release-blocking
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            release_blocking: true
+            tier: release-blocking
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            release_blocking: true
+            tier: release-blocking
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            release_blocking: false
+            tier: preview
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            release_blocking: false
+            tier: preview
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_TAG: ${{ needs.release.outputs.tag }}
+      RUNTIME_BIN: target/${{ matrix.target }}/release/skenion-runtime${{ contains(matrix.target, 'windows') && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag_ref }}
+      - uses: actions/checkout@v6
+        with:
+          repository: echovisionlab/skenion-contracts
+          ref: ${{ needs.release.outputs.contracts_tag_ref }}
+          path: .deps/skenion-contracts
+      - name: Validate contracts release checkout
+        env:
+          EXPECTED_CONTRACTS_TAG: ${{ needs.release.outputs.contracts_tag }}
+        run: |
+          actual_tag="$(git -C .deps/skenion-contracts describe --tags --exact-match)"
+          if [[ "${actual_tag}" != "${EXPECTED_CONTRACTS_TAG}" ]]; then
+            echo "::error::checked out Contracts tag ${actual_tag} does not match ${EXPECTED_CONTRACTS_TAG}."
+            exit 1
+          fi
+      - name: Place released contracts dependency
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/../Skenion-contracts"
+          cp -R "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - run: rustup show
+      - name: Add Rust target
+        run: rustup target add "${TARGET}"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: skenion-runtime-release-assets-${{ matrix.target }}
+          cache-all-crates: "true"
+          cache-on-failure: "true"
+      - name: Build runtime binary
+        run: cargo build --release --locked --bin skenion-runtime --all-features --target "${TARGET}"
+      - name: Smoke runtime binary
+        run: scripts/smoke-runtime-binary.sh "${RUNTIME_BIN}"
+      - id: package
+        name: Package runtime asset
+        run: scripts/package-runtime-asset.sh "${TARGET}" "${VERSION}" dist
+      - name: Upload GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${RELEASE_TAG}" \
+            "${{ steps.package.outputs.asset_path }}" \
+            "${{ steps.package.outputs.checksum_path }}" \
+            --clobber
+      - name: Summarize runtime asset
+        run: |
+          {
+            echo "## Runtime Asset"
+            echo ""
+            echo "- Target: ${TARGET}"
+            echo "- Tier: ${{ matrix.tier }}"
+            echo "- Asset: ${{ steps.package.outputs.asset_name }}"
+            echo "- Checksum: ${{ steps.package.outputs.asset_name }}.sha256"
+          } >> "${GITHUB_STEP_SUMMARY}"
