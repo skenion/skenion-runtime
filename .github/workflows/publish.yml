@@ -12,7 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: publish-${{ github.event.release.tag_name || inputs.tag }}
@@ -256,6 +256,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     needs: release
     continue-on-error: ${{ matrix.release_blocking == false }}
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
     defaults:
       run:
         shell: bash
@@ -332,6 +336,13 @@ jobs:
       - id: package
         name: Package runtime asset
         run: scripts/package-runtime-asset.sh "${TARGET}" "${VERSION}" dist
+      - id: attest
+        name: Generate runtime asset provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            ${{ steps.package.outputs.asset_path }}
+            ${{ steps.package.outputs.checksum_path }}
       - name: Upload GitHub Release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -349,4 +360,5 @@ jobs:
             echo "- Tier: ${{ matrix.tier }}"
             echo "- Asset: ${{ steps.package.outputs.asset_name }}"
             echo "- Checksum: ${{ steps.package.outputs.asset_name }}.sha256"
+            echo "- Provenance: ${{ steps.attest.outputs.attestation-url }}"
           } >> "${GITHUB_STEP_SUMMARY}"
