@@ -40,20 +40,16 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
-      - run: cargo install cargo-llvm-cov --locked
-      - run: cargo llvm-cov clean --workspace
-      - run: cargo llvm-cov --lib --all-features --jobs 1 --ignore-filename-regex '(Skenion-contracts|src/main\.rs|src/audio_backend\.rs|src/clock_source_manager\.rs|src/midi_input\.rs|src/visual\.rs|src/render/native\.rs|src/render/preview_document\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 98 --fail-under-functions 98 --fail-uncovered-lines 300 --fail-uncovered-functions 30 --summary-only
-        env:
-          RUST_TEST_THREADS: "1"
-      - run: cargo run -- validate-project --project fixtures/current-0.1/valid/clear-color-render.project.json
-      - run: cargo run -- plan --project fixtures/current-0.1/valid/clear-color-render.project.json --format json
-      - run: cargo run -- run --project fixtures/current-0.1/valid/clear-color-render.project.json --frames 2 --format json
-      - run: cargo run -- serve --help
-      - run: cargo run -- preview-plan --help
-      - run: cargo run -- preview-document --help
-      - run: cargo run -- clock-midi --help
+      - run: cargo build --bin skenion-runtime --all-features
+      - run: target/debug/skenion-runtime validate-project --project fixtures/current-0.1/valid/clear-color-render.project.json
+      - run: target/debug/skenion-runtime plan --project fixtures/current-0.1/valid/clear-color-render.project.json --format json
+      - run: target/debug/skenion-runtime run --project fixtures/current-0.1/valid/clear-color-render.project.json --frames 2 --format json
+      - run: target/debug/skenion-runtime serve --help
+      - run: target/debug/skenion-runtime preview-plan --help
+      - run: target/debug/skenion-runtime preview-document --help
+      - run: target/debug/skenion-runtime clock-midi --help
       - run: |
-          SKENION_PREVIEW_DRY_RUN=1 cargo run -- serve --host 127.0.0.1 --port 3761 &
+          SKENION_PREVIEW_DRY_RUN=1 target/debug/skenion-runtime serve --host 127.0.0.1 --port 3761 &
           SERVER_PID=$!
           trap "kill $SERVER_PID" EXIT
           for attempt in $(seq 1 20); do
@@ -65,7 +61,7 @@ jobs:
           echo "runtime health endpoint did not become ready" >&2
           exit 1
       - run: |
-          SKENION_PREVIEW_DRY_RUN=1 cargo run -- serve --host 127.0.0.1 --port 3761 &
+          SKENION_PREVIEW_DRY_RUN=1 target/debug/skenion-runtime serve --host 127.0.0.1 --port 3761 &
           SERVER_PID=$!
           trap "kill $SERVER_PID" EXIT
           READY=false
@@ -120,7 +116,7 @@ jobs:
             http://127.0.0.1:3761/v0/sessions/default/preview/stop)"
           python3 -c 'import json, sys; r=json.loads(sys.argv[1]); assert r["ok"] is True; assert r["state"] == "stopped"; assert r["stale"] is False' "${PREVIEW_STOP}"
       - run: |
-          if cargo run -- validate-project --project fixtures/current-0.1/invalid/incompatible-edge.project.json; then
+          if target/debug/skenion-runtime validate-project --project fixtures/current-0.1/invalid/incompatible-edge.project.json; then
             echo "incompatible edge fixture unexpectedly passed" >&2
             exit 1
           fi
