@@ -28,14 +28,16 @@ Default-session compatibility aliases are removal debt, not v0 product behavior.
 New Runtime API work should use explicit sessions and current 0.1 project
 payloads.
 
-## Release Train Compatibility
+## Lockstep Release Train
 
-Skenion repository versions are not lockstep SemVer. Keep package,
-application, crate, and binary versions independent, and align product
-compatibility through a release train manifest. The train manifest should name
-the product train id, Contracts version, Runtime crate version, Runtime
-multi-arch binary artifacts, Studio releases, Manual version, protocol
-baselines, capability set, checksums, and release completion gates.
+Skenion v0 releasable packages and applications use the same product release
+train version. If the product train is `0.55`, Runtime crates and binary
+artifacts publish as `0.55.0` where registries require patch SemVer, and
+Studio/contracts/sdk/docs/examples artifacts must belong to that same train.
+The release train manifest should name the product train id, Contracts version,
+Runtime crate version, Runtime multi-arch binary artifacts, Studio releases,
+Manual version, protocol baselines, capability set, checksums, and release
+completion gates.
 
 Registry publishing and binary release artifacts must be produced only through
 GitHub Actions release workflows and Release Please. Local verification may use
