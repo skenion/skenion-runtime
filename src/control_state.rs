@@ -91,7 +91,7 @@ impl RuntimeControlEventRequest {
 }
 
 impl ControlState {
-    pub fn from_graph(graph: &GraphDocument) -> Self {
+    pub(crate) fn from_graph(graph: &GraphDocument) -> Self {
         let values = graph
             .nodes
             .iter()
@@ -115,14 +115,18 @@ impl ControlState {
         self.values.get(node_id)
     }
 
-    pub fn output_value_for_node(&self, node: &GraphNode, port_id: &str) -> Option<ControlValue> {
+    pub(crate) fn output_value_for_node(
+        &self,
+        node: &GraphNode,
+        port_id: &str,
+    ) -> Option<ControlValue> {
         if port_id != "value" && !(is_control_operator_kind(&node.kind) && port_id == "out") {
             return None;
         }
         self.values.get(&node.id).cloned()
     }
 
-    pub fn apply_event(
+    pub(crate) fn apply_event(
         &mut self,
         request: RuntimeControlEventRequest,
         graph: &GraphDocument,

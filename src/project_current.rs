@@ -1,53 +1,53 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
-use skenion_contracts::EdgeEndpointV02;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::{
-    CycleValidationV02, EdgeSpecV02, ExecutionGroup, ExecutionModel, ExecutionModelV02,
-    FanOutPolicyV02, GraphDocumentV02, GraphNodeV02, GraphValidationResultV02, MergePolicyV02,
-    NodeDefinitionV02, PatchDefinitionV02, PlanEdge, PlanEdgeMetadata, PlanNode,
-    ProjectDocumentV02, RuntimeDiagnostic, ViewState,
+    CycleValidationCurrent, EdgeEndpointCurrent, EdgeSpecCurrent, ExecutionGroup, ExecutionModel,
+    ExecutionModelCurrent, FanOutPolicyCurrent, GraphDocumentCurrent, GraphNodeCurrent,
+    GraphValidationResultCurrent, MergePolicyCurrent, NodeDefinitionCurrent,
+    PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode, ProjectDocumentCurrent,
+    RuntimeDiagnostic, ViewState,
 };
+use serde::Deserialize;
+use serde_json::{Map, Value, json};
 
 const SUBPATCH_KIND: &str = "core.subpatch";
 const SUBPATCH_SHORTHAND_KIND: &str = "p";
 const INLET_KIND: &str = "core.inlet";
 const OUTLET_KIND: &str = "core.outlet";
 const MAX_SUBPATCH_DEPTH: usize = 16;
+pub const CURRENT_SCHEMA_VERSION: &str = "0.1.0";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectRequestV02 {
+pub struct ProjectRequestCurrent {
     #[serde(skip)]
-    pub document: Option<ProjectDocumentV02>,
-    pub graph: GraphDocumentV02,
+    pub document: Option<ProjectDocumentCurrent>,
+    pub graph: GraphDocumentCurrent,
     #[serde(default)]
-    pub nodes: Vec<NodeDefinitionV02>,
+    pub nodes: Vec<NodeDefinitionCurrent>,
     #[serde(default)]
-    pub patch_library: Vec<PatchDefinitionV02>,
+    pub patch_library: Vec<PatchDefinitionCurrent>,
     #[serde(default)]
     pub view_state: Option<ViewState>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RunProjectRequestV02 {
+pub struct RunProjectRequestCurrent {
     #[serde(skip)]
-    pub document: Option<ProjectDocumentV02>,
-    pub graph: GraphDocumentV02,
+    pub document: Option<ProjectDocumentCurrent>,
+    pub graph: GraphDocumentCurrent,
     #[serde(default)]
-    pub nodes: Vec<NodeDefinitionV02>,
+    pub nodes: Vec<NodeDefinitionCurrent>,
     #[serde(default)]
-    pub patch_library: Vec<PatchDefinitionV02>,
+    pub patch_library: Vec<PatchDefinitionCurrent>,
     #[serde(default)]
     pub view_state: Option<ViewState>,
     pub frames: Option<usize>,
 }
 
-impl From<ProjectDocumentV02> for ProjectRequestV02 {
-    fn from(document: ProjectDocumentV02) -> Self {
+impl From<ProjectDocumentCurrent> for ProjectRequestCurrent {
+    fn from(document: ProjectDocumentCurrent) -> Self {
         Self {
             graph: document.graph.clone(),
             nodes: Vec::new(),
@@ -58,8 +58,8 @@ impl From<ProjectDocumentV02> for ProjectRequestV02 {
     }
 }
 
-impl From<ProjectDocumentV02> for RunProjectRequestV02 {
-    fn from(document: ProjectDocumentV02) -> Self {
+impl From<ProjectDocumentCurrent> for RunProjectRequestCurrent {
+    fn from(document: ProjectDocumentCurrent) -> Self {
         Self {
             graph: document.graph.clone(),
             nodes: Vec::new(),
@@ -71,10 +71,10 @@ impl From<ProjectDocumentV02> for RunProjectRequestV02 {
     }
 }
 
-impl ProjectRequestV02 {
+impl ProjectRequestCurrent {
     pub fn from_project_document(
-        document: ProjectDocumentV02,
-        nodes: Vec<NodeDefinitionV02>,
+        document: ProjectDocumentCurrent,
+        nodes: Vec<NodeDefinitionCurrent>,
     ) -> Self {
         Self {
             graph: document.graph.clone(),
@@ -86,10 +86,10 @@ impl ProjectRequestV02 {
     }
 }
 
-impl RunProjectRequestV02 {
+impl RunProjectRequestCurrent {
     pub fn from_project_document(
-        document: ProjectDocumentV02,
-        nodes: Vec<NodeDefinitionV02>,
+        document: ProjectDocumentCurrent,
+        nodes: Vec<NodeDefinitionCurrent>,
         frames: Option<usize>,
     ) -> Self {
         Self {
@@ -103,12 +103,12 @@ impl RunProjectRequestV02 {
     }
 }
 
-type V02Validation =
-    Result<(Vec<RuntimeDiagnostic>, GraphValidationResultV02), Vec<RuntimeDiagnostic>>;
+type CurrentValidation =
+    Result<(Vec<RuntimeDiagnostic>, GraphValidationResultCurrent), Vec<RuntimeDiagnostic>>;
 
 #[derive(Debug, Clone)]
-struct ExpandedGraphV02 {
-    nodes: Vec<GraphNodeV02>,
+struct ExpandedGraphCurrent {
+    nodes: Vec<GraphNodeCurrent>,
     edges: Vec<ExpansionEdge>,
     boundary_pins: HashSet<String>,
     inlets: HashMap<String, String>,
@@ -117,14 +117,14 @@ struct ExpandedGraphV02 {
 
 #[derive(Debug, Clone)]
 struct ExpansionEdge {
-    edge: EdgeSpecV02,
+    edge: EdgeSpecCurrent,
     source: ExpansionEndpoint,
     target: ExpansionEndpoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ExpansionEndpoint {
-    Node(EdgeEndpointV02),
+    Node(EdgeEndpointCurrent),
     Boundary(String),
 }
 
@@ -145,14 +145,14 @@ enum BoundaryKind {
 }
 
 struct ExpansionContext<'a> {
-    patches: HashMap<&'a str, &'a PatchDefinitionV02>,
+    patches: HashMap<&'a str, &'a PatchDefinitionCurrent>,
     diagnostics: Vec<RuntimeDiagnostic>,
 }
 
-pub fn expand_project_graph_v02(
-    graph: &GraphDocumentV02,
-    patch_library: &[PatchDefinitionV02],
-) -> Result<GraphDocumentV02, Vec<RuntimeDiagnostic>> {
+pub fn expand_project_graph_current(
+    graph: &GraphDocumentCurrent,
+    patch_library: &[PatchDefinitionCurrent],
+) -> Result<GraphDocumentCurrent, Vec<RuntimeDiagnostic>> {
     let mut context = ExpansionContext {
         patches: patch_library
             .iter()
@@ -160,13 +160,13 @@ pub fn expand_project_graph_v02(
             .collect(),
         diagnostics: Vec::new(),
     };
-    let expanded = expand_graph_v02(graph, "", 0, &[], &mut context);
+    let expanded = expand_graph_current(graph, "", 0, &[], &mut context);
 
     if !context.diagnostics.is_empty() {
         return Err(context.diagnostics);
     }
 
-    Ok(GraphDocumentV02 {
+    Ok(GraphDocumentCurrent {
         schema: graph.schema.clone(),
         schema_version: graph.schema_version.clone(),
         id: graph.id.clone(),
@@ -177,30 +177,30 @@ pub fn expand_project_graph_v02(
     })
 }
 
-pub fn validate_project_request_v02(request: &ProjectRequestV02) -> V02Validation {
-    validate_patch_library_v02(&request.patch_library)?;
-    let graph = expand_project_graph_v02(&request.graph, &request.patch_library)?;
-    validate_project_v02(&graph, &request.nodes)
+pub fn validate_project_request_current(request: &ProjectRequestCurrent) -> CurrentValidation {
+    validate_patch_library_current(&request.patch_library)?;
+    let graph = expand_project_graph_current(&request.graph, &request.patch_library)?;
+    validate_project_current(&graph, &request.nodes)
 }
 
-pub fn build_execution_plan_request_v02(
-    request: &ProjectRequestV02,
+pub fn build_execution_plan_request_current(
+    request: &ProjectRequestCurrent,
 ) -> Result<(crate::ExecutionPlan, Vec<RuntimeDiagnostic>), Vec<RuntimeDiagnostic>> {
-    validate_patch_library_v02(&request.patch_library)?;
-    let graph = expand_project_graph_v02(&request.graph, &request.patch_library)?;
-    build_execution_plan_v02(&graph, &request.nodes)
+    validate_patch_library_current(&request.patch_library)?;
+    let graph = expand_project_graph_current(&request.graph, &request.patch_library)?;
+    build_execution_plan_current(&graph, &request.nodes)
 }
 
-pub fn build_execution_plan_run_request_v02(
-    request: &RunProjectRequestV02,
+pub fn build_execution_plan_run_request_current(
+    request: &RunProjectRequestCurrent,
 ) -> Result<(crate::ExecutionPlan, Vec<RuntimeDiagnostic>), Vec<RuntimeDiagnostic>> {
-    validate_patch_library_v02(&request.patch_library)?;
-    let graph = expand_project_graph_v02(&request.graph, &request.patch_library)?;
-    build_execution_plan_v02(&graph, &request.nodes)
+    validate_patch_library_current(&request.patch_library)?;
+    let graph = expand_project_graph_current(&request.graph, &request.patch_library)?;
+    build_execution_plan_current(&graph, &request.nodes)
 }
 
-fn validate_patch_library_v02(
-    patch_library: &[PatchDefinitionV02],
+fn validate_patch_library_current(
+    patch_library: &[PatchDefinitionCurrent],
 ) -> Result<(), Vec<RuntimeDiagnostic>> {
     let mut diagnostics = Vec::new();
     let mut seen = HashSet::new();
@@ -214,14 +214,28 @@ fn validate_patch_library_v02(
             ));
         }
 
-        if let Err(report) = skenion_contracts::validate_patch_definition_v02(patch) {
-            diagnostics.extend(report.errors().iter().map(|error| {
-                RuntimeDiagnostic::structured_error(
-                    "subpatch.invalid-patch-definition",
-                    error.message.clone(),
-                    json!({ "patchId": patch.id }),
-                )
-            }));
+        if let Some(diagnostic) = schema_version_diagnostic_with_details(
+            "graph",
+            Some(patch.graph.schema_version.as_str()),
+            json!({ "patchId": patch.id }),
+        ) {
+            diagnostics.push(diagnostic);
+        }
+
+        if let Err(report) = skenion_contracts::validate_patch_definition_v01(patch) {
+            diagnostics.extend(
+                report
+                    .errors()
+                    .iter()
+                    .filter(|error| !is_schema_version_contract_error(&error.message))
+                    .map(|error| {
+                        RuntimeDiagnostic::structured_error(
+                            "subpatch.invalid-patch-definition",
+                            error.message.clone(),
+                            json!({ "patchId": patch.id }),
+                        )
+                    }),
+            );
         }
     }
 
@@ -232,14 +246,14 @@ fn validate_patch_library_v02(
     }
 }
 
-fn expand_graph_v02(
-    graph: &GraphDocumentV02,
+fn expand_graph_current(
+    graph: &GraphDocumentCurrent,
     namespace: &str,
     depth: usize,
     stack: &[String],
     context: &mut ExpansionContext<'_>,
-) -> ExpandedGraphV02 {
-    let mut expanded = ExpandedGraphV02 {
+) -> ExpandedGraphCurrent {
+    let mut expanded = ExpandedGraphCurrent {
         nodes: Vec::new(),
         edges: Vec::new(),
         boundary_pins: HashSet::new(),
@@ -343,7 +357,7 @@ fn expand_graph_v02(
             let child_namespace = namespaced_id(namespace, &node.id);
             let mut child_stack = stack.to_vec();
             child_stack.push(patch_ref);
-            let child = expand_graph_v02(
+            let child = expand_graph_current(
                 &definition_graph,
                 &child_namespace,
                 depth + 1,
@@ -387,7 +401,7 @@ fn expand_graph_v02(
 fn contract_boundary_edges(
     mut edges: Vec<ExpansionEdge>,
     boundary_pins: HashSet<String>,
-) -> Vec<EdgeSpecV02> {
+) -> Vec<EdgeSpecCurrent> {
     let mut counter = 0usize;
 
     while let Some(pin) = boundary_pins
@@ -498,7 +512,7 @@ fn merge_boundary_edges(
     }
 }
 
-fn expansion_edge_to_real_edge(expansion: ExpansionEdge) -> Option<EdgeSpecV02> {
+fn expansion_edge_to_real_edge(expansion: ExpansionEdge) -> Option<EdgeSpecCurrent> {
     let ExpansionEndpoint::Node(source) = expansion.source else {
         return None;
     };
@@ -512,13 +526,13 @@ fn expansion_edge_to_real_edge(expansion: ExpansionEdge) -> Option<EdgeSpecV02> 
 }
 
 fn resolve_source_endpoint(
-    edge: &EdgeSpecV02,
+    edge: &EdgeSpecCurrent,
     namespace: &str,
     nodes: &HashMap<String, NodeExpansion>,
     context: &mut ExpansionContext<'_>,
 ) -> ExpansionEndpoint {
     match nodes.get(&edge.source.node_id) {
-        Some(NodeExpansion::Node(node_id)) => ExpansionEndpoint::Node(EdgeEndpointV02 {
+        Some(NodeExpansion::Node(node_id)) => ExpansionEndpoint::Node(EdgeEndpointCurrent {
             node_id: node_id.clone(),
             port_id: edge.source.port_id.clone(),
         }),
@@ -539,12 +553,12 @@ fn resolve_source_endpoint(
                     &edge.source.port_id,
                     BoundaryKind::Outlet,
                 ));
-                ExpansionEndpoint::Node(EdgeEndpointV02 {
+                ExpansionEndpoint::Node(EdgeEndpointCurrent {
                     node_id: namespaced_id(namespace, &edge.source.node_id),
                     port_id: edge.source.port_id.clone(),
                 })
             }),
-        None => ExpansionEndpoint::Node(EdgeEndpointV02 {
+        None => ExpansionEndpoint::Node(EdgeEndpointCurrent {
             node_id: namespaced_id(namespace, &edge.source.node_id),
             port_id: edge.source.port_id.clone(),
         }),
@@ -552,13 +566,13 @@ fn resolve_source_endpoint(
 }
 
 fn resolve_target_endpoint(
-    edge: &EdgeSpecV02,
+    edge: &EdgeSpecCurrent,
     namespace: &str,
     nodes: &HashMap<String, NodeExpansion>,
     context: &mut ExpansionContext<'_>,
 ) -> ExpansionEndpoint {
     match nodes.get(&edge.target.node_id) {
-        Some(NodeExpansion::Node(node_id)) => ExpansionEndpoint::Node(EdgeEndpointV02 {
+        Some(NodeExpansion::Node(node_id)) => ExpansionEndpoint::Node(EdgeEndpointCurrent {
             node_id: node_id.clone(),
             port_id: edge.target.port_id.clone(),
         }),
@@ -579,12 +593,12 @@ fn resolve_target_endpoint(
                     &edge.target.port_id,
                     BoundaryKind::Inlet,
                 ));
-                ExpansionEndpoint::Node(EdgeEndpointV02 {
+                ExpansionEndpoint::Node(EdgeEndpointCurrent {
                     node_id: namespaced_id(namespace, &edge.target.node_id),
                     port_id: edge.target.port_id.clone(),
                 })
             }),
-        None => ExpansionEndpoint::Node(EdgeEndpointV02 {
+        None => ExpansionEndpoint::Node(EdgeEndpointCurrent {
             node_id: namespaced_id(namespace, &edge.target.node_id),
             port_id: edge.target.port_id.clone(),
         }),
@@ -592,7 +606,7 @@ fn resolve_target_endpoint(
 }
 
 fn register_boundary_node(
-    node: &GraphNodeV02,
+    node: &GraphNodeCurrent,
     namespace: &str,
     kind: BoundaryKind,
     boundary_pins: &mut HashSet<String>,
@@ -625,7 +639,7 @@ fn register_boundary_node(
     pin
 }
 
-fn boundary_aliases(node: &GraphNodeV02, key: &str) -> Vec<String> {
+fn boundary_aliases(node: &GraphNodeCurrent, key: &str) -> Vec<String> {
     let mut aliases = vec![key.to_owned(), node.id.clone()];
     for param_key in ["portId", "port", "name", "id", "label"] {
         if let Some(alias) = string_param(&node.params, param_key) {
@@ -640,14 +654,14 @@ fn boundary_aliases(node: &GraphNodeV02, key: &str) -> Vec<String> {
     aliases
 }
 
-fn boundary_key(node: &GraphNodeV02) -> String {
+fn boundary_key(node: &GraphNodeCurrent) -> String {
     ["portId", "port", "name", "id", "label"]
         .into_iter()
         .find_map(|key| string_param(&node.params, key))
         .unwrap_or_else(|| node.id.clone())
 }
 
-fn subpatch_ref(node: &GraphNodeV02) -> Option<String> {
+fn subpatch_ref(node: &GraphNodeCurrent) -> Option<String> {
     ["patchRef", "patchId", "patch", "ref", "name", "id"]
         .into_iter()
         .find_map(|key| string_param(&node.params, key))
@@ -675,15 +689,15 @@ fn string_param(params: &Map<String, Value>, key: &str) -> Option<String> {
     }
 }
 
-fn is_subpatch_node(node: &GraphNodeV02) -> bool {
+fn is_subpatch_node(node: &GraphNodeCurrent) -> bool {
     matches!(node.kind.as_str(), SUBPATCH_KIND | SUBPATCH_SHORTHAND_KIND)
 }
 
-fn is_inlet_node(node: &GraphNodeV02) -> bool {
+fn is_inlet_node(node: &GraphNodeCurrent) -> bool {
     node.kind == INLET_KIND
 }
 
-fn is_outlet_node(node: &GraphNodeV02) -> bool {
+fn is_outlet_node(node: &GraphNodeCurrent) -> bool {
     node.kind == OUTLET_KIND
 }
 
@@ -716,7 +730,7 @@ fn subpatch_diagnostic(
     code: &'static str,
     message: String,
     namespace: &str,
-    node: &GraphNodeV02,
+    node: &GraphNodeCurrent,
     patch_ref: Option<&str>,
     depth: usize,
     stack: &[String],
@@ -728,7 +742,7 @@ fn subpatch_diagnostic_with_path(
     code: &'static str,
     message: String,
     namespace: &str,
-    node: &GraphNodeV02,
+    node: &GraphNodeCurrent,
     patch_ref: Option<&str>,
     depth: usize,
     path: &[String],
@@ -768,21 +782,24 @@ fn boundary_diagnostic(
     )
 }
 
-pub fn validate_project_v02(
-    graph: &GraphDocumentV02,
-    nodes: &[NodeDefinitionV02],
-) -> V02Validation {
+pub fn validate_project_current(
+    graph: &GraphDocumentCurrent,
+    nodes: &[NodeDefinitionCurrent],
+) -> CurrentValidation {
     let mut diagnostics = Vec::new();
-    let mut registry: HashMap<(&str, &str), &NodeDefinitionV02> = HashMap::new();
+    let mut registry: HashMap<(&str, &str), &NodeDefinitionCurrent> = HashMap::new();
 
     for definition in nodes {
-        if let Err(report) = skenion_contracts::validate_node_definition_v02(definition) {
-            diagnostics.extend(
-                report
-                    .errors()
-                    .iter()
-                    .map(|error| RuntimeDiagnostic::error(error.message.clone())),
-            );
+        if let Err(report) = skenion_contracts::validate_node_definition_v01(definition) {
+            diagnostics.extend(report.errors().iter().map(|error| {
+                contract_validation_diagnostic(
+                    "node-definition",
+                    "node-definition.invalid-contract",
+                    error.message.clone(),
+                    &definition.schema_version,
+                    json!({ "nodeDefinitionId": definition.id }),
+                )
+            }));
         }
         registry.insert(
             (definition.id.as_str(), definition.version.as_str()),
@@ -790,23 +807,57 @@ pub fn validate_project_v02(
         );
     }
 
-    let graph_analysis = skenion_contracts::analyze_graph_document_v02(graph);
-    diagnostics.extend(graph_analysis.diagnostics.iter().map(|diagnostic| {
-        let message = format!("{}: {}", diagnostic.code, diagnostic.message);
-        if diagnostic.severity == "warning" {
-            RuntimeDiagnostic::warning(message)
-        } else {
-            RuntimeDiagnostic::error(message)
+    let graph_analysis = match skenion_contracts::validate_graph_document_v01(graph) {
+        Ok(analysis) => analysis,
+        Err(report) => {
+            diagnostics.extend(report.errors().iter().map(|error| {
+                contract_validation_diagnostic(
+                    "graph",
+                    "graph.invalid-contract",
+                    error.message.clone(),
+                    &graph.schema_version,
+                    json!({ "graphId": graph.id }),
+                )
+            }));
+            skenion_contracts::analyze_graph_document_v01(graph)
         }
-    }));
+    };
+    diagnostics.extend(
+        graph_analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == "warning")
+            .map(|diagnostic| {
+                let message = format!("{}: {}", diagnostic.code, diagnostic.message);
+                RuntimeDiagnostic::structured_warning(
+                    diagnostic.code.clone(),
+                    message,
+                    json!({
+                        "surface": "graph",
+                        "graphId": graph.id,
+                        "nodes": diagnostic.nodes,
+                        "edges": diagnostic.edges,
+                    }),
+                )
+            }),
+    );
 
     for node in &graph.nodes {
         match registry.get(&(node.kind.as_str(), node.kind_version.as_str())) {
-            Some(definition) => validate_node_snapshot_v02(node, definition, &mut diagnostics),
-            None => diagnostics.push(RuntimeDiagnostic::error(format!(
-                "missing node definition: {}@{}",
-                node.kind, node.kind_version
-            ))),
+            Some(definition) => validate_node_snapshot_current(node, definition, &mut diagnostics),
+            None => diagnostics.push(RuntimeDiagnostic::structured_error(
+                "node-definition.missing",
+                format!(
+                    "missing node definition: {}@{}",
+                    node.kind, node.kind_version
+                ),
+                json!({
+                    "surface": "node-definition",
+                    "nodeId": node.id,
+                    "kind": node.kind,
+                    "kindVersion": node.kind_version,
+                }),
+            )),
         }
     }
 
@@ -820,11 +871,153 @@ pub fn validate_project_v02(
     }
 }
 
-pub fn build_execution_plan_v02(
-    graph: &GraphDocumentV02,
-    nodes: &[NodeDefinitionV02],
+fn contract_validation_diagnostic(
+    surface: &'static str,
+    code: &'static str,
+    message: String,
+    received_schema_version: &str,
+    mut details: Value,
+) -> RuntimeDiagnostic {
+    let object = details
+        .as_object_mut()
+        .expect("contract validation diagnostic details should be an object");
+    object.insert("surface".to_owned(), json!(surface));
+    object.insert(
+        "expectedSchemaVersion".to_owned(),
+        json!(CURRENT_SCHEMA_VERSION),
+    );
+    object.insert(
+        "receivedSchemaVersion".to_owned(),
+        json!(received_schema_version),
+    );
+    RuntimeDiagnostic::structured_error(code, message, details)
+}
+
+pub fn schema_version_diagnostic(
+    surface: &'static str,
+    received_schema_version: Option<&str>,
+) -> Option<RuntimeDiagnostic> {
+    schema_version_diagnostic_with_details(surface, received_schema_version, json!({}))
+}
+
+fn schema_version_diagnostic_with_details(
+    surface: &'static str,
+    received_schema_version: Option<&str>,
+    mut details: Value,
+) -> Option<RuntimeDiagnostic> {
+    let object = details
+        .as_object_mut()
+        .expect("schema version diagnostic details should be an object");
+    object.insert("surface".to_owned(), json!(surface));
+    object.insert(
+        "expectedSchemaVersion".to_owned(),
+        json!(CURRENT_SCHEMA_VERSION),
+    );
+    object.insert(
+        "receivedSchemaVersion".to_owned(),
+        received_schema_version.map_or(Value::Null, Value::from),
+    );
+
+    match received_schema_version {
+        Some(CURRENT_SCHEMA_VERSION) => None,
+        Some(version) => Some(RuntimeDiagnostic::structured_error(
+            "project.unsupported-schema-version",
+            format!("unsupported {surface}.schemaVersion: {version}"),
+            details,
+        )),
+        None => Some(RuntimeDiagnostic::structured_error(
+            "project.missing-schema-version",
+            format!("missing {surface}.schemaVersion in project request"),
+            details,
+        )),
+    }
+}
+
+pub fn project_document_validation_diagnostics_current(
+    document: &ProjectDocumentCurrent,
+    report: &skenion_contracts::ValidationReportV01,
+) -> Vec<RuntimeDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if let Some(diagnostic) =
+        schema_version_diagnostic("project", Some(document.schema_version.as_str()))
+    {
+        diagnostics.push(diagnostic);
+    }
+    if let Some(diagnostic) =
+        schema_version_diagnostic("graph", Some(document.graph.schema_version.as_str()))
+    {
+        diagnostics.push(diagnostic);
+    }
+    for patch in &document.patch_library {
+        if let Some(diagnostic) = schema_version_diagnostic_with_details(
+            "graph",
+            Some(patch.graph.schema_version.as_str()),
+            json!({ "patchId": patch.id }),
+        ) {
+            diagnostics.push(diagnostic);
+        }
+    }
+
+    diagnostics.extend(
+        report
+            .errors()
+            .iter()
+            .filter(|error| !is_schema_version_contract_error(&error.message))
+            .map(|error| {
+                RuntimeDiagnostic::structured_error(
+                    "project.invalid-0.1",
+                    error.message.clone(),
+                    json!({ "projectId": document.id }),
+                )
+            }),
+    );
+    diagnostics
+}
+
+pub fn project_document_payload_schema_diagnostics(value: &Value) -> Vec<RuntimeDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if let Some(diagnostic) = schema_version_diagnostic(
+        "project",
+        value.get("schemaVersion").and_then(Value::as_str),
+    ) {
+        diagnostics.push(diagnostic);
+    }
+    if let Some(diagnostic) = schema_version_diagnostic(
+        "graph",
+        value
+            .get("graph")
+            .and_then(|graph| graph.get("schemaVersion"))
+            .and_then(Value::as_str),
+    ) {
+        diagnostics.push(diagnostic);
+    }
+    if let Some(patches) = value.get("patchLibrary").and_then(Value::as_array) {
+        for patch in patches {
+            let patch_id = patch.get("id").and_then(Value::as_str);
+            if let Some(diagnostic) = schema_version_diagnostic_with_details(
+                "graph",
+                patch
+                    .get("graph")
+                    .and_then(|graph| graph.get("schemaVersion"))
+                    .and_then(Value::as_str),
+                json!({ "patchId": patch_id }),
+            ) {
+                diagnostics.push(diagnostic);
+            }
+        }
+    }
+    diagnostics
+}
+
+fn is_schema_version_contract_error(message: &str) -> bool {
+    message.contains("expected schemaVersion 0.1.0, found")
+}
+
+pub fn build_execution_plan_current(
+    graph: &GraphDocumentCurrent,
+    nodes: &[NodeDefinitionCurrent],
 ) -> Result<(crate::ExecutionPlan, Vec<RuntimeDiagnostic>), Vec<RuntimeDiagnostic>> {
-    let (diagnostics, analysis) = validate_project_v02(graph, nodes)?;
+    let (diagnostics, analysis) = validate_project_current(graph, nodes)?;
     let registry = nodes
         .iter()
         .map(|definition| {
@@ -834,14 +1027,23 @@ pub fn build_execution_plan_v02(
             )
         })
         .collect::<HashMap<_, _>>();
+    let ordered_node_ids = topological_order_current(graph);
+    let graph_nodes = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
     let mut groups_by_model: BTreeMap<String, ExecutionGroup> = BTreeMap::new();
     let mut plan_nodes = Vec::new();
 
-    for (order, node) in graph.nodes.iter().enumerate() {
+    for (order, node_id) in ordered_node_ids.iter().enumerate() {
+        let node = graph_nodes
+            .get(node_id.as_str())
+            .expect("current 0.1 planning order should only contain graph nodes");
         let definition = registry
             .get(&(node.kind.as_str(), node.kind_version.as_str()))
-            .expect("v0.2 validation should resolve definitions");
-        let execution_model = map_execution_model_v02(&definition.execution.model);
+            .expect("current 0.1 validation should resolve definitions");
+        let execution_model = map_execution_model_current(&definition.execution.model);
         plan_nodes.push(PlanNode {
             node_id: node.id.clone(),
             kind: node.kind.clone(),
@@ -867,7 +1069,7 @@ pub fn build_execution_plan_v02(
             edges: graph
                 .edges
                 .iter()
-                .map(|edge| plan_edge_v02(graph, edge, &analysis))
+                .map(|edge| plan_edge_current(graph, edge, &analysis))
                 .collect(),
             groups: groups_by_model.into_values().collect(),
         },
@@ -875,9 +1077,71 @@ pub fn build_execution_plan_v02(
     ))
 }
 
-fn validate_node_snapshot_v02(
-    node: &crate::GraphNodeV02,
-    definition: &NodeDefinitionV02,
+fn topological_order_current(graph: &GraphDocumentCurrent) -> Vec<String> {
+    let mut indegree: HashMap<&str, usize> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), 0usize))
+        .collect();
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for edge in graph.edges.iter().filter(|edge| !is_feedback_edge(edge)) {
+        if indegree.contains_key(edge.source.node_id.as_str())
+            && indegree.contains_key(edge.target.node_id.as_str())
+        {
+            adjacency
+                .entry(edge.source.node_id.as_str())
+                .or_default()
+                .push(edge.target.node_id.as_str());
+            *indegree
+                .get_mut(edge.target.node_id.as_str())
+                .expect("target node exists") += 1;
+        }
+    }
+
+    let mut queue = graph
+        .nodes
+        .iter()
+        .filter(|node| indegree.get(node.id.as_str()).copied() == Some(0))
+        .map(|node| node.id.as_str())
+        .collect::<VecDeque<_>>();
+    let mut ordered = Vec::new();
+
+    while let Some(node_id) = queue.pop_front() {
+        ordered.push(node_id.to_owned());
+        for next in adjacency.get(node_id).into_iter().flatten().copied() {
+            let next_indegree = indegree.get_mut(next).expect("adjacent node exists");
+            *next_indegree -= 1;
+            if *next_indegree == 0 {
+                queue.push_back(next);
+            }
+        }
+    }
+
+    if ordered.len() == graph.nodes.len() {
+        return ordered;
+    }
+
+    let ordered_set = ordered.iter().cloned().collect::<HashSet<_>>();
+    ordered.extend(
+        graph
+            .nodes
+            .iter()
+            .filter(|node| !ordered_set.contains(node.id.as_str()))
+            .map(|node| node.id.clone()),
+    );
+    ordered
+}
+
+fn is_feedback_edge(edge: &EdgeSpecCurrent) -> bool {
+    edge.feedback
+        .as_ref()
+        .is_some_and(|feedback| feedback.enabled)
+}
+
+fn validate_node_snapshot_current(
+    node: &crate::GraphNodeCurrent,
+    definition: &NodeDefinitionCurrent,
     diagnostics: &mut Vec<RuntimeDiagnostic>,
 ) {
     let definition_ports = definition
@@ -893,46 +1157,85 @@ fn validate_node_snapshot_v02(
 
     for definition_port in &definition.ports {
         if !snapshot_ports.contains_key(definition_port.id.as_str()) {
-            diagnostics.push(RuntimeDiagnostic::error(format!(
-                "port snapshot missing manifest port: {}.{}",
-                node.id, definition_port.id
-            )));
+            diagnostics.push(node_snapshot_diagnostic(
+                "node.port-snapshot.missing-manifest-port",
+                format!(
+                    "port snapshot missing manifest port: {}.{}",
+                    node.id, definition_port.id
+                ),
+                node,
+                definition_port.id.as_str(),
+            ));
         }
     }
 
     for snapshot_port in &node.ports {
         let Some(definition_port) = definition_ports.get(snapshot_port.id.as_str()) else {
-            diagnostics.push(RuntimeDiagnostic::error(format!(
-                "port snapshot references missing manifest port: {}.{}",
-                node.id, snapshot_port.id
-            )));
+            diagnostics.push(node_snapshot_diagnostic(
+                "node.port-snapshot.unknown-manifest-port",
+                format!(
+                    "port snapshot references missing manifest port: {}.{}",
+                    node.id, snapshot_port.id
+                ),
+                node,
+                snapshot_port.id.as_str(),
+            ));
             continue;
         };
 
         if snapshot_port.direction != definition_port.direction {
-            diagnostics.push(RuntimeDiagnostic::error(format!(
-                "port snapshot mismatch: {}.{} direction differs from definition",
-                node.id, snapshot_port.id
-            )));
+            diagnostics.push(node_snapshot_diagnostic(
+                "node.port-snapshot.direction-mismatch",
+                format!(
+                    "port snapshot mismatch: {}.{} direction differs from definition",
+                    node.id, snapshot_port.id
+                ),
+                node,
+                snapshot_port.id.as_str(),
+            ));
         }
         if snapshot_port.port_type != definition_port.port_type {
-            diagnostics.push(RuntimeDiagnostic::error(format!(
-                "port snapshot mismatch: {}.{} type {} != definition type {}",
-                node.id, snapshot_port.id, snapshot_port.port_type, definition_port.port_type
-            )));
+            diagnostics.push(node_snapshot_diagnostic(
+                "node.port-snapshot.type-mismatch",
+                format!(
+                    "port snapshot mismatch: {}.{} type {} != definition type {}",
+                    node.id, snapshot_port.id, snapshot_port.port_type, definition_port.port_type
+                ),
+                node,
+                snapshot_port.id.as_str(),
+            ));
         }
     }
 }
 
-fn plan_edge_v02(
-    graph: &GraphDocumentV02,
-    edge: &EdgeSpecV02,
-    analysis: &GraphValidationResultV02,
+fn node_snapshot_diagnostic(
+    code: &'static str,
+    message: String,
+    node: &crate::GraphNodeCurrent,
+    port_id: &str,
+) -> RuntimeDiagnostic {
+    RuntimeDiagnostic::structured_error(
+        code,
+        message,
+        json!({
+            "surface": "node-snapshot",
+            "nodeId": node.id,
+            "kind": node.kind,
+            "kindVersion": node.kind_version,
+            "portId": port_id,
+        }),
+    )
+}
+
+fn plan_edge_current(
+    graph: &GraphDocumentCurrent,
+    edge: &EdgeSpecCurrent,
+    analysis: &GraphValidationResultCurrent,
 ) -> PlanEdge {
     let source = find_port(graph, &edge.source.node_id, &edge.source.port_id)
-        .expect("v0.2 validation should resolve source port");
+        .expect("current 0.1 validation should resolve source port");
     let target = find_port(graph, &edge.target.node_id, &edge.target.port_id)
-        .expect("v0.2 validation should resolve target port");
+        .expect("current 0.1 validation should resolve target port");
 
     PlanEdge {
         from_node: edge.source.node_id.clone(),
@@ -955,10 +1258,10 @@ fn plan_edge_v02(
 }
 
 fn find_port<'a>(
-    graph: &'a GraphDocumentV02,
+    graph: &'a GraphDocumentCurrent,
     node_id: &str,
     port_id: &str,
-) -> Option<&'a crate::PortSpecV02> {
+) -> Option<&'a crate::PortSpecCurrent> {
     graph
         .nodes
         .iter()
@@ -969,8 +1272,8 @@ fn find_port<'a>(
 }
 
 fn cycle_classification_for_edge(
-    edge: &EdgeSpecV02,
-    analysis: &GraphValidationResultV02,
+    edge: &EdgeSpecCurrent,
+    analysis: &GraphValidationResultCurrent,
 ) -> Option<String> {
     analysis
         .cycles
@@ -979,50 +1282,50 @@ fn cycle_classification_for_edge(
         .map(|cycle| cycle_validation_label(&cycle.classification).to_owned())
 }
 
-fn cycle_validation_label(classification: &CycleValidationV02) -> &'static str {
+fn cycle_validation_label(classification: &CycleValidationCurrent) -> &'static str {
     match classification {
-        CycleValidationV02::NoCycle => "no-cycle",
-        CycleValidationV02::ValidFeedback => "valid-feedback",
-        CycleValidationV02::RiskyFeedback => "risky-feedback",
-        CycleValidationV02::AmbiguousAlgebraicLoop => "ambiguous-algebraic-loop",
-        CycleValidationV02::InvalidCycle => "invalid-cycle",
+        CycleValidationCurrent::NoCycle => "no-cycle",
+        CycleValidationCurrent::ValidFeedback => "valid-feedback",
+        CycleValidationCurrent::RiskyFeedback => "risky-feedback",
+        CycleValidationCurrent::AmbiguousAlgebraicLoop => "ambiguous-algebraic-loop",
+        CycleValidationCurrent::InvalidCycle => "invalid-cycle",
     }
 }
 
-fn merge_policy_label(policy: Option<&MergePolicyV02>) -> String {
+fn merge_policy_label(policy: Option<&MergePolicyCurrent>) -> String {
     match policy {
-        Some(MergePolicyV02::OrderedEvents) => "ordered-events",
-        Some(MergePolicyV02::Mix) => "mix",
-        Some(MergePolicyV02::Array) => "array",
-        Some(MergePolicyV02::Latest) => "latest",
-        Some(MergePolicyV02::First) => "first",
-        Some(MergePolicyV02::Custom) => "custom",
-        Some(MergePolicyV02::Forbid) | None => "forbid",
+        Some(MergePolicyCurrent::OrderedEvents) => "ordered-events",
+        Some(MergePolicyCurrent::Mix) => "mix",
+        Some(MergePolicyCurrent::Array) => "array",
+        Some(MergePolicyCurrent::Latest) => "latest",
+        Some(MergePolicyCurrent::First) => "first",
+        Some(MergePolicyCurrent::Custom) => "custom",
+        Some(MergePolicyCurrent::Forbid) | None => "forbid",
     }
     .to_owned()
 }
 
-fn fan_out_policy_label(policy: Option<&FanOutPolicyV02>) -> String {
+fn fan_out_policy_label(policy: Option<&FanOutPolicyCurrent>) -> String {
     match policy {
-        Some(FanOutPolicyV02::Forbid) => "forbid",
-        Some(FanOutPolicyV02::Copy) => "copy",
-        Some(FanOutPolicyV02::Share) => "share",
-        Some(FanOutPolicyV02::Allow) | None => "allow",
+        Some(FanOutPolicyCurrent::Forbid) => "forbid",
+        Some(FanOutPolicyCurrent::Copy) => "copy",
+        Some(FanOutPolicyCurrent::Share) => "share",
+        Some(FanOutPolicyCurrent::Allow) | None => "allow",
     }
     .to_owned()
 }
 
-fn map_execution_model_v02(model: &ExecutionModelV02) -> ExecutionModel {
+fn map_execution_model_current(model: &ExecutionModelCurrent) -> ExecutionModel {
     match model {
-        ExecutionModelV02::Event => ExecutionModel::Event,
-        ExecutionModelV02::Value => ExecutionModel::Value,
-        ExecutionModelV02::Frame => ExecutionModel::Frame,
-        ExecutionModelV02::AudioBlock => ExecutionModel::AudioBlock,
-        ExecutionModelV02::VideoFrame => ExecutionModel::VideoFrame,
-        ExecutionModelV02::GpuPass => ExecutionModel::GpuPass,
-        ExecutionModelV02::AsyncResource => ExecutionModel::AsyncResource,
-        ExecutionModelV02::ScriptControl => ExecutionModel::ScriptControl,
-        ExecutionModelV02::NativePlugin => ExecutionModel::NativePlugin,
+        ExecutionModelCurrent::Event => ExecutionModel::Event,
+        ExecutionModelCurrent::Value => ExecutionModel::Value,
+        ExecutionModelCurrent::Frame => ExecutionModel::Frame,
+        ExecutionModelCurrent::AudioBlock => ExecutionModel::AudioBlock,
+        ExecutionModelCurrent::VideoFrame => ExecutionModel::VideoFrame,
+        ExecutionModelCurrent::GpuPass => ExecutionModel::GpuPass,
+        ExecutionModelCurrent::AsyncResource => ExecutionModel::AsyncResource,
+        ExecutionModelCurrent::ScriptControl => ExecutionModel::ScriptControl,
+        ExecutionModelCurrent::NativePlugin => ExecutionModel::NativePlugin,
     }
 }
 
@@ -1031,22 +1334,24 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::{DiagnosticSeverity, FeedbackBoundaryV02, PortDirectionV02, PortSpecV02};
+    use crate::{
+        DiagnosticSeverity, FeedbackBoundaryCurrent, PortDirectionCurrent, PortSpecCurrent,
+    };
 
-    fn graph(value: Value) -> GraphDocumentV02 {
+    fn graph(value: Value) -> GraphDocumentCurrent {
         serde_json::from_value(value).expect("graph should parse")
     }
 
-    fn definition(value: Value) -> NodeDefinitionV02 {
+    fn definition(value: Value) -> NodeDefinitionCurrent {
         serde_json::from_value(value).expect("definition should parse")
     }
 
-    fn clear_definition() -> NodeDefinitionV02 {
+    fn clear_definition() -> NodeDefinitionCurrent {
         definition(json!({
           "schema": "skenion.node.definition",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "render.clear-color",
-          "version": "0.2.0",
+          "version": "0.1.0",
           "displayName": "Clear Color",
           "category": "Render",
           "ports": [
@@ -1059,12 +1364,12 @@ mod tests {
         }))
     }
 
-    fn output_definition() -> NodeDefinitionV02 {
+    fn output_definition() -> NodeDefinitionCurrent {
         definition(json!({
           "schema": "skenion.node.definition",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "render.output",
-          "version": "0.2.0",
+          "version": "0.1.0",
           "displayName": "Render Output",
           "category": "Render",
           "ports": [
@@ -1077,12 +1382,12 @@ mod tests {
         }))
     }
 
-    fn pass_definition() -> NodeDefinitionV02 {
+    fn pass_definition() -> NodeDefinitionCurrent {
         definition(json!({
           "schema": "skenion.node.definition",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "test.pass",
-          "version": "0.2.0",
+          "version": "0.1.0",
           "displayName": "Pass",
           "category": "Test",
           "ports": [
@@ -1096,17 +1401,17 @@ mod tests {
         }))
     }
 
-    fn render_graph() -> GraphDocumentV02 {
+    fn render_graph() -> GraphDocumentCurrent {
         graph(json!({
           "schema": "skenion.graph",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "render",
           "revision": "1",
           "nodes": [
             {
               "id": "clear",
               "kind": "render.clear-color",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": [
                 { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
@@ -1115,7 +1420,7 @@ mod tests {
             {
               "id": "output",
               "kind": "render.output",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": [
                 { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
@@ -1133,20 +1438,20 @@ mod tests {
         }))
     }
 
-    fn identity_patch() -> PatchDefinitionV02 {
+    fn identity_patch() -> PatchDefinitionCurrent {
         serde_json::from_value(json!({
           "id": "identity",
           "revision": "1",
           "graph": {
             "schema": "skenion.graph",
-            "schemaVersion": "0.2.0",
+            "schemaVersion": "0.1.0",
             "id": "identity-graph",
             "revision": "1",
             "nodes": [
               {
                 "id": "patch_in",
                 "kind": "core.inlet",
-                "kindVersion": "0.2.0",
+                "kindVersion": "0.1.0",
                 "params": { "portId": "in", "label": "Input" },
                 "ports": [
                   { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "description": "Frame entering the patch" }
@@ -1155,7 +1460,7 @@ mod tests {
               {
                 "id": "pass",
                 "kind": "test.pass",
-                "kindVersion": "0.2.0",
+                "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
                   { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
@@ -1165,7 +1470,7 @@ mod tests {
               {
                 "id": "patch_out",
                 "kind": "core.outlet",
-                "kindVersion": "0.2.0",
+                "kindVersion": "0.1.0",
                 "params": { "portId": "out", "label": "Output" },
                 "ports": [
                   { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true, "description": "Frame leaving the patch" }
@@ -1191,17 +1496,17 @@ mod tests {
         .expect("patch definition should parse")
     }
 
-    fn subpatch_graph() -> GraphDocumentV02 {
+    fn subpatch_graph() -> GraphDocumentCurrent {
         graph(json!({
           "schema": "skenion.graph",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "render-subpatch",
           "revision": "1",
           "nodes": [
             {
               "id": "clear",
               "kind": "render.clear-color",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": [
                 { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
@@ -1210,7 +1515,7 @@ mod tests {
             {
               "id": "fx",
               "kind": "core.subpatch",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": { "patchRef": "identity" },
               "ports": [
                 { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
@@ -1220,7 +1525,7 @@ mod tests {
             {
               "id": "output",
               "kind": "render.output",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": [
                 { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
@@ -1244,10 +1549,10 @@ mod tests {
         }))
     }
 
-    fn project_document() -> ProjectDocumentV02 {
+    fn project_document() -> ProjectDocumentCurrent {
         serde_json::from_value(json!({
           "schema": "skenion.project",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "render-project",
           "revision": "1",
           "graph": subpatch_graph(),
@@ -1262,16 +1567,16 @@ mod tests {
     }
 
     #[test]
-    fn validates_and_builds_v02_plan_metadata() {
+    fn validates_and_builds_current_plan_metadata() {
         let graph = render_graph();
         let nodes = vec![clear_definition(), output_definition()];
         let (warnings, analysis) =
-            validate_project_v02(&graph, &nodes).expect("project should validate");
+            validate_project_current(&graph, &nodes).expect("project should validate");
         assert!(warnings.is_empty());
         assert!(analysis.cycles.is_empty());
 
         let (plan, diagnostics) =
-            build_execution_plan_v02(&graph, &nodes).expect("plan should build");
+            build_execution_plan_current(&graph, &nodes).expect("plan should build");
         assert!(diagnostics.is_empty());
         assert_eq!(plan.graph_id, "render");
         assert_eq!(plan.nodes.len(), 2);
@@ -1290,14 +1595,14 @@ mod tests {
     fn records_merge_order_feedback_and_risky_warnings() {
         let mut graph = graph(json!({
           "schema": "skenion.graph",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "feedback",
           "revision": "1",
           "nodes": [
             {
               "id": "node",
               "kind": "render.feedback-composite",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": [
                 { "id": "previous", "direction": "input", "type": "render.frame", "rate": "render" },
@@ -1317,9 +1622,9 @@ mod tests {
         }));
         let definition = definition(json!({
           "schema": "skenion.node.definition",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "render.feedback-composite",
-          "version": "0.2.0",
+          "version": "0.1.0",
           "displayName": "Feedback",
           "category": "Render",
           "ports": [
@@ -1333,7 +1638,7 @@ mod tests {
         }));
 
         let (plan, diagnostics) =
-            build_execution_plan_v02(&graph, std::slice::from_ref(&definition))
+            build_execution_plan_current(&graph, std::slice::from_ref(&definition))
                 .expect("feedback should plan");
         assert!(diagnostics.is_empty());
         let metadata = plan.edges[0].metadata.as_ref().unwrap();
@@ -1345,12 +1650,12 @@ mod tests {
         );
         assert_eq!(
             metadata.feedback.as_ref().unwrap().boundary,
-            FeedbackBoundaryV02::RenderFrame
+            FeedbackBoundaryCurrent::RenderFrame
         );
 
-        graph.edges[0].feedback.as_mut().unwrap().boundary = FeedbackBoundaryV02::SameTurn;
-        let (_plan, diagnostics) =
-            build_execution_plan_v02(&graph, &[definition]).expect("risky feedback should plan");
+        graph.edges[0].feedback.as_mut().unwrap().boundary = FeedbackBoundaryCurrent::SameTurn;
+        let (_plan, diagnostics) = build_execution_plan_current(&graph, &[definition])
+            .expect("risky feedback should plan");
         assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Warning);
         assert!(diagnostics[0].message.contains("risky-feedback"));
     }
@@ -1359,12 +1664,12 @@ mod tests {
     fn project_document_conversions_default_runtime_fields() {
         let document = project_document();
 
-        let request: ProjectRequestV02 = document.clone().into();
+        let request: ProjectRequestCurrent = document.clone().into();
         assert_eq!(request.graph.id, "render-subpatch");
         assert!(request.nodes.is_empty());
         assert_eq!(request.patch_library[0].id, "identity");
 
-        let run_request: RunProjectRequestV02 = document.into();
+        let run_request: RunProjectRequestCurrent = document.into();
         assert_eq!(run_request.graph.id, "render-subpatch");
         assert!(run_request.nodes.is_empty());
         assert_eq!(run_request.patch_library[0].id, "identity");
@@ -1372,8 +1677,8 @@ mod tests {
     }
 
     #[test]
-    fn expands_subpatches_before_v02_validation_and_planning() {
-        let request = ProjectRequestV02 {
+    fn expands_subpatches_before_current_validation_and_planning() {
+        let request = ProjectRequestCurrent {
             document: None,
             graph: subpatch_graph(),
             nodes: vec![clear_definition(), output_definition(), pass_definition()],
@@ -1381,7 +1686,7 @@ mod tests {
             view_state: None,
         };
 
-        let expanded = expand_project_graph_v02(&request.graph, &request.patch_library)
+        let expanded = expand_project_graph_current(&request.graph, &request.patch_library)
             .expect("subpatch graph should expand");
         let node_ids = expanded
             .nodes
@@ -1403,10 +1708,10 @@ mod tests {
         }));
 
         let (diagnostics, _) =
-            validate_project_request_v02(&request).expect("expanded project should validate");
+            validate_project_request_current(&request).expect("expanded project should validate");
         assert!(diagnostics.is_empty());
         let (plan, diagnostics) =
-            build_execution_plan_request_v02(&request).expect("expanded project should plan");
+            build_execution_plan_request_current(&request).expect("expanded project should plan");
         assert!(diagnostics.is_empty());
         assert_eq!(
             plan.nodes
@@ -1418,9 +1723,49 @@ mod tests {
     }
 
     #[test]
+    fn current_plan_sorts_expanded_nodes_by_dependency_order() {
+        let mut graph = subpatch_graph();
+        graph.nodes.reverse();
+        let request = ProjectRequestCurrent {
+            document: None,
+            graph,
+            nodes: vec![clear_definition(), output_definition(), pass_definition()],
+            patch_library: vec![identity_patch()],
+            view_state: None,
+        };
+
+        let expanded = expand_project_graph_current(&request.graph, &request.patch_library)
+            .expect("subpatch graph should expand");
+        assert_eq!(
+            expanded
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["output", "fx::pass", "clear"]
+        );
+
+        let (plan, diagnostics) =
+            build_execution_plan_request_current(&request).expect("expanded project should plan");
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .map(|node| node.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clear", "fx::pass", "output"]
+        );
+        assert_eq!(
+            plan.nodes.iter().map(|node| node.order).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
     fn contracts_boundary_edges_and_filters_boundary_only_edges() {
         let base_edge = render_graph().edges[0].clone();
-        let endpoint = EdgeEndpointV02 {
+        let endpoint = EdgeEndpointCurrent {
             node_id: "same".to_owned(),
             port_id: "out".to_owned(),
         };
@@ -1453,7 +1798,7 @@ mod tests {
             vec![
                 ExpansionEdge {
                     edge: source_edge,
-                    source: ExpansionEndpoint::Node(EdgeEndpointV02 {
+                    source: ExpansionEndpoint::Node(EdgeEndpointCurrent {
                         node_id: "source".to_owned(),
                         port_id: "out".to_owned(),
                     }),
@@ -1462,7 +1807,7 @@ mod tests {
                 ExpansionEdge {
                     edge: target_edge,
                     source: ExpansionEndpoint::Boundary("fx::@inlet::in".to_owned()),
-                    target: ExpansionEndpoint::Node(EdgeEndpointV02 {
+                    target: ExpansionEndpoint::Node(EdgeEndpointCurrent {
                         node_id: "target".to_owned(),
                         port_id: "in".to_owned(),
                     }),
@@ -1494,15 +1839,15 @@ mod tests {
 
     #[test]
     fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
-        let duplicate = ProjectRequestV02 {
+        let duplicate = ProjectRequestCurrent {
             document: None,
             graph: render_graph(),
             nodes: vec![clear_definition(), output_definition()],
             patch_library: vec![identity_patch(), identity_patch()],
             view_state: None,
         };
-        let duplicate_diagnostics =
-            validate_project_request_v02(&duplicate).expect_err("duplicate patch ids should fail");
+        let duplicate_diagnostics = validate_project_request_current(&duplicate)
+            .expect_err("duplicate patch ids should fail");
         assert_eq!(
             duplicate_diagnostics[0].code.as_deref(),
             Some("subpatch.duplicate-patch-id")
@@ -1510,14 +1855,14 @@ mod tests {
 
         let missing_ref = graph(json!({
           "schema": "skenion.graph",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "missing-ref",
           "revision": "1",
           "nodes": [
             {
               "id": "fx",
               "kind": "core.subpatch",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": []
             }
@@ -1525,7 +1870,7 @@ mod tests {
           "edges": []
         }));
         let missing_ref_diagnostics =
-            expand_project_graph_v02(&missing_ref, &[]).expect_err("missing ref should fail");
+            expand_project_graph_current(&missing_ref, &[]).expect_err("missing ref should fail");
         assert_eq!(
             missing_ref_diagnostics[0].code.as_deref(),
             Some("subpatch.missing-ref")
@@ -1543,14 +1888,14 @@ mod tests {
                   "revision": "1",
                   "graph": {
                     "schema": "skenion.graph",
-                    "schemaVersion": "0.2.0",
+                    "schemaVersion": "0.1.0",
                     "id": format!("p{index}-graph"),
                     "revision": "1",
                     "nodes": [
                       {
                         "id": "next",
                         "kind": "core.subpatch",
-                        "kindVersion": "0.2.0",
+                        "kindVersion": "0.1.0",
                         "params": { "patchRef": format!("p{}", index + 1) },
                         "ports": []
                       }
@@ -1563,22 +1908,22 @@ mod tests {
         }
         let depth_root = graph(json!({
           "schema": "skenion.graph",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "depth-root",
           "revision": "1",
           "nodes": [
             {
               "id": "root",
               "kind": "core.subpatch",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": { "patchRef": "p0" },
               "ports": []
             }
           ],
           "edges": []
         }));
-        let depth_diagnostics =
-            expand_project_graph_v02(&depth_root, &patch_library).expect_err("depth should fail");
+        let depth_diagnostics = expand_project_graph_current(&depth_root, &patch_library)
+            .expect_err("depth should fail");
         assert_eq!(
             depth_diagnostics[0].code.as_deref(),
             Some("subpatch.depth-exceeded")
@@ -1610,14 +1955,14 @@ mod tests {
 
         let fallback_boundary = graph(json!({
           "schema": "skenion.graph",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "fallback-boundary",
           "revision": "1",
           "nodes": [
             {
               "id": "plain_inlet",
               "kind": "core.inlet",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": []
             }
@@ -1626,19 +1971,19 @@ mod tests {
         }));
         assert_eq!(boundary_key(&fallback_boundary.nodes[0]), "plain_inlet");
 
-        let duplicate_inlet_patch: PatchDefinitionV02 = serde_json::from_value(json!({
+        let duplicate_inlet_patch: PatchDefinitionCurrent = serde_json::from_value(json!({
           "id": "alias-patch",
           "revision": "1",
           "graph": {
             "schema": "skenion.graph",
-            "schemaVersion": "0.2.0",
+            "schemaVersion": "0.1.0",
             "id": "alias-patch-graph",
             "revision": "1",
             "nodes": [
               {
                 "id": "in_a",
                 "kind": "core.inlet",
-                "kindVersion": "0.2.0",
+                "kindVersion": "0.1.0",
                 "params": { "portId": "in_a", "label": "shared" },
                 "ports": [
                   { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
@@ -1647,7 +1992,7 @@ mod tests {
               {
                 "id": "in_b",
                 "kind": "core.inlet",
-                "kindVersion": "0.2.0",
+                "kindVersion": "0.1.0",
                 "params": { "portId": "in_b", "label": "shared" },
                 "ports": [
                   { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
@@ -1678,14 +2023,14 @@ mod tests {
 
         let root = graph(json!({
           "schema": "skenion.graph",
-          "schemaVersion": "0.2.0",
+          "schemaVersion": "0.1.0",
           "id": "alias-root",
           "revision": "1",
           "nodes": [
             {
               "id": "clear",
               "kind": "render.clear-color",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": [
                 { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
@@ -1694,7 +2039,7 @@ mod tests {
             {
               "id": "fx",
               "kind": "p",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": { "objectText": "p alias-patch" },
               "ports": [
                 { "id": "in", "direction": "input", "type": "render.frame", "rate": "render" },
@@ -1704,7 +2049,7 @@ mod tests {
             {
               "id": "output",
               "kind": "render.output",
-              "kindVersion": "0.2.0",
+              "kindVersion": "0.1.0",
               "params": {},
               "ports": [
                 { "id": "in", "direction": "input", "type": "render.frame", "rate": "render" }
@@ -1724,8 +2069,8 @@ mod tests {
             }
           ]
         }));
-        let diagnostics =
-            expand_project_graph_v02(&root, &[duplicate_inlet_patch]).expect_err("boundaries fail");
+        let diagnostics = expand_project_graph_current(&root, &[duplicate_inlet_patch])
+            .expect_err("boundaries fail");
         let codes = diagnostics
             .iter()
             .map(|diagnostic| diagnostic.code.as_deref())
@@ -1736,7 +2081,7 @@ mod tests {
 
     #[test]
     fn reports_missing_recursive_and_invalid_patch_library_diagnostics() {
-        let missing = ProjectRequestV02 {
+        let missing = ProjectRequestCurrent {
             document: None,
             graph: subpatch_graph(),
             nodes: vec![clear_definition(), output_definition(), pass_definition()],
@@ -1744,25 +2089,25 @@ mod tests {
             view_state: None,
         };
         let missing_diagnostics =
-            validate_project_request_v02(&missing).expect_err("missing patch should fail");
+            validate_project_request_current(&missing).expect_err("missing patch should fail");
         assert_eq!(
             missing_diagnostics[0].code.as_deref(),
             Some("subpatch.missing-patch")
         );
 
-        let recursive_patch: PatchDefinitionV02 = serde_json::from_value(json!({
+        let recursive_patch: PatchDefinitionCurrent = serde_json::from_value(json!({
           "id": "recursive",
           "revision": "1",
           "graph": {
             "schema": "skenion.graph",
-            "schemaVersion": "0.2.0",
+            "schemaVersion": "0.1.0",
             "id": "recursive-graph",
             "revision": "1",
             "nodes": [
               {
                 "id": "self",
                 "kind": "core.subpatch",
-                "kindVersion": "0.2.0",
+                "kindVersion": "0.1.0",
                 "params": { "patchRef": "recursive" },
                 "ports": []
               }
@@ -1771,18 +2116,18 @@ mod tests {
           }
         }))
         .expect("recursive patch should parse");
-        let recursive = ProjectRequestV02 {
+        let recursive = ProjectRequestCurrent {
             document: None,
             graph: graph(json!({
               "schema": "skenion.graph",
-              "schemaVersion": "0.2.0",
+              "schemaVersion": "0.1.0",
               "id": "recursive-root",
               "revision": "1",
               "nodes": [
                 {
                   "id": "root",
                   "kind": "core.subpatch",
-                  "kindVersion": "0.2.0",
+                  "kindVersion": "0.1.0",
                   "params": { "patchRef": "recursive" },
                   "ports": []
                 }
@@ -1794,7 +2139,7 @@ mod tests {
             view_state: None,
         };
         let recursive_diagnostics =
-            validate_project_request_v02(&recursive).expect_err("recursive patch should fail");
+            validate_project_request_current(&recursive).expect_err("recursive patch should fail");
         assert_eq!(
             recursive_diagnostics[0].code.as_deref(),
             Some("subpatch.recursion")
@@ -1802,7 +2147,7 @@ mod tests {
 
         let mut duplicate_boundary = identity_patch();
         duplicate_boundary.graph.nodes[2].params["portId"] = json!("in");
-        let invalid = ProjectRequestV02 {
+        let invalid = ProjectRequestCurrent {
             document: None,
             graph: render_graph(),
             nodes: vec![clear_definition(), output_definition()],
@@ -1810,37 +2155,141 @@ mod tests {
             view_state: None,
         };
         let invalid_diagnostics =
-            validate_project_request_v02(&invalid).expect_err("invalid patch should fail");
+            validate_project_request_current(&invalid).expect_err("invalid patch should fail");
         assert_eq!(
             invalid_diagnostics[0].code.as_deref(),
             Some("subpatch.invalid-patch-definition")
         );
     }
 
+    fn assert_patch_graph_schema_diagnostic(
+        diagnostics: &[RuntimeDiagnostic],
+        expected_code: &str,
+        expected_received_schema_version: &str,
+    ) {
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code.as_deref() == Some(expected_code))
+            .unwrap_or_else(|| panic!("missing {expected_code} diagnostic: {diagnostics:#?}"));
+        let details = diagnostic
+            .details
+            .as_ref()
+            .expect("schema diagnostic should include details");
+
+        assert_eq!(details["surface"], "graph");
+        assert_eq!(details["patchId"], "identity");
+        assert_eq!(details["expectedSchemaVersion"], "0.1.0");
+        assert_eq!(
+            details["receivedSchemaVersion"],
+            expected_received_schema_version
+        );
+        assert!(
+            diagnostics.iter().all(|diagnostic| {
+                diagnostic.code.as_deref() != Some("subpatch.invalid-patch-definition")
+                    || !diagnostic.message.contains("schemaVersion")
+            }),
+            "patch graph schemaVersion should not also be reported as generic patch contract failure: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn direct_requests_report_structured_patch_graph_schema_versions() {
+        let schema_version = "9.9.9";
+        let expected_code = "project.unsupported-schema-version";
+        let mut patch = identity_patch();
+        patch.graph.schema_version = schema_version.to_owned();
+        let request = ProjectRequestCurrent {
+            document: None,
+            graph: render_graph(),
+            nodes: vec![clear_definition(), output_definition(), pass_definition()],
+            patch_library: vec![patch],
+            view_state: None,
+        };
+
+        let validation_diagnostics = validate_project_request_current(&request)
+            .expect_err("patch graph schema mismatch should fail request validation");
+        assert_patch_graph_schema_diagnostic(
+            &validation_diagnostics,
+            expected_code,
+            schema_version,
+        );
+
+        let planning_diagnostics = build_execution_plan_request_current(&request)
+            .expect_err("patch graph schema mismatch should fail request planning");
+        assert_patch_graph_schema_diagnostic(&planning_diagnostics, expected_code, schema_version);
+    }
+
     #[test]
     fn rejects_invalid_graph_definitions_and_snapshots() {
         let graph = render_graph();
-        let missing = validate_project_v02(&graph, &[]).expect_err("missing definitions fail");
-        assert!(missing[0].message.contains("missing node definition"));
+        let missing = validate_project_current(&graph, &[]).expect_err("missing definitions fail");
+        assert_eq!(missing[0].code.as_deref(), Some("node-definition.missing"));
+        assert_eq!(
+            missing[0].details.as_ref().unwrap()["surface"],
+            "node-definition"
+        );
+
+        let mut unsupported_graph = render_graph();
+        unsupported_graph.schema_version = "9.9.9".to_owned();
+        let unsupported_graph_result = validate_project_current(
+            &unsupported_graph,
+            &[clear_definition(), output_definition()],
+        )
+        .expect_err("unsupported graph schema should fail");
+        assert_eq!(
+            unsupported_graph_result[0].code.as_deref(),
+            Some("graph.invalid-contract")
+        );
+        assert_eq!(
+            unsupported_graph_result[0].details.as_ref().unwrap()["surface"],
+            "graph"
+        );
+        assert_eq!(
+            unsupported_graph_result[0].details.as_ref().unwrap()["expectedSchemaVersion"],
+            "0.1.0"
+        );
+        assert_eq!(
+            unsupported_graph_result[0].details.as_ref().unwrap()["receivedSchemaVersion"],
+            "9.9.9"
+        );
 
         let mut invalid_definition = clear_definition();
         invalid_definition.permissions.push("network".to_owned());
         let invalid_definition_result =
-            validate_project_v02(&graph, &[invalid_definition, output_definition()])
+            validate_project_current(&graph, &[invalid_definition, output_definition()])
                 .expect_err("invalid definition should fail");
-        assert!(
-            invalid_definition_result
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("unsupported permission"))
+        let invalid_definition_diagnostic = invalid_definition_result
+            .iter()
+            .find(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("unsupported permission: network")
+            })
+            .expect("unsupported permission should be reported");
+        assert_eq!(
+            invalid_definition_diagnostic.code.as_deref(),
+            Some("node-definition.invalid-contract")
+        );
+        assert_eq!(
+            invalid_definition_diagnostic.details.as_ref().unwrap()["surface"],
+            "node-definition"
+        );
+        assert_eq!(
+            invalid_definition_diagnostic.details.as_ref().unwrap()["expectedSchemaVersion"],
+            "0.1.0"
+        );
+        assert_eq!(
+            invalid_definition_diagnostic.details.as_ref().unwrap()["receivedSchemaVersion"],
+            "0.1.0"
         );
 
         let mut mismatch = render_graph();
         mismatch.nodes[0].ports.clear();
-        mismatch.nodes[1].ports[0].direction = PortDirectionV02::Output;
+        mismatch.nodes[1].ports[0].direction = PortDirectionCurrent::Output;
         mismatch.nodes[1].ports[0].port_type = "value.number".to_owned();
-        mismatch.nodes[1].ports.push(PortSpecV02 {
+        mismatch.nodes[1].ports.push(PortSpecCurrent {
             id: "extra".to_owned(),
-            direction: PortDirectionV02::Input,
+            direction: PortDirectionCurrent::Input,
             port_type: "render.frame".to_owned(),
             label: None,
             rate: None,
@@ -1858,13 +2307,19 @@ mod tests {
             description: None,
         });
         let mismatch_result =
-            validate_project_v02(&mismatch, &[clear_definition(), output_definition()])
+            validate_project_current(&mismatch, &[clear_definition(), output_definition()])
                 .expect_err("snapshot mismatch should fail");
         let messages = mismatch_result
             .iter()
             .map(|diagnostic| diagnostic.message.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(
+            mismatch_result
+                .iter()
+                .all(|diagnostic| diagnostic.code.is_some()),
+            "current 0.1 project diagnostics should be structured"
+        );
         assert!(messages.contains("missing manifest port"));
         assert!(messages.contains("direction differs from definition"));
         assert!(messages.contains("type value.number"));
@@ -1873,64 +2328,70 @@ mod tests {
     }
 
     #[test]
-    fn labels_all_v02_policy_and_execution_variants() {
+    fn labels_all_current_policy_and_execution_variants() {
         for (policy, expected) in [
-            (Some(MergePolicyV02::Forbid), "forbid"),
-            (Some(MergePolicyV02::OrderedEvents), "ordered-events"),
-            (Some(MergePolicyV02::Mix), "mix"),
-            (Some(MergePolicyV02::Array), "array"),
-            (Some(MergePolicyV02::Latest), "latest"),
-            (Some(MergePolicyV02::First), "first"),
-            (Some(MergePolicyV02::Custom), "custom"),
+            (Some(MergePolicyCurrent::Forbid), "forbid"),
+            (Some(MergePolicyCurrent::OrderedEvents), "ordered-events"),
+            (Some(MergePolicyCurrent::Mix), "mix"),
+            (Some(MergePolicyCurrent::Array), "array"),
+            (Some(MergePolicyCurrent::Latest), "latest"),
+            (Some(MergePolicyCurrent::First), "first"),
+            (Some(MergePolicyCurrent::Custom), "custom"),
             (None, "forbid"),
         ] {
             assert_eq!(merge_policy_label(policy.as_ref()), expected);
         }
 
         for (policy, expected) in [
-            (Some(FanOutPolicyV02::Allow), "allow"),
-            (Some(FanOutPolicyV02::Forbid), "forbid"),
-            (Some(FanOutPolicyV02::Copy), "copy"),
-            (Some(FanOutPolicyV02::Share), "share"),
+            (Some(FanOutPolicyCurrent::Allow), "allow"),
+            (Some(FanOutPolicyCurrent::Forbid), "forbid"),
+            (Some(FanOutPolicyCurrent::Copy), "copy"),
+            (Some(FanOutPolicyCurrent::Share), "share"),
             (None, "allow"),
         ] {
             assert_eq!(fan_out_policy_label(policy.as_ref()), expected);
         }
 
         for (classification, expected) in [
-            (CycleValidationV02::NoCycle, "no-cycle"),
-            (CycleValidationV02::ValidFeedback, "valid-feedback"),
-            (CycleValidationV02::RiskyFeedback, "risky-feedback"),
+            (CycleValidationCurrent::NoCycle, "no-cycle"),
+            (CycleValidationCurrent::ValidFeedback, "valid-feedback"),
+            (CycleValidationCurrent::RiskyFeedback, "risky-feedback"),
             (
-                CycleValidationV02::AmbiguousAlgebraicLoop,
+                CycleValidationCurrent::AmbiguousAlgebraicLoop,
                 "ambiguous-algebraic-loop",
             ),
-            (CycleValidationV02::InvalidCycle, "invalid-cycle"),
+            (CycleValidationCurrent::InvalidCycle, "invalid-cycle"),
         ] {
             assert_eq!(cycle_validation_label(&classification), expected);
         }
 
         for (model, expected) in [
-            (ExecutionModelV02::Event, ExecutionModel::Event),
-            (ExecutionModelV02::Value, ExecutionModel::Value),
-            (ExecutionModelV02::Frame, ExecutionModel::Frame),
-            (ExecutionModelV02::AudioBlock, ExecutionModel::AudioBlock),
-            (ExecutionModelV02::VideoFrame, ExecutionModel::VideoFrame),
-            (ExecutionModelV02::GpuPass, ExecutionModel::GpuPass),
+            (ExecutionModelCurrent::Event, ExecutionModel::Event),
+            (ExecutionModelCurrent::Value, ExecutionModel::Value),
+            (ExecutionModelCurrent::Frame, ExecutionModel::Frame),
             (
-                ExecutionModelV02::AsyncResource,
+                ExecutionModelCurrent::AudioBlock,
+                ExecutionModel::AudioBlock,
+            ),
+            (
+                ExecutionModelCurrent::VideoFrame,
+                ExecutionModel::VideoFrame,
+            ),
+            (ExecutionModelCurrent::GpuPass, ExecutionModel::GpuPass),
+            (
+                ExecutionModelCurrent::AsyncResource,
                 ExecutionModel::AsyncResource,
             ),
             (
-                ExecutionModelV02::ScriptControl,
+                ExecutionModelCurrent::ScriptControl,
                 ExecutionModel::ScriptControl,
             ),
             (
-                ExecutionModelV02::NativePlugin,
+                ExecutionModelCurrent::NativePlugin,
                 ExecutionModel::NativePlugin,
             ),
         ] {
-            assert_eq!(map_execution_model_v02(&model), expected);
+            assert_eq!(map_execution_model_current(&model), expected);
         }
     }
 }

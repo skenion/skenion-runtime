@@ -45,7 +45,7 @@ pub struct GeneratedShaderSource {
     pub source_map: GeneratedShaderSourceMap,
 }
 
-pub fn generated_shader_response_from_preview_document(
+pub(crate) fn generated_shader_response_from_preview_document(
     document: &PreviewDocument,
 ) -> GeneratedShaderResponse {
     match render_scene_from_preview_document(document) {
@@ -85,7 +85,18 @@ pub fn generated_shader_response_from_preview_document(
     }
 }
 
-pub fn run_render_preview_window(
+pub fn run_render_preview_document_file(
+    document_path: PathBuf,
+    frame_limit: PreviewFrameLimit,
+    telemetry_path: Option<PathBuf>,
+    control_state_path: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = std::fs::read(document_path)?;
+    let document = serde_json::from_slice(&bytes)?;
+    run_render_preview_window(document, frame_limit, telemetry_path, control_state_path)
+}
+
+pub(crate) fn run_render_preview_window(
     mut document: PreviewDocument,
     frame_limit: PreviewFrameLimit,
     telemetry_path: Option<PathBuf>,

@@ -13,22 +13,23 @@ pub const PREVIEW_DOCUMENT_SCHEMA_VERSION: &str = "0.1.0";
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PreviewDocument {
-    pub schema: String,
-    pub schema_version: String,
-    pub graph: GraphDocument,
-    pub plan: ExecutionPlan,
-    pub control_state: ControlState,
-    pub session_revision: u64,
+pub(crate) struct PreviewDocument {
+    pub(crate) schema: String,
+    pub(crate) schema_version: String,
+    pub(crate) graph: GraphDocument,
+    pub(crate) plan: ExecutionPlan,
+    pub(crate) control_state: ControlState,
+    pub(crate) session_revision: u64,
 }
 
 impl PreviewDocument {
-    pub fn new(graph: GraphDocument, plan: ExecutionPlan, session_revision: u64) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(graph: GraphDocument, plan: ExecutionPlan, session_revision: u64) -> Self {
         let control_state = ControlState::from_graph(&graph);
         Self::with_control_state(graph, plan, control_state, session_revision)
     }
 
-    pub fn with_control_state(
+    pub(crate) fn with_control_state(
         graph: GraphDocument,
         plan: ExecutionPlan,
         control_state: ControlState,
@@ -45,7 +46,7 @@ impl PreviewDocument {
     }
 }
 
-pub fn write_preview_document(document: &PreviewDocument) -> Result<PathBuf, String> {
+pub(crate) fn write_preview_document(document: &PreviewDocument) -> Result<PathBuf, String> {
     let directory = preview_temp_dir();
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let path = directory.join(format!(

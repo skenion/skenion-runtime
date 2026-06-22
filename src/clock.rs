@@ -227,7 +227,7 @@ impl MidiClockAdapter {
         let diagnostics: Vec<RuntimeClockDiagnostic> = result
             .diagnostics
             .into_iter()
-            .map(RuntimeClockDiagnostic::from)
+            .map(runtime_clock_diagnostic_from_midi)
             .collect();
 
         if !diagnostics
@@ -500,16 +500,14 @@ fn push_field<T: fmt::Display>(
     ));
 }
 
-impl From<MidiClockDiagnostic> for RuntimeClockDiagnostic {
-    fn from(diagnostic: MidiClockDiagnostic) -> Self {
-        Self {
-            severity: match diagnostic.severity {
-                MidiClockDiagnosticSeverity::Warning => RuntimeClockDiagnosticSeverity::Warning,
-                MidiClockDiagnosticSeverity::Error => RuntimeClockDiagnosticSeverity::Error,
-            },
-            code: diagnostic.code,
-            message: diagnostic.message,
-        }
+fn runtime_clock_diagnostic_from_midi(diagnostic: MidiClockDiagnostic) -> RuntimeClockDiagnostic {
+    RuntimeClockDiagnostic {
+        severity: match diagnostic.severity {
+            MidiClockDiagnosticSeverity::Warning => RuntimeClockDiagnosticSeverity::Warning,
+            MidiClockDiagnosticSeverity::Error => RuntimeClockDiagnosticSeverity::Error,
+        },
+        code: diagnostic.code,
+        message: diagnostic.message,
     }
 }
 
@@ -874,12 +872,11 @@ mod tests {
         assert!(text.contains("diagnostic:"));
         assert!(text.contains("invalid-midi-song-position-pointer"));
 
-        let diagnostic: RuntimeClockDiagnostic = MidiClockDiagnostic {
+        let diagnostic = runtime_clock_diagnostic_from_midi(MidiClockDiagnostic {
             severity: MidiClockDiagnosticSeverity::Error,
             code: "runtime-midi-clock-error".to_owned(),
             message: "runtime MIDI Clock error".to_owned(),
-        }
-        .into();
+        });
         assert_eq!(diagnostic.severity, RuntimeClockDiagnosticSeverity::Error);
     }
 

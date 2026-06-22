@@ -71,11 +71,10 @@ impl RuntimeSessionRegistry {
     }
 
     pub fn get_or_create(&self, session_id: &str) -> RuntimeSessionRecord {
-        let session_id = if session_id.is_empty() {
-            self.default_session_id()
-        } else {
-            session_id
-        };
+        assert!(
+            !session_id.is_empty(),
+            "session_id must be explicit; use default_record() for the built-in default session"
+        );
         if let Some(record) = self
             .sessions
             .read()
@@ -515,7 +514,6 @@ fn contract_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> Vec<Value> {
 fn runtime_session_capabilities() -> RuntimeSessionCapabilitySet {
     RuntimeSessionCapabilitySet {
         session_addressing: true,
-        default_session_alias: true,
         event_replay: true,
         multi_window: true,
         profiles: vec![
@@ -537,12 +535,19 @@ mod tests {
     use crate::sidecar::RuntimeEndpointConfig;
 
     #[test]
-    fn registry_creates_default_alias_and_named_records() {
+    fn registry_creates_explicit_default_and_named_records() {
         let registry = RuntimeSessionRegistry::dry_preview();
 
         assert_eq!(registry.default_record().id, DEFAULT_SESSION_ID);
-        assert_eq!(registry.get_or_create("").id, DEFAULT_SESSION_ID);
+        assert_eq!(
+            registry.get_or_create(DEFAULT_SESSION_ID).id,
+            DEFAULT_SESSION_ID
+        );
         assert_eq!(registry.get_or_create("alpha").id, "alpha");
+        let endpoint = RuntimeEndpointConfig::new("127.0.0.1".to_owned(), 3761);
+        let profile = crate::sidecar::runtime_connection_profile(&endpoint, "unix-ms:1");
+        let info = registry.default_record().info_response(profile);
+        assert!(info.capabilities.session_addressing);
     }
 
     #[test]

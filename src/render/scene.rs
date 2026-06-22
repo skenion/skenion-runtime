@@ -106,7 +106,7 @@ pub enum RenderSceneBuildError {
     },
 }
 
-pub fn render_scene_from_preview_document(
+pub(crate) fn render_scene_from_preview_document(
     document: &PreviewDocument,
 ) -> Result<RenderScene, RenderSceneBuildError> {
     if let Some(scene) = explicit_render_output_scene(document)? {

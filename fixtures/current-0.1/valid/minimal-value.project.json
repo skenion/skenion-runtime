@@ -1,0 +1,53 @@
+{
+  "graph": {
+    "schema": "skenion.graph",
+    "schemaVersion": "0.1.0",
+    "id": "runtime-fixture-minimal-value",
+    "revision": "1",
+    "nodes": [
+      {
+        "id": "value",
+        "kind": "core.value",
+        "kindVersion": "0.1.0",
+        "params": {
+          "value": 0.5
+        },
+        "ports": [
+          {
+            "id": "out",
+            "direction": "output",
+            "type": "value.number",
+            "rate": "control"
+          }
+        ]
+      }
+    ],
+    "edges": []
+  },
+  "nodes": [
+    {
+      "schema": "skenion.node.definition",
+      "schemaVersion": "0.1.0",
+      "id": "core.value",
+      "version": "0.1.0",
+      "displayName": "Value",
+      "category": "Core",
+      "ports": [
+        {
+          "id": "out",
+          "direction": "output",
+          "type": "value.number",
+          "rate": "control"
+        }
+      ],
+      "execution": {
+        "model": "value"
+      },
+      "state": {
+        "persistent": false
+      },
+      "permissions": [],
+      "capabilities": ["value.number.v0.1"]
+    }
+  ]
+}

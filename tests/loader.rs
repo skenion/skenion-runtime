@@ -1,13 +1,14 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use skenion_runtime::{
-    LoadError, NodeRegistry, ProjectRequest, build_execution_plan, load_graph_document,
-    load_node_definition, validate_project,
+    NodeDefinitionCurrent, ProjectRequestCurrent, build_execution_plan_request_current,
+    validate_project_request_current,
 };
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -39,7 +40,15 @@ impl Drop for TempDir {
     }
 }
 
-fn valid_definition() -> Value {
+fn read_json_file<T: DeserializeOwned>(path: impl AsRef<Path>) -> T {
+    let path = path.as_ref();
+    let bytes = fs::read(path)
+        .unwrap_or_else(|error| panic!("expected JSON fixture at {}: {error}", path.display()));
+    serde_json::from_slice(&bytes)
+        .unwrap_or_else(|error| panic!("expected {} to parse: {error}", path.display()))
+}
+
+fn valid_definition_current() -> Value {
     json!({
       "schema": "skenion.node.definition",
       "schemaVersion": "0.1.0",
@@ -48,7 +57,12 @@ fn valid_definition() -> Value {
       "displayName": "Loader",
       "category": "Core",
       "ports": [
-        { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+        {
+          "id": "out",
+          "direction": "output",
+          "type": "value.number",
+          "rate": "control"
+        }
       ],
       "execution": { "model": "value" },
       "state": { "persistent": false },
@@ -57,154 +71,103 @@ fn valid_definition() -> Value {
     })
 }
 
-fn valid_graph() -> Value {
+fn valid_project_request_current() -> Value {
     json!({
-      "schema": "skenion.graph",
-      "schemaVersion": "0.1.0",
-      "id": "loader-graph",
-      "revision": "1",
-      "nodes": [
-        {
-          "id": "node",
-          "kind": "core.loader",
-          "kindVersion": "0.1.0",
-          "params": {},
-          "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
-          ]
-        }
-      ],
-      "edges": []
+      "graph": {
+        "schema": "skenion.graph",
+        "schemaVersion": "0.1.0",
+        "id": "loader-graph-current",
+        "revision": "1",
+        "nodes": [
+          {
+            "id": "node",
+            "kind": "core.loader",
+            "kindVersion": "0.1.0",
+            "params": {},
+            "ports": [
+              {
+                "id": "out",
+                "direction": "output",
+                "type": "value.number",
+                "rate": "control"
+              }
+            ]
+          }
+        ],
+        "edges": []
+      },
+      "nodes": [valid_definition_current()]
     })
 }
 
-fn error_kind(error: LoadError) -> &'static str {
-    match error {
-        LoadError::Read { .. } => "read",
-        LoadError::Parse { .. } => "parse",
-        LoadError::Invalid { .. } => "invalid",
-    }
-}
-
 #[test]
-fn loads_valid_node_definition_and_graph() {
+fn loads_current_current_node_definition_and_project_request() {
     let temp = TempDir::new("valid");
     let definition_path = temp.file("node.json");
-    let graph_path = temp.file("graph.json");
-    fs::write(&definition_path, valid_definition().to_string()).unwrap();
-    fs::write(&graph_path, valid_graph().to_string()).unwrap();
+    let project_path = temp.file("project.json");
+    fs::write(&definition_path, valid_definition_current().to_string()).unwrap();
+    fs::write(&project_path, valid_project_request_current().to_string()).unwrap();
 
-    let definition = load_node_definition(&definition_path).unwrap();
-    let graph = load_graph_document(&graph_path).unwrap();
+    let definition: NodeDefinitionCurrent = read_json_file(&definition_path);
+    let request: ProjectRequestCurrent = read_json_file(&project_path);
 
+    assert_eq!(definition.schema_version, "0.1.0");
     assert_eq!(definition.id, "core.loader");
-    assert_eq!(graph.id, "loader-graph");
+    assert_eq!(request.graph.schema_version, "0.1.0");
+    assert_eq!(request.graph.id, "loader-graph-current");
+    validate_project_request_current(&request)
+        .expect("current 0.1 project request should validate");
 }
 
 #[test]
-fn reports_read_parse_and_invalid_errors_for_node_definitions() {
-    let temp = TempDir::new("node-errors");
-    let missing = load_node_definition(temp.file("missing.json"));
-    assert_eq!(error_kind(missing.unwrap_err()), "read");
+fn rejects_unsupported_project_versions_under_current_surface() {
+    let mut payload = valid_project_request_current();
+    payload["graph"]["schemaVersion"] = json!("9.9.9");
+    let request: ProjectRequestCurrent =
+        serde_json::from_value(payload).expect("payload shape should still deserialize");
 
-    let parse_path = temp.file("parse.json");
-    fs::write(&parse_path, "{").unwrap();
+    let diagnostics = validate_project_request_current(&request)
+        .expect_err("active Runtime project validation must reject non-current graph versions");
     assert_eq!(
-        error_kind(load_node_definition(&parse_path).unwrap_err()),
-        "parse"
+        diagnostics[0].code.as_deref(),
+        Some("graph.invalid-contract")
     );
-
-    let invalid_path = temp.file("invalid.json");
-    let mut invalid = valid_definition();
-    invalid["schemaVersion"] = json!("9.9.9");
-    fs::write(&invalid_path, invalid.to_string()).unwrap();
+    assert_eq!(diagnostics[0].details.as_ref().unwrap()["surface"], "graph");
     assert_eq!(
-        error_kind(load_node_definition(&invalid_path).unwrap_err()),
-        "invalid"
+        diagnostics[0].details.as_ref().unwrap()["expectedSchemaVersion"],
+        "0.1.0"
     );
-}
-
-#[test]
-fn reports_read_parse_and_invalid_errors_for_graphs() {
-    let temp = TempDir::new("graph-errors");
-    let missing = load_graph_document(temp.file("missing.json"));
-    assert_eq!(error_kind(missing.unwrap_err()), "read");
-
-    let parse_path = temp.file("parse.json");
-    fs::write(&parse_path, "{").unwrap();
     assert_eq!(
-        error_kind(load_graph_document(&parse_path).unwrap_err()),
-        "parse"
-    );
-
-    let invalid_path = temp.file("invalid.json");
-    let mut invalid = valid_graph();
-    invalid["schemaVersion"] = json!("9.9.9");
-    fs::write(&invalid_path, invalid.to_string()).unwrap();
-    assert_eq!(
-        error_kind(load_graph_document(&invalid_path).unwrap_err()),
-        "invalid"
+        diagnostics[0].details.as_ref().unwrap()["receivedSchemaVersion"],
+        "9.9.9"
     );
 }
 
 #[test]
-fn canonical_shader_uniform_example_uses_number_float_and_plans() {
-    let project_path = PathBuf::from(
-        ".deps/skenion-examples/compatibility/v0.1/projects/valid/fullscreen-shader-uniform.project.json",
-    );
-    let project_json = fs::read_to_string(&project_path).unwrap_or_else(|error| {
-        panic!(
-            "expected canonical examples fixture at {}: {error}",
-            project_path.display()
-        )
-    });
-    let project: ProjectRequest =
-        serde_json::from_str(&project_json).expect("shader uniform project should parse");
-    let value_node = project
+fn current_project_request_plans_value_number_graph() {
+    let project: ProjectRequestCurrent = serde_json::from_value(valid_project_request_current())
+        .expect("current project request should parse");
+
+    let source_node = project
         .graph
         .nodes
-        .iter()
-        .find(|node| node.id == "value_1")
-        .expect("fixture should include value node");
-    let shader_node = project
-        .graph
-        .nodes
-        .iter()
-        .find(|node| node.id == "shader_1")
-        .expect("fixture should include shader node");
-    let value_port = value_node
+        .first()
+        .expect("graph should include node");
+    let source_port = source_node
         .ports
         .iter()
-        .find(|port| port.id == "value")
-        .expect("value node should expose value output");
-    let uniform_port = shader_node
-        .ports
-        .iter()
-        .find(|port| port.id == "speed")
-        .or_else(|| shader_node.ports.iter().find(|port| port.id == "u_value"))
-        .expect("shader should expose a number.float uniform input");
-    let uniform_port_id = uniform_port.id.as_str();
+        .find(|port| port.id == "out")
+        .expect("source should expose value output");
 
-    assert_eq!(value_port.data_type.data_kind, "number.float");
-    assert_eq!(uniform_port.data_type.data_kind, "number.float");
-    assert!(
-        project.graph.edges.iter().any(|edge| {
-            edge.from.node == "value_1"
-                && edge.from.port == "value"
-                && edge.to.node == "shader_1"
-                && edge.to.port == uniform_port_id
-        }),
-        "shader uniform fixture should wire core.float.value to the shader uniform input"
-    );
+    assert_eq!(project.graph.schema_version, "0.1.0");
+    assert_eq!(source_port.port_type, "value.number");
 
-    let mut registry = NodeRegistry::new();
-    for definition in project.nodes {
-        registry
-            .insert(definition)
-            .expect("canonical example definitions should be valid");
-    }
-    validate_project(&project.graph, &registry)
-        .expect("canonical shader uniform project should validate");
-    build_execution_plan(&project.graph, &registry)
-        .expect("canonical shader uniform project should plan");
+    validate_project_request_current(&project)
+        .expect("canonical current 0.1 project should validate");
+    let (plan, diagnostics) = build_execution_plan_request_current(&project)
+        .expect("canonical current 0.1 project should plan");
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(plan.graph_id(), "loader-graph-current");
+    assert!(plan.contains_node("node"));
 }

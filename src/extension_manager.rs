@@ -6,13 +6,19 @@ use std::{
 };
 
 use serde::Serialize;
+use serde_json::json;
 
-use crate::{DiagnosticSeverity, RuntimeDiagnostic, contract::ExtensionKind};
-use skenion_contracts::{ExtensionManifestV01, validate_node_definition_v01};
+use crate::{DiagnosticSeverity, RuntimeDiagnostic};
+use skenion_contracts::{
+    ExtensionKindV01 as ExtensionKind, ExtensionManifestV01 as ExtensionManifest,
+    ExtensionNativeBindingV01, validate_extension_manifest_v01, validate_node_definition_v01,
+};
 
 pub const RUNTIME_EXTENSION_MANIFEST_FILE: &str = "skenion.extension.json";
 pub const RUNTIME_EXTENSION_ABI_VERSION: &str = "0.1.0";
 pub const SKENION_EXTENSION_PATH_ENV: &str = "SKENION_EXTENSION_PATH";
+const EXTENSION_MANIFEST_SCHEMA: &str = "skenion.extension.manifest";
+const EXTENSION_MANIFEST_SCHEMA_VERSION: &str = "0.1.0";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,14 +130,9 @@ impl Default for RuntimeExtensionListResponse {
 fn read_extension_package(package_dir: &Path, manifest_path: &Path) -> RuntimeExtensionDescriptor {
     let absolute_manifest_path =
         fs::canonicalize(manifest_path).unwrap_or_else(|_| manifest_path.to_path_buf());
-    let manifest = match fs::read_to_string(manifest_path)
-        .map_err(|error| format!("failed to read extension manifest: {error}"))
-        .and_then(|contents| {
-            serde_json::from_str::<ExtensionManifestV01>(&contents)
-                .map_err(|error| format!("failed to parse extension manifest: {error}"))
-        }) {
-        Ok(manifest) => manifest,
-        Err(message) => {
+    let contents = match fs::read_to_string(manifest_path) {
+        Ok(contents) => contents,
+        Err(error) => {
             return RuntimeExtensionDescriptor {
                 id: package_dir
                     .file_name()
@@ -149,8 +150,59 @@ fn read_extension_package(package_dir: &Path, manifest_path: &Path) -> RuntimeEx
                 provided_transports: Vec::new(),
                 provided_help: Vec::new(),
                 test_ids: Vec::new(),
-                diagnostics: vec![diagnostic(DiagnosticSeverity::Error, message)],
+                diagnostics: vec![RuntimeDiagnostic::structured_error(
+                    "extension.manifest.read-failed",
+                    format!("failed to read extension manifest: {error}"),
+                    json!({
+                        "surface": "extension-manifest",
+                        "packagePath": package_dir.display().to_string(),
+                        "manifestPath": absolute_manifest_path.display().to_string(),
+                    }),
+                )],
             };
+        }
+    };
+
+    let manifest_value = match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(value) => value,
+        Err(error) => {
+            return failed_descriptor_from_manifest_value(
+                package_dir,
+                &absolute_manifest_path,
+                None,
+                RuntimeDiagnostic::structured_error(
+                    "extension.manifest.parse-failed",
+                    format!("failed to parse extension manifest: {error}"),
+                    json!({
+                        "surface": "extension-manifest",
+                        "packagePath": package_dir.display().to_string(),
+                        "manifestPath": absolute_manifest_path.display().to_string(),
+                    }),
+                ),
+            );
+        }
+    };
+
+    let manifest = match serde_json::from_value::<ExtensionManifest>(manifest_value.clone()) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let header = manifest_header_from_value(&manifest_value);
+            return failed_descriptor_from_manifest_value(
+                package_dir,
+                &absolute_manifest_path,
+                header.as_ref(),
+                RuntimeDiagnostic::structured_error(
+                    "extension.manifest.parse-failed",
+                    format!("failed to parse extension manifest: {error}"),
+                    json!({
+                        "surface": "extension-manifest",
+                        "packageId": header.as_ref().map(|header| header.id.as_str()),
+                        "manifestId": header.as_ref().map(|header| header.id.as_str()),
+                        "packagePath": package_dir.display().to_string(),
+                        "manifestPath": absolute_manifest_path.display().to_string(),
+                    }),
+                ),
+            );
         }
     };
 
@@ -160,9 +212,9 @@ fn read_extension_package(package_dir: &Path, manifest_path: &Path) -> RuntimeEx
 fn descriptor_from_manifest(
     package_dir: &Path,
     manifest_path: PathBuf,
-    manifest: ExtensionManifestV01,
+    manifest: ExtensionManifest,
 ) -> RuntimeExtensionDescriptor {
-    let mut diagnostics = validate_manifest(package_dir, &manifest);
+    let mut diagnostics = validate_manifest(package_dir, &manifest_path, &manifest);
     let status = if diagnostics
         .iter()
         .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
@@ -231,44 +283,107 @@ fn descriptor_from_manifest(
 
 fn validate_manifest(
     package_dir: &Path,
-    manifest: &ExtensionManifestV01,
+    manifest_path: &Path,
+    manifest: &ExtensionManifest,
 ) -> Vec<RuntimeDiagnostic> {
     let mut diagnostics = Vec::new();
 
-    if manifest.schema != "skenion.extension.manifest" {
-        diagnostics.push(diagnostic(
-            DiagnosticSeverity::Error,
+    if let Err(report) = validate_extension_manifest_v01(manifest) {
+        diagnostics.extend(report.errors().iter().map(|error| {
+            RuntimeDiagnostic::structured_error(
+                "extension.manifest.contract-invalid",
+                format!(
+                    "extension manifest failed contract validation: {}",
+                    error.message
+                ),
+                json!({
+                    "surface": "extension-manifest",
+                    "packageId": manifest.id,
+                    "manifestId": manifest.id,
+                    "packagePath": package_dir.display().to_string(),
+                    "manifestPath": manifest_path.display().to_string(),
+                    "error": error.message,
+                }),
+            )
+        }));
+    }
+
+    if manifest.schema != EXTENSION_MANIFEST_SCHEMA {
+        diagnostics.push(RuntimeDiagnostic::structured_error(
+            "extension.manifest.invalid-schema",
             format!(
                 "extension manifest schema must be skenion.extension.manifest, got {}",
                 manifest.schema
             ),
+            json!({
+                "surface": "extension-manifest",
+                "packageId": manifest.id,
+                "manifestId": manifest.id,
+                "packagePath": package_dir.display().to_string(),
+                "manifestPath": manifest_path.display().to_string(),
+                "expectedSchema": EXTENSION_MANIFEST_SCHEMA,
+                "receivedSchema": manifest.schema,
+            }),
         ));
     }
-    if manifest.schema_version != "0.1.0" {
-        diagnostics.push(diagnostic(
-            DiagnosticSeverity::Error,
+    if manifest.schema_version != EXTENSION_MANIFEST_SCHEMA_VERSION {
+        diagnostics.push(RuntimeDiagnostic::structured_error(
+            "extension.manifest.unsupported-schema-version",
             format!(
                 "extension manifest schemaVersion must be 0.1.0, got {}",
                 manifest.schema_version
             ),
+            json!({
+                "surface": "extension-manifest",
+                "packageId": manifest.id,
+                "manifestId": manifest.id,
+                "packagePath": package_dir.display().to_string(),
+                "manifestPath": manifest_path.display().to_string(),
+                "expectedSchemaVersion": EXTENSION_MANIFEST_SCHEMA_VERSION,
+                "receivedSchemaVersion": manifest.schema_version,
+            }),
         ));
     }
     if manifest.runtime_abi_version != RUNTIME_EXTENSION_ABI_VERSION {
-        diagnostics.push(diagnostic(
-            DiagnosticSeverity::Error,
+        diagnostics.push(RuntimeDiagnostic::structured_error(
+            "extension.runtime-abi.unsupported-version",
             format!(
                 "extension {} requires runtimeAbiVersion {}, but runtime supports {RUNTIME_EXTENSION_ABI_VERSION}",
                 manifest.id, manifest.runtime_abi_version
             ),
+            json!({
+                "surface": "extension-runtime-abi",
+                "packageId": manifest.id,
+                "manifestId": manifest.id,
+                "packagePath": package_dir.display().to_string(),
+                "manifestPath": manifest_path.display().to_string(),
+                "expectedRuntimeAbiVersion": RUNTIME_EXTENSION_ABI_VERSION,
+                "receivedRuntimeAbiVersion": manifest.runtime_abi_version,
+            }),
         ));
     }
 
     for node in &manifest.provides.nodes {
         if let Err(report) = validate_node_definition_v01(node) {
-            diagnostics.push(diagnostic(
-                DiagnosticSeverity::Error,
-                format!("node {} failed contract validation: {}", node.id, report),
-            ));
+            for error in report.errors() {
+                diagnostics.push(RuntimeDiagnostic::structured_error(
+                    "extension.node.contract-invalid",
+                    format!(
+                        "node {} failed contract validation: {}",
+                        node.id, error.message
+                    ),
+                    json!({
+                        "surface": "extension-node-definition",
+                        "packageId": manifest.id,
+                        "manifestId": manifest.id,
+                        "nodeId": node.id,
+                        "nodeVersion": node.version,
+                        "packagePath": package_dir.display().to_string(),
+                        "manifestPath": manifest_path.display().to_string(),
+                        "error": error.message,
+                    }),
+                ));
+            }
         }
     }
 
@@ -314,7 +429,7 @@ fn validate_manifest(
 
 fn validate_native_binding(
     package_dir: &Path,
-    native: &crate::contract::ExtensionNativeBinding,
+    native: &ExtensionNativeBindingV01,
     diagnostics: &mut Vec<RuntimeDiagnostic>,
 ) {
     if native.entrypoint != "skenion_extension_init" {
@@ -399,6 +514,78 @@ fn diagnostic(severity: DiagnosticSeverity, message: String) -> RuntimeDiagnosti
     }
 }
 
+#[derive(Debug, Clone)]
+struct ManifestHeader {
+    id: String,
+    version: String,
+    runtime_abi_version: String,
+    kind: ExtensionKind,
+}
+
+fn manifest_header_from_value(value: &serde_json::Value) -> Option<ManifestHeader> {
+    let object = value.as_object()?;
+    let kind = object
+        .get("kind")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ExtensionKind>(value).ok())
+        .unwrap_or(ExtensionKind::NodePack);
+    Some(ManifestHeader {
+        id: object
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown-extension")
+            .to_owned(),
+        version: object
+            .get("version")
+            .and_then(|value| value.as_str())
+            .unwrap_or("0.0.0")
+            .to_owned(),
+        runtime_abi_version: object
+            .get("runtimeAbiVersion")
+            .and_then(|value| value.as_str())
+            .unwrap_or(RUNTIME_EXTENSION_ABI_VERSION)
+            .to_owned(),
+        kind,
+    })
+}
+
+fn failed_descriptor_from_manifest_value(
+    package_dir: &Path,
+    manifest_path: &Path,
+    header: Option<&ManifestHeader>,
+    diagnostic: RuntimeDiagnostic,
+) -> RuntimeExtensionDescriptor {
+    RuntimeExtensionDescriptor {
+        id: header
+            .map(|header| header.id.clone())
+            .or_else(|| {
+                package_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "unknown-extension".to_owned()),
+        version: header
+            .map(|header| header.version.clone())
+            .unwrap_or_else(|| "0.0.0".to_owned()),
+        kind: header
+            .map(|header| header.kind.clone())
+            .unwrap_or(ExtensionKind::NodePack),
+        runtime_abi_version: header
+            .map(|header| header.runtime_abi_version.clone())
+            .unwrap_or_else(|| RUNTIME_EXTENSION_ABI_VERSION.to_owned()),
+        manifest_path: manifest_path.display().to_string(),
+        status: RuntimeExtensionStatus::Failed,
+        capabilities: Vec::new(),
+        provided_nodes: Vec::new(),
+        provided_codecs: Vec::new(),
+        provided_transports: Vec::new(),
+        provided_help: Vec::new(),
+        test_ids: Vec::new(),
+        diagnostics: vec![diagnostic],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +611,16 @@ mod tests {
             env::consts::OS,
             env::consts::ARCH
         )
+    }
+
+    fn diagnostic_by_code<'a>(
+        diagnostics: &'a [RuntimeDiagnostic],
+        code: &str,
+    ) -> &'a RuntimeDiagnostic {
+        diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code.as_deref() == Some(code))
+            .unwrap_or_else(|| panic!("missing {code} diagnostic: {diagnostics:#?}"))
     }
 
     #[test]
@@ -509,6 +706,41 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_manifest_schema_version_is_structured_package_failure() {
+        let package_dir = temp_dir("legacy-v01-manifest");
+        write_manifest(
+            &package_dir,
+            r#"{
+              "schema": "skenion.extension.manifest",
+              "schemaVersion": "9.9.9",
+              "id": "example/legacy",
+              "version": "0.1.0",
+              "runtimeAbiVersion": "0.1.0",
+              "kind": "node-pack",
+              "provides": {},
+              "permissions": []
+            }"#,
+        );
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir]);
+
+        let response = manager.list_extensions();
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.extensions[0].status,
+            RuntimeExtensionStatus::Failed
+        );
+        let diagnostic = diagnostic_by_code(
+            &response.extensions[0].diagnostics,
+            "extension.manifest.unsupported-schema-version",
+        );
+        assert_eq!(
+            diagnostic.details.as_ref().unwrap()["receivedSchemaVersion"],
+            "9.9.9"
+        );
+    }
+
+    #[test]
     fn invalid_node_test_or_help_paths_fail_only_that_extension() {
         let package_dir = temp_dir("invalid-package-paths");
         write_manifest(
@@ -564,11 +796,11 @@ mod tests {
               "permissions": []
             }"#,
         );
-        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir]);
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir.clone()]);
 
         let response = manager.list_extensions();
-        let messages = response.extensions[0]
-            .diagnostics
+        let diagnostics = &response.extensions[0].diagnostics;
+        let messages = diagnostics
             .iter()
             .map(|diagnostic| diagnostic.message.as_str())
             .collect::<Vec<_>>();
@@ -594,6 +826,69 @@ mod tests {
                 .iter()
                 .any(|message| message.contains("must declare native binding"))
         );
+
+        let schema_diagnostic =
+            diagnostic_by_code(diagnostics, "extension.manifest.invalid-schema");
+        let schema_details = schema_diagnostic.details.as_ref().unwrap();
+        assert_eq!(schema_details["surface"], "extension-manifest");
+        assert_eq!(schema_details["packageId"], "example/native-missing");
+        assert_eq!(schema_details["manifestId"], "example/native-missing");
+        assert_eq!(
+            schema_details["packagePath"],
+            package_dir.display().to_string()
+        );
+        assert_eq!(
+            schema_details["manifestPath"],
+            response.extensions[0].manifest_path
+        );
+        assert_eq!(
+            schema_details["expectedSchema"],
+            "skenion.extension.manifest"
+        );
+        assert_eq!(schema_details["receivedSchema"], "other.manifest");
+
+        let schema_version_diagnostic =
+            diagnostic_by_code(diagnostics, "extension.manifest.unsupported-schema-version");
+        let schema_version_details = schema_version_diagnostic.details.as_ref().unwrap();
+        assert_eq!(schema_version_details["surface"], "extension-manifest");
+        assert_eq!(
+            schema_version_details["packageId"],
+            "example/native-missing"
+        );
+        assert_eq!(
+            schema_version_details["manifestId"],
+            "example/native-missing"
+        );
+        assert_eq!(
+            schema_version_details["packagePath"],
+            package_dir.display().to_string()
+        );
+        assert_eq!(
+            schema_version_details["manifestPath"],
+            response.extensions[0].manifest_path
+        );
+        assert_eq!(schema_version_details["expectedSchemaVersion"], "0.1.0");
+        assert_eq!(schema_version_details["receivedSchemaVersion"], "9.9.9");
+
+        let abi_diagnostic =
+            diagnostic_by_code(diagnostics, "extension.runtime-abi.unsupported-version");
+        let abi_details = abi_diagnostic.details.as_ref().unwrap();
+        assert_eq!(abi_details["surface"], "extension-runtime-abi");
+        assert_eq!(abi_details["packageId"], "example/native-missing");
+        assert_eq!(abi_details["manifestId"], "example/native-missing");
+        assert_eq!(
+            abi_details["packagePath"],
+            package_dir.display().to_string()
+        );
+        assert_eq!(
+            abi_details["manifestPath"],
+            response.extensions[0].manifest_path
+        );
+        assert_eq!(
+            abi_details["expectedRuntimeAbiVersion"],
+            RUNTIME_EXTENSION_ABI_VERSION
+        );
+        assert_eq!(abi_details["receivedRuntimeAbiVersion"], "9.9.9");
     }
 
     #[test]
@@ -771,7 +1066,7 @@ mod tests {
                     "displayName": "Value",
                     "category": "Core",
                     "ports": [
-                      { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                      { "id": "out", "direction": "output", "type": "number.float", "rate": "control" }
                     ],
                     "execution": { "model": "value" },
                     "state": { "persistent": false },
