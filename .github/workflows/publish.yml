@@ -26,31 +26,169 @@ jobs:
   crates:
     name: crates.io
     runs-on: ubuntu-latest
-    if: startsWith(github.event.release.tag_name || inputs.tag, 'skenion-runtime-v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'skenion-runtime-v')
     steps:
+      - id: request
+        name: Validate release tag input
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          if [[ ! "${RELEASE_TAG}" =~ ^skenion-runtime-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release tag must be skenion-runtime-vx.y.z; got '${RELEASE_TAG}'."
+            exit 1
+          fi
+
+          train_version="${RELEASE_TAG#skenion-runtime-v}"
+          echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "tag_ref=refs/tags/${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "train_version=${train_version}" >> "${GITHUB_OUTPUT}"
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
-      - id: contracts
+          ref: ${{ steps.request.outputs.tag_ref }}
+      - id: package
+        name: Validate runtime release train
+        env:
+          EXPECTED_VERSION: ${{ steps.request.outputs.train_version }}
         run: |
-          version="$(python3 - <<'PY'
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
           import tomllib
+
+          SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+
+          def fail(message):
+              print(f"::error::{message}", file=sys.stderr)
+              raise SystemExit(1)
+
+          def require_exact_semver(value, label):
+              if not SEMVER.fullmatch(value):
+                  fail(f"{label} must be exact SemVer-like x.y.z; got '{value}'.")
+
           with open("Cargo.toml", "rb") as fh:
-              data = tomllib.load(fh)
-          dep = data["dependencies"]["skenion-contracts"]
+              manifest = tomllib.load(fh)
+
+          runtime_version = manifest["package"]["version"]
+          expected_version = os.environ["EXPECTED_VERSION"]
+          require_exact_semver(runtime_version, "skenion-runtime package version")
+
+          if runtime_version != expected_version:
+              fail(
+                  "release tag version "
+                  f"{expected_version} does not match skenion-runtime crate version {runtime_version}."
+              )
+
+          dep = manifest["dependencies"].get("skenion-contracts")
+          if dep is None:
+              fail("Cargo.toml must declare the skenion-contracts dependency.")
+
           if isinstance(dep, str):
-              print(dep.strip("^=~ "))
+              contracts_version = dep.strip()
+          elif isinstance(dep, dict):
+              contracts_version = str(dep.get("version", "")).strip()
           else:
-              print(dep["version"].strip("^=~ "))
+              fail("skenion-contracts dependency must be a string or table dependency.")
+
+          require_exact_semver(contracts_version, "skenion-contracts dependency version")
+
+          if contracts_version != runtime_version:
+              fail(
+                  "release train versions must be lockstep: "
+                  f"skenion-runtime is {runtime_version}, "
+                  f"but skenion-contracts dependency is {contracts_version}."
+              )
+
+          with open("Cargo.lock", "rb") as fh:
+              lockfile = tomllib.load(fh)
+
+          locked_runtime_versions = {
+              package["version"]
+              for package in lockfile.get("package", [])
+              if package.get("name") == "skenion-runtime"
+          }
+          locked_contracts_versions = {
+              package["version"]
+              for package in lockfile.get("package", [])
+              if package.get("name") == "skenion-contracts"
+          }
+
+          if locked_runtime_versions != {runtime_version}:
+              fail(
+                  "Cargo.lock must contain exactly skenion-runtime "
+                  f"{runtime_version}; found {sorted(locked_runtime_versions)}."
+              )
+
+          if locked_contracts_versions != {contracts_version}:
+              fail(
+                  "Cargo.lock must contain exactly skenion-contracts "
+                  f"{contracts_version}; found {sorted(locked_contracts_versions)}."
+              )
+
+          contracts_tag = f"skenion-contracts-v{contracts_version}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"version={runtime_version}", file=output)
+              print(f"contracts_version={contracts_version}", file=output)
+              print(f"contracts_tag={contracts_tag}", file=output)
+              print(f"contracts_tag_ref=refs/tags/{contracts_tag}", file=output)
           PY
-          )"
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "tag=skenion-contracts-v${version}" >> "${GITHUB_OUTPUT}"
+      - name: Summarize release train inputs
+        run: |
+          {
+            echo "## Runtime Release Train"
+            echo ""
+            echo "- Runtime tag: ${{ steps.request.outputs.tag }}"
+            echo "- Runtime version: ${{ steps.package.outputs.version }}"
+            echo "- Contracts tag: ${{ steps.package.outputs.contracts_tag }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
       - uses: actions/checkout@v6
         with:
           repository: echovisionlab/skenion-contracts
-          ref: ${{ steps.contracts.outputs.tag }}
+          ref: ${{ steps.package.outputs.contracts_tag_ref }}
           path: .deps/skenion-contracts
+      - name: Validate contracts release checkout
+        env:
+          EXPECTED_CONTRACTS_TAG: ${{ steps.package.outputs.contracts_tag }}
+          EXPECTED_CONTRACTS_VERSION: ${{ steps.package.outputs.contracts_version }}
+        run: |
+          actual_tag="$(git -C .deps/skenion-contracts describe --tags --exact-match)"
+          if [[ "${actual_tag}" != "${EXPECTED_CONTRACTS_TAG}" ]]; then
+            echo "::error::checked out Contracts tag ${actual_tag} does not match ${EXPECTED_CONTRACTS_TAG}."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          import tomllib
+
+          expected = os.environ["EXPECTED_CONTRACTS_VERSION"]
+          root = pathlib.Path(".deps/skenion-contracts")
+
+          def fail(message):
+              print(f"::error::{message}", file=sys.stderr)
+              raise SystemExit(1)
+
+          with open(root / "packages/rust/Cargo.toml", "rb") as fh:
+              crate_version = tomllib.load(fh)["package"]["version"]
+
+          if crate_version != expected:
+              fail(f"Contracts crate version {crate_version} does not match {expected}.")
+
+          package_json = root / "packages/ts/package.json"
+          if package_json.exists():
+              package_version = json.loads(package_json.read_text(encoding="utf-8"))["version"]
+              if package_version != expected:
+                  fail(f"Contracts package version {package_version} does not match {expected}.")
+          PY
+      - name: Verify released contracts crate
+        run: |
+          if ! curl --fail --silent "https://crates.io/api/v1/crates/skenion-contracts/${{ steps.package.outputs.contracts_version }}" >/dev/null; then
+            echo "::error::skenion-contracts ${{ steps.package.outputs.contracts_version }} is not published on crates.io."
+            exit 1
+          fi
       - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - run: rustup show
@@ -59,15 +197,11 @@ jobs:
           prefix-key: skenion-runtime-publish-rust
           cache-all-crates: "true"
           cache-on-failure: "true"
-      - id: package
+      - name: Verify cargo metadata version
         run: |
           version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-      - run: |
-          expected="skenion-runtime-v${{ steps.package.outputs.version }}"
-          actual="${RELEASE_TAG}"
-          if [[ "${actual}" != "${expected}" ]]; then
-            echo "release tag ${actual} does not match crate version ${expected}" >&2
+          if [[ "${version}" != "${{ steps.package.outputs.version }}" ]]; then
+            echo "::error::cargo metadata version ${version} does not match ${{ steps.package.outputs.version }}."
             exit 1
           fi
       - id: registry

@@ -1,9 +1,21 @@
 name: Release Please
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      release-as:
+        description: Explicit SemVer version to release, for example 0.43.0
+        required: true
+        type: string
+      train-version:
+        description: Release train SemVer version; must match release-as
+        required: true
+        type: string
+      release-train-mode:
+        description: Release train mode. Only publish runs Release Please.
+        required: false
+        default: publish
+        type: string
 
 permissions:
   contents: write
@@ -14,9 +26,49 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run_release_please: ${{ steps.validate.outputs.should_run_release_please }}
+    steps:
+      - id: validate
+        name: Validate conductor inputs
+        env:
+          RELEASE_AS: ${{ inputs['release-as'] }}
+          TRAIN_VERSION: ${{ inputs['train-version'] }}
+          RELEASE_TRAIN_MODE: ${{ inputs['release-train-mode'] }}
+        run: |
+          if [[ "${RELEASE_TRAIN_MODE}" != "publish" ]]; then
+            message="Release train mode '${RELEASE_TRAIN_MODE}' is not 'publish'; skipping Release Please."
+            echo "${message}"
+            {
+              echo "## Release Please"
+              echo ""
+              echo "${message}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "should_run_release_please=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ "${RELEASE_AS}" != "${TRAIN_VERSION}" ]]; then
+            echo "::error::release-as (${RELEASE_AS}) must match train-version (${TRAIN_VERSION})."
+            exit 1
+          fi
+
+          if [[ ! "${RELEASE_AS}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release-as must be SemVer-like x.y.z; got '${RELEASE_AS}'."
+            exit 1
+          fi
+
+          echo "Validated release train ${TRAIN_VERSION} in publish mode."
+          echo "should_run_release_please=true" >> "${GITHUB_OUTPUT}"
+
   release-please:
+    needs: validate
+    if: needs.validate.outputs.should_run_release_please == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.SKENION_RELEASE_PLEASE_TOKEN || secrets.CI_TOKEN }}
+          release-as: ${{ inputs['release-as'] }}
