@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.40.0...skenion-runtime-v0.41.0) (2026-06-22)
+
+
+### Features
+
+* **runtime:** make graph v0.2 the active session contract ([#116](https://github.com/echovisionlab/skenion-runtime/issues/116)) ([6dd65f5](https://github.com/echovisionlab/skenion-runtime/commit/6dd65f57b1c47b68340c5306155afaac97c931b0))
+
 ## [0.40.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.39.0...skenion-runtime-v0.40.0) (2026-06-21)
 
 
