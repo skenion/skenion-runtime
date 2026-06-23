@@ -94,3 +94,109 @@ jobs:
             --manifest-file .release-please-manifest.json \
             --release-as "${RELEASE_VERSION}" \
             --token "${RELEASE_PLEASE_TOKEN}"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          token: ${{ secrets.SKENION_RELEASE_TRAIN_TOKEN || github.token }}
+
+      - name: Fallback lockstep release PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.SKENION_RELEASE_TRAIN_TOKEN || github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
+        run: |
+          set -euo pipefail
+
+          pr_title="chore(main): release skenion-runtime ${RELEASE_VERSION}"
+          fallback_branch="release-please/lockstep-runtime-v${RELEASE_VERSION}"
+          fallback_remote_ref="refs/remotes/origin/${fallback_branch}"
+          release_files=(.release-please-manifest.json CHANGELOG.md Cargo.toml Cargo.lock)
+          export PR_TITLE="${pr_title}"
+          export FALLBACK_BRANCH="${fallback_branch}"
+          release_pr_query='.[] | select(.title == env.PR_TITLE and .headRefName != env.FALLBACK_BRANCH) | "#\(.number) \(.headRefName): \(.title)"'
+
+          existing_fallback_pr="$(
+            gh pr list \
+              --state open \
+              --base main \
+              --head "${fallback_branch}" \
+              --json number,url \
+              --jq '.[0] | if . then "#\(.number) \(.url)" else "" end'
+          )"
+
+          existing_release_prs="$(
+            gh pr list \
+              --state open \
+              --base main \
+              --json number,title,headRefName \
+              --jq "${release_pr_query}"
+          )"
+
+          if [[ -n "${existing_release_prs}" ]]; then
+            if [[ -n "${existing_fallback_pr}" ]]; then
+              echo "::error::Release Please created a real release PR while fallback PR ${existing_fallback_pr} is still open."
+              echo "::error::Close or supersede the fallback PR before rerunning this workflow."
+              exit 1
+            fi
+            echo "Release Please already created an open release PR:"
+            echo "${existing_release_prs}"
+            exit 0
+          fi
+
+          fallback_expected_sha=""
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if git ls-remote --exit-code --heads origin "${fallback_branch}" >/dev/null 2>&1; then
+            git fetch --no-tags origin "+refs/heads/${fallback_branch}:${fallback_remote_ref}"
+            fallback_expected_sha="$(git rev-parse "${fallback_remote_ref}")"
+          fi
+
+          git switch -C "${fallback_branch}" origin/main
+
+          python3 scripts/prepare-lockstep-release-pr.py "${RELEASE_VERSION}"
+
+          if git diff --quiet -- "${release_files[@]}"; then
+            echo "No lockstep release file changes were needed."
+            exit 0
+          fi
+
+          if [[ -n "${fallback_expected_sha}" ]] && git diff --quiet "${fallback_remote_ref}" -- "${release_files[@]}"; then
+            echo "Existing fallback branch already contains the desired lockstep release files."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "${release_files[@]}"
+            git commit -m "${pr_title}"
+            if [[ -n "${fallback_expected_sha}" ]]; then
+              git push \
+                --force-with-lease="refs/heads/${fallback_branch}:${fallback_expected_sha}" \
+                origin \
+                "HEAD:refs/heads/${fallback_branch}"
+            else
+              git push origin "HEAD:refs/heads/${fallback_branch}"
+            fi
+          fi
+
+          pr_body="$(mktemp)"
+          {
+            echo "Release train ${RELEASE_VERSION} Runtime release."
+            echo ""
+            echo "This fallback PR is generated when Release Please skips the forced lockstep train because there are no user-facing Runtime commits."
+            echo ""
+            echo "Refs skenion/skenion#60"
+          } >"${pr_body}"
+
+          existing_fallback_pr_number="$(
+            gh pr list \
+              --state open \
+              --base main \
+              --head "${fallback_branch}" \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+
+          if [[ -n "${existing_fallback_pr_number}" ]]; then
+            gh pr edit "${existing_fallback_pr_number}" --title "${pr_title}" --body-file "${pr_body}"
+          else
+            gh pr create --base main --head "${fallback_branch}" --title "${pr_title}" --body-file "${pr_body}"
+          fi

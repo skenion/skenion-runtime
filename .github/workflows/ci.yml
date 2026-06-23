@@ -26,14 +26,10 @@ jobs:
         with:
           repository: skenion/skenion-contracts
           path: .deps/skenion-contracts
-      - name: Align contracts dependency branch
-        if: github.event_name == 'pull_request'
-        run: |
-          cd .deps/skenion-contracts
-          if git ls-remote --exit-code origin "refs/heads/${GITHUB_HEAD_REF}" >/dev/null 2>&1; then
-            git fetch --depth=1 origin "${GITHUB_HEAD_REF}"
-            git checkout FETCH_HEAD
-          fi
+      - name: Select compatible contracts checkout
+        env:
+          CONTRACTS_BRANCH: ${{ github.head_ref }}
+        run: bash scripts/select-contracts-checkout.sh
       - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -141,6 +137,10 @@ jobs:
         with:
           repository: skenion/skenion-contracts
           path: .deps/skenion-contracts
+      - name: Select compatible contracts checkout
+        env:
+          CONTRACTS_BRANCH: ${{ github.head_ref }}
+        run: bash scripts/select-contracts-checkout.sh
       - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
