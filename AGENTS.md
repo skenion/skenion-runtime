@@ -28,19 +28,24 @@ Default-session compatibility aliases are removal debt, not v0 product behavior.
 New Runtime API work should use explicit sessions and current 0.1 project
 payloads.
 
-## Lockstep Release Train
+## Component Releases And Compatibility Matrices
 
-skenion v0 releasable packages and applications use the same product release
-train version. If the product train is `0.55`, Runtime multi-arch binary
-artifacts publish as `0.55.0`, and Studio/contracts/sdk/docs/examples artifacts
-must belong to that same train. The release train manifest should name the
-product train id, Contracts version, Runtime multi-arch binary artifacts, Studio
-releases, Manual version, protocol baselines, capability set, checksums, and
-release completion gates.
+Release Please owns natural component releases for this repository. The hub
+verifies and promotes compatibility matrices; it does not conduct component
+releases or require Runtime, Contracts, SDK, Studio, docs, and examples to
+publish the same product version. Runtime release work must declare the
+Contracts compatibility line it supports: supporting Contracts `0.45` means
+supporting `>=0.45.0 <0.46.0`, while Runtime may release at its own component
+version.
 
 Registry publishing and binary release artifacts must be produced only through
 GitHub Actions release workflows and Release Please. Local verification may use
 dry-run/build commands, but never publish locally.
+
+Workflows that need cross-repository or release automation credentials must use
+the organization Actions secret `GH_TOKEN`. Do not add `RELEASE_PLEASE_TOKEN`,
+`SKENION_RELEASE_TRAIN_TOKEN`, or default Actions-token fallbacks for release,
+compatibility-matrix, artifact-verification, or promotion workflows.
 
 Runtime is a product binary in v0. Release work must account for multi-arch
 sidecar assets, checksums, and desktop/local-managed consumers. Do not add a
