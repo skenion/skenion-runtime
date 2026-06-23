@@ -165,7 +165,7 @@ pub(crate) fn runtime_connection_profile(
     RuntimeConnectionProfile {
         mode: RuntimeConnectionProfileMode::LocalManaged,
         ownership: RuntimeOwnershipMode::OwnedChild,
-        display_name: Some("Skenion Runtime local-managed sidecar".to_owned()),
+        display_name: Some("skenion runtime local-managed sidecar".to_owned()),
         endpoint: runtime_endpoint_metadata(endpoint_config),
         process: Some(RuntimeProcessMetadata {
             owned_by_host: true,

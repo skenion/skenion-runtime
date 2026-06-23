@@ -2,15 +2,15 @@
 name = "skenion-runtime"
 version = "0.43.0"
 edition = "2024"
-description = "Skenion native runtime"
+description = "skenion native runtime"
 license = "Apache-2.0"
-repository = "https://github.com/echovisionlab/skenion-runtime"
-homepage = "https://github.com/echovisionlab/skenion-runtime#readme"
-documentation = "https://docs.rs/skenion-runtime"
+repository = "https://github.com/skenion/skenion-runtime"
+homepage = "https://github.com/skenion/skenion-runtime#readme"
 readme = "README.md"
 keywords = ["skenion", "runtime", "graph", "visual", "audio"]
 categories = ["multimedia", "rendering"]
 rust-version = "1.85"
+publish = false
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }

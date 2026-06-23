@@ -1,4 +1,4 @@
-# Skenion Runtime
+# skenion runtime
 
 Rust native runtime for graph compilation, scheduling, rendering, preview,
 output, plugin hosting, control, and telemetry.
@@ -13,7 +13,7 @@ versions are rejected with structured diagnostics.
 
 It can validate and plan:
 
-- Skenion current 0.1 project JSON files
+- skenion current 0.1 project JSON files
 - graph 0.1 documents resolved against node definition manifests
 - current 0.1 patch libraries and subpatch expansion
 - duplicate node and port ids
@@ -41,10 +41,10 @@ artifacts and are not graph import or authoring APIs.
 
 ## Status
 
-Bootstrap repository for the Skenion project. Implementation follows the public architecture and release rules defined in [EchoVisionLab/skenion](https://github.com/echovisionlab/skenion).
+Bootstrap repository for the skenion project. Implementation follows the public architecture and release rules defined in [skenion/skenion](https://github.com/skenion/skenion).
 
 ## License And Credit
 
 This repository is licensed under the Apache License, Version 2.0.
 
-Redistributions must preserve copyright, license, and NOTICE information as required by Apache-2.0. If Skenion helps your artwork, research, publication, installation, or tool, please credit Skenion and EchoVisionLab.
+Redistributions must preserve copyright, license, and NOTICE information as required by Apache-2.0. If skenion helps your artwork, research, publication, installation, or tool, please credit skenion and the skenion contributors.

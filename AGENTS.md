@@ -30,22 +30,22 @@ payloads.
 
 ## Lockstep Release Train
 
-Skenion v0 releasable packages and applications use the same product release
-train version. If the product train is `0.55`, Runtime crates and binary
-artifacts publish as `0.55.0` where registries require patch SemVer, and
-Studio/contracts/sdk/docs/examples artifacts must belong to that same train.
-The release train manifest should name the product train id, Contracts version,
-Runtime crate version, Runtime multi-arch binary artifacts, Studio releases,
-Manual version, protocol baselines, capability set, checksums, and release
-completion gates.
+skenion v0 releasable packages and applications use the same product release
+train version. If the product train is `0.55`, Runtime multi-arch binary
+artifacts publish as `0.55.0`, and Studio/contracts/sdk/docs/examples artifacts
+must belong to that same train. The release train manifest should name the
+product train id, Contracts version, Runtime multi-arch binary artifacts, Studio
+releases, Manual version, protocol baselines, capability set, checksums, and
+release completion gates.
 
 Registry publishing and binary release artifacts must be produced only through
 GitHub Actions release workflows and Release Please. Local verification may use
 dry-run/build commands, but never publish locally.
 
-Runtime is both a Rust crate and a product binary. Release work must account for
-multi-arch sidecar assets, checksums, and desktop/local-managed consumers, not
-only crates.io.
+Runtime is a product binary in v0. Release work must account for multi-arch
+sidecar assets, checksums, and desktop/local-managed consumers. Do not add a
+Runtime registry publish surface unless a later milestone explicitly scopes a
+stable embeddable library API.
 
 ## Manager, Worker, And Review Gate Defaults
 

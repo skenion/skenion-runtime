@@ -191,7 +191,7 @@ impl NativePreviewApp {
         let source_node_id = self.scene.source_node_id();
         let source = source_node_id.as_deref().unwrap_or("default-clear");
         format!(
-            "Skenion Preview - {} rev {} session {} source {}",
+            "skenion preview - {} rev {} session {} source {}",
             self.document.graph.id,
             self.document.graph.revision,
             self.document.session_revision,

@@ -77,12 +77,12 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-pull-request: true
           target-branch: main
-          token: ${{ secrets.SKENION_RELEASE_PLEASE_TOKEN || secrets.CI_TOKEN }}
+          token: ${{ secrets.SKENION_RELEASE_TRAIN_TOKEN || github.token }}
 
       - name: Create or update train release PR
         shell: bash
         env:
-          RELEASE_PLEASE_TOKEN: ${{ secrets.SKENION_RELEASE_PLEASE_TOKEN || secrets.CI_TOKEN }}
+          RELEASE_PLEASE_TOKEN: ${{ secrets.SKENION_RELEASE_TRAIN_TOKEN || github.token }}
           RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
         run: |
           set -euo pipefail

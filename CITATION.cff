@@ -1,11 +1,11 @@
 cff-version: 1.2.0
-message: "If this Skenion repository helps your artwork, research, publication, installation, or tool, please cite it."
-title: "Skenion Runtime"
+message: "If this skenion repository helps your artwork, research, publication, installation, or tool, please cite it."
+title: "skenion runtime"
 type: software
 authors:
-  - name: "EchoVisionLab"
+  - name: "skenion contributors"
 date-released: 2026-06-15
-url: "https://github.com/echovisionlab/skenion-runtime"
-repository-code: "https://github.com/echovisionlab/skenion-runtime"
+url: "https://github.com/skenion/skenion-runtime"
+repository-code: "https://github.com/skenion/skenion-runtime"
 license: "Apache-2.0"
 abstract: "Rust native runtime for graph compilation, scheduling, rendering, preview, output, plugin hosting, control, and telemetry."

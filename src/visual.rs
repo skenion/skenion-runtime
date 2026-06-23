@@ -78,7 +78,7 @@ impl PreviewApp {
 
     fn window_title(&self) -> String {
         format!(
-            "Skenion Preview - {} frame {}{} nodes {}",
+            "skenion preview - {} frame {}{} nodes {}",
             self.plan.graph_id,
             self.frame_index,
             self.frame_limit_label(),

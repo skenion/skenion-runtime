@@ -83,7 +83,7 @@ jobs:
           if runtime_version != expected_version:
               fail(
                   "release tag version "
-                  f"{expected_version} does not match skenion-runtime crate version {runtime_version}."
+                  f"{expected_version} does not match skenion-runtime package version {runtime_version}."
               )
 
           dep = manifest["dependencies"].get("skenion-contracts")
@@ -147,10 +147,11 @@ jobs:
             echo "- Runtime tag: ${{ steps.request.outputs.tag }}"
             echo "- Runtime version: ${{ steps.package.outputs.version }}"
             echo "- Contracts tag: ${{ steps.package.outputs.contracts_tag }}"
+            echo "- Distribution: GitHub Release multi-arch binary assets"
           } >> "${GITHUB_STEP_SUMMARY}"
       - uses: actions/checkout@v6
         with:
-          repository: echovisionlab/skenion-contracts
+          repository: skenion/skenion-contracts
           ref: ${{ steps.package.outputs.contracts_tag_ref }}
           path: .deps/skenion-contracts
       - name: Validate contracts release checkout
@@ -196,60 +197,6 @@ jobs:
             echo "::error::skenion-contracts ${{ steps.package.outputs.contracts_version }} is not published on crates.io."
             exit 1
           fi
-
-  crates:
-    name: crates.io
-    runs-on: ubuntu-latest
-    needs: release
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release.outputs.tag_ref }}
-      - uses: actions/checkout@v6
-        with:
-          repository: echovisionlab/skenion-contracts
-          ref: ${{ needs.release.outputs.contracts_tag_ref }}
-          path: .deps/skenion-contracts
-      - name: Validate contracts release checkout
-        env:
-          EXPECTED_CONTRACTS_TAG: ${{ needs.release.outputs.contracts_tag }}
-        run: |
-          actual_tag="$(git -C .deps/skenion-contracts describe --tags --exact-match)"
-          if [[ "${actual_tag}" != "${EXPECTED_CONTRACTS_TAG}" ]]; then
-            echo "::error::checked out Contracts tag ${actual_tag} does not match ${EXPECTED_CONTRACTS_TAG}."
-            exit 1
-          fi
-      - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: skenion-runtime-publish-rust
-          cache-all-crates: "true"
-          cache-on-failure: "true"
-      - name: Verify cargo metadata version
-        run: |
-          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
-          if [[ "${version}" != "${{ needs.release.outputs.version }}" ]]; then
-            echo "::error::cargo metadata version ${version} does not match ${{ needs.release.outputs.version }}."
-            exit 1
-          fi
-      - id: registry
-        run: |
-          if curl --fail --silent -H "User-Agent: skenion-runtime-publish/0.1" "https://crates.io/api/v1/crates/skenion-runtime/${{ needs.release.outputs.version }}" >/dev/null; then
-            echo "published=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "published=false" >> "${GITHUB_OUTPUT}"
-          fi
-      - if: steps.registry.outputs.published != 'true'
-        run: test -n "${CARGO_REGISTRY_TOKEN}"
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo package --locked
-      - if: steps.registry.outputs.published != 'true'
-        run: cargo publish --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   runtime-assets:
     name: runtime asset (${{ matrix.target }})
@@ -302,7 +249,7 @@ jobs:
           ref: ${{ needs.release.outputs.tag_ref }}
       - uses: actions/checkout@v6
         with:
-          repository: echovisionlab/skenion-contracts
+          repository: skenion/skenion-contracts
           ref: ${{ needs.release.outputs.contracts_tag_ref }}
           path: .deps/skenion-contracts
       - name: Validate contracts release checkout

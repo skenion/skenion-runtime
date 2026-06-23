@@ -24,7 +24,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: actions/checkout@v6
         with:
-          repository: echovisionlab/skenion-contracts
+          repository: skenion/skenion-contracts
           path: .deps/skenion-contracts
       - name: Align contracts dependency branch
         if: github.event_name == 'pull_request'
@@ -139,7 +139,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: actions/checkout@v6
         with:
-          repository: echovisionlab/skenion-contracts
+          repository: skenion/skenion-contracts
           path: .deps/skenion-contracts
       - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: rustup show
