@@ -32,6 +32,7 @@ jobs:
       tag_ref: ${{ steps.request.outputs.tag_ref }}
       version: ${{ steps.package.outputs.version }}
       contracts_version: ${{ steps.package.outputs.contracts_version }}
+      contracts_line: ${{ steps.package.outputs.contracts_line }}
       contracts_tag: ${{ steps.package.outputs.contracts_tag }}
       contracts_tag_ref: ${{ steps.package.outputs.contracts_tag_ref }}
     steps:
@@ -45,17 +46,17 @@ jobs:
             exit 1
           fi
 
-          train_version="${RELEASE_TAG#skenion-runtime-v}"
+          runtime_version="${RELEASE_TAG#skenion-runtime-v}"
           echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "tag_ref=refs/tags/${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "train_version=${train_version}" >> "${GITHUB_OUTPUT}"
+          echo "runtime_version=${runtime_version}" >> "${GITHUB_OUTPUT}"
       - uses: actions/checkout@v6
         with:
           ref: ${{ steps.request.outputs.tag_ref }}
       - id: package
-        name: Validate runtime release train
+        name: Validate runtime release
         env:
-          EXPECTED_VERSION: ${{ steps.request.outputs.train_version }}
+          EXPECTED_VERSION: ${{ steps.request.outputs.runtime_version }}
         run: |
           python3 - <<'PY'
           import os
@@ -98,13 +99,7 @@ jobs:
               fail("skenion-contracts dependency must be a string or table dependency.")
 
           require_exact_semver(contracts_version, "skenion-contracts dependency version")
-
-          if contracts_version != runtime_version:
-              fail(
-                  "release train versions must be lockstep: "
-                  f"skenion-runtime is {runtime_version}, "
-                  f"but skenion-contracts dependency is {contracts_version}."
-              )
+          contracts_line = ".".join(contracts_version.split(".")[:2])
 
           with open("Cargo.lock", "rb") as fh:
               lockfile = tomllib.load(fh)
@@ -136,17 +131,20 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(f"version={runtime_version}", file=output)
               print(f"contracts_version={contracts_version}", file=output)
+              print(f"contracts_line={contracts_line}", file=output)
               print(f"contracts_tag={contracts_tag}", file=output)
               print(f"contracts_tag_ref=refs/tags/{contracts_tag}", file=output)
           PY
-      - name: Summarize release train inputs
+      - name: Summarize runtime release inputs
         run: |
           {
-            echo "## Runtime Release Train"
+            echo "## Runtime Release"
             echo ""
             echo "- Runtime tag: ${{ steps.request.outputs.tag }}"
             echo "- Runtime version: ${{ steps.package.outputs.version }}"
+            echo "- Contracts line: ${{ steps.package.outputs.contracts_line }}"
             echo "- Contracts tag: ${{ steps.package.outputs.contracts_tag }}"
+            echo "- Contracts dependency version: ${{ steps.package.outputs.contracts_version }}"
             echo "- Distribution: GitHub Release multi-arch binary assets"
           } >> "${GITHUB_STEP_SUMMARY}"
       - uses: actions/checkout@v6
@@ -292,12 +290,11 @@ jobs:
             ${{ steps.package.outputs.checksum_path }}
       - name: Upload GitHub Release assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           gh release upload "${RELEASE_TAG}" \
             "${{ steps.package.outputs.asset_path }}" \
-            "${{ steps.package.outputs.checksum_path }}" \
-            --clobber
+            "${{ steps.package.outputs.checksum_path }}"
       - name: Summarize runtime asset
         run: |
           {

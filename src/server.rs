@@ -21,6 +21,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use skenion_contracts::{
+    CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
     RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata, RuntimeCollaborationChange,
     RuntimeCollaborationConflict, RuntimeCollaborationNack, RuntimeCollaborationNackReason,
     RuntimeCollaborationOperationBatch, RuntimeCollaborationOperationBatchResult,
@@ -78,11 +79,15 @@ pub const DEFAULT_PORT: u16 = 3761;
 const MAX_ASSET_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HealthResponse {
     pub ok: bool,
     pub service: &'static str,
     pub version: &'static str,
     pub api_version: &'static str,
+    pub contracts_built_against_version: &'static str,
+    pub supported_contracts_line: &'static str,
+    pub supported_contracts_range: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +96,9 @@ pub struct RuntimeInfoResponse {
     pub name: &'static str,
     pub version: &'static str,
     pub api_version: &'static str,
+    pub contracts_built_against_version: &'static str,
+    pub supported_contracts_line: &'static str,
+    pub supported_contracts_range: &'static str,
     pub capabilities: Vec<&'static str>,
 }
 
@@ -346,6 +354,9 @@ async fn health() -> Json<HealthResponse> {
         service: "skenion-runtime",
         version: env!("CARGO_PKG_VERSION"),
         api_version: RUNTIME_API_VERSION,
+        contracts_built_against_version: CONTRACTS_PACKAGE_VERSION,
+        supported_contracts_line: CONTRACTS_COMPATIBILITY_LINE,
+        supported_contracts_range: CONTRACTS_COMPATIBILITY_RANGE,
     })
 }
 
@@ -354,6 +365,9 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
         name: "skenion-runtime",
         version: env!("CARGO_PKG_VERSION"),
         api_version: RUNTIME_API_VERSION,
+        contracts_built_against_version: CONTRACTS_PACKAGE_VERSION,
+        supported_contracts_line: CONTRACTS_COMPATIBILITY_LINE,
+        supported_contracts_range: CONTRACTS_COMPATIBILITY_RANGE,
         capabilities: vec![
             "project.validate",
             "project.validate.v0.1",
@@ -2764,6 +2778,19 @@ mod tests {
         assert_eq!(response["ok"], true);
         assert_eq!(response["service"], "skenion-runtime");
         assert_eq!(response["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(response["apiVersion"], RUNTIME_API_VERSION);
+        assert_eq!(
+            response["contractsBuiltAgainstVersion"],
+            CONTRACTS_PACKAGE_VERSION
+        );
+        assert_eq!(
+            response["supportedContractsLine"],
+            CONTRACTS_COMPATIBILITY_LINE
+        );
+        assert_eq!(
+            response["supportedContractsRange"],
+            CONTRACTS_COMPATIBILITY_RANGE
+        );
     }
 
     #[tokio::test]
@@ -2771,7 +2798,20 @@ mod tests {
         let response = get_json("/v0/runtime/info").await;
 
         assert_eq!(response["name"], "skenion-runtime");
+        assert_eq!(response["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(response["apiVersion"], RUNTIME_API_VERSION);
+        assert_eq!(
+            response["contractsBuiltAgainstVersion"],
+            CONTRACTS_PACKAGE_VERSION
+        );
+        assert_eq!(
+            response["supportedContractsLine"],
+            CONTRACTS_COMPATIBILITY_LINE
+        );
+        assert_eq!(
+            response["supportedContractsRange"],
+            CONTRACTS_COMPATIBILITY_RANGE
+        );
         let capabilities = response["capabilities"].as_array().unwrap();
         for expected in [
             "project.validate",
@@ -2846,6 +2886,18 @@ mod tests {
         assert_eq!(startup["ok"], true);
         assert_eq!(startup["runtime"]["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(startup["runtime"]["apiVersion"], RUNTIME_API_VERSION);
+        assert_eq!(
+            startup["runtime"]["contractsBuiltAgainstVersion"],
+            CONTRACTS_PACKAGE_VERSION
+        );
+        assert_eq!(
+            startup["runtime"]["supportedContractsLine"],
+            CONTRACTS_COMPATIBILITY_LINE
+        );
+        assert_eq!(
+            startup["runtime"]["supportedContractsRange"],
+            CONTRACTS_COMPATIBILITY_RANGE
+        );
         assert_eq!(startup["endpoint"]["protocol"], "http");
         assert_eq!(startup["profile"]["mode"], "local-managed");
         assert_eq!(startup["profile"]["ownership"], "owned-child");
@@ -2859,6 +2911,18 @@ mod tests {
         assert_eq!(health["readiness"], "ready");
         assert_eq!(health["runtime"]["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(health["runtime"]["apiVersion"], RUNTIME_API_VERSION);
+        assert_eq!(
+            health["runtime"]["contractsBuiltAgainstVersion"],
+            CONTRACTS_PACKAGE_VERSION
+        );
+        assert_eq!(
+            health["runtime"]["supportedContractsLine"],
+            CONTRACTS_COMPATIBILITY_LINE
+        );
+        assert_eq!(
+            health["runtime"]["supportedContractsRange"],
+            CONTRACTS_COMPATIBILITY_RANGE
+        );
         assert_eq!(health["endpoint"]["protocol"], "http");
         assert_eq!(health["profile"]["mode"], "local-managed");
         assert!(health.get("token").is_none());
