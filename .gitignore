@@ -1,6 +1,31 @@
-/target
-/.deps
+# Rust build output
+/target/
+
+# Rust coverage and profiling output
+/coverage/
+/tarpaulin-report.html
+/cobertura.xml
+/lcov.info
+*.profraw
+*.profdata
+
+# Local package/release artifacts
+/artifacts/
+/skenion-runtime-v*-*.tar.gz
+/skenion-runtime-v*-*.tar.gz.sha256
+
+# Local sibling dependencies and release-train scratch
+/.deps/
+/.skenion-train/
+/.skenion-ci/
+/.caller/
+
+# Local environment and logs
+/.env
+/.env.*
+!/.env.example
+/*.log
+/logs/
+
+# OS metadata
 .DS_Store
-.env
-.env.*
-!.env.example
