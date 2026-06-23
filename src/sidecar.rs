@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use skenion_contracts::{
+    CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
     RuntimeConnectionProfile, RuntimeConnectionProfileMode, RuntimeEndpointMetadata,
     RuntimeEndpointProtocol, RuntimeOwnershipMode, RuntimeProcessMetadata,
 };
@@ -43,6 +44,22 @@ pub struct RuntimeSidecarRuntimeInfo {
     pub name: &'static str,
     pub version: &'static str,
     pub api_version: &'static str,
+    pub contracts_built_against_version: &'static str,
+    pub supported_contracts_line: &'static str,
+    pub supported_contracts_range: &'static str,
+}
+
+impl RuntimeSidecarRuntimeInfo {
+    fn current() -> Self {
+        Self {
+            name: "skenion-runtime",
+            version: env!("CARGO_PKG_VERSION"),
+            api_version: RUNTIME_API_VERSION,
+            contracts_built_against_version: CONTRACTS_PACKAGE_VERSION,
+            supported_contracts_line: CONTRACTS_COMPATIBILITY_LINE,
+            supported_contracts_range: CONTRACTS_COMPATIBILITY_RANGE,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,11 +131,7 @@ pub(crate) fn sidecar_startup_response(
         schema: "skenion.runtime.sidecar.startup",
         schema_version: "0.1.0",
         ok: true,
-        runtime: RuntimeSidecarRuntimeInfo {
-            name: "skenion-runtime",
-            version: env!("CARGO_PKG_VERSION"),
-            api_version: RUNTIME_API_VERSION,
-        },
+        runtime: RuntimeSidecarRuntimeInfo::current(),
         endpoint: endpoint.clone(),
         profile: runtime_connection_profile(endpoint_config, started_at_wall_clock),
         default_session_id: default_session_id.to_owned(),
@@ -147,11 +160,7 @@ pub(crate) fn sidecar_health_response(
         schema_version: "0.1.0",
         ok: true,
         readiness: "ready",
-        runtime: RuntimeSidecarRuntimeInfo {
-            name: "skenion-runtime",
-            version: env!("CARGO_PKG_VERSION"),
-            api_version: RUNTIME_API_VERSION,
-        },
+        runtime: RuntimeSidecarRuntimeInfo::current(),
         endpoint: runtime_endpoint_metadata(endpoint_config),
         profile: runtime_connection_profile(endpoint_config, started_at_wall_clock),
         diagnostics: Vec::new(),
