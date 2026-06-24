@@ -1326,6 +1326,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             session_revision,
             view_revision: 0,
             control_revision: 0,
+            package_registry_revision: None,
             project: Some(project_document(&graph)),
             diagnostics: Vec::new(),
             plan: Some(plan(graph_revision)),
@@ -1382,6 +1383,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             session_revision: 0,
             view_revision: 0,
             control_revision: 0,
+            package_registry_revision: None,
             diagnostics: Vec::new(),
             plan: None,
         }

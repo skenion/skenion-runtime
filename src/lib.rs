@@ -11,6 +11,7 @@ mod io_device_manager;
 mod log_store;
 #[cfg(not(test))]
 mod midi_input;
+mod package_registry;
 mod planner;
 mod preview_control_state;
 mod preview_manager;
@@ -125,6 +126,10 @@ pub use log_store::{
     DEFAULT_RUNTIME_LOG_BACKLOG_LIMIT, RUNTIME_LOG_SCHEMA, RUNTIME_LOG_SCHEMA_VERSION,
     RuntimeLogEvent, RuntimeLogRetention, RuntimeLogSnapshotResponse, RuntimeLogSource,
     RuntimeLogStore,
+};
+pub use package_registry::{
+    RUNTIME_PACKAGE_MANIFEST_FILE, RuntimePackageManager, RuntimePackageRegistrySnapshot,
+    RuntimePackageRegistryState, SKENION_PACKAGE_PATH_ENV,
 };
 pub(crate) use planner::build_execution_plan;
 pub(crate) use planner::{ExecutionGroup, PlanEdge, PlanEdgeMetadata, PlanError, PlanNode};

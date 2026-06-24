@@ -30,6 +30,8 @@ pub struct RuntimeSessionSnapshot {
     pub session_revision: u64,
     pub view_revision: u64,
     pub control_revision: u64,
+    #[serde(skip)]
+    pub package_registry_revision: Option<u64>,
     pub project: Option<ProjectDocumentCurrent>,
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
@@ -206,6 +208,7 @@ pub struct RuntimeSession {
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
     next_event_sequence: u64,
+    package_registry_revision: Option<u64>,
 }
 
 impl Default for RuntimeSession {
@@ -226,6 +229,7 @@ impl Default for RuntimeSession {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             next_event_sequence: 1,
+            package_registry_revision: None,
         }
     }
 }
@@ -286,6 +290,7 @@ impl RuntimeSession {
             session_revision: self.revision,
             view_revision: self.view_revision,
             control_revision: self.control_revision,
+            package_registry_revision: self.package_registry_revision,
             project: self.project.clone(),
             diagnostics: self.diagnostics.clone(),
             plan: self.plan.clone(),
@@ -318,6 +323,14 @@ impl RuntimeSession {
     pub fn load_project_current(
         &mut self,
         request: ProjectRequestCurrent,
+    ) -> RuntimeSessionResponse {
+        self.load_project_current_with_package_registry_revision(request, None)
+    }
+
+    pub fn load_project_current_with_package_registry_revision(
+        &mut self,
+        request: ProjectRequestCurrent,
+        package_registry_revision: Option<u64>,
     ) -> RuntimeSessionResponse {
         let document = project_document_from_request_current(&request);
         if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
@@ -358,6 +371,7 @@ impl RuntimeSession {
         self.diagnostics = diagnostics.clone();
         self.clear_history();
         self.revision += 1;
+        self.package_registry_revision = package_registry_revision;
 
         self.response(true, diagnostics, None)
     }
@@ -677,6 +691,7 @@ impl RuntimeSession {
         self.diagnostics = Vec::new();
         self.clear_history();
         self.revision += 1;
+        self.package_registry_revision = None;
         self.response(true, Vec::new(), None)
     }
 

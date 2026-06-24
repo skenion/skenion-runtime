@@ -968,6 +968,7 @@ mod tests {
             session_revision: if loaded { 5 } else { 0 },
             view_revision: if loaded { 1 } else { 0 },
             control_revision: if loaded { 7 } else { 0 },
+            package_registry_revision: None,
             project,
             diagnostics: Vec::new(),
             plan: None,

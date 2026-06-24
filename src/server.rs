@@ -22,16 +22,16 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use skenion_contracts::{
     CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
-    RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata, RuntimeCollaborationChange,
-    RuntimeCollaborationConflict, RuntimeCollaborationNack, RuntimeCollaborationNackReason,
-    RuntimeCollaborationOperationBatch, RuntimeCollaborationOperationBatchResult,
-    RuntimeCollaborationOperationDiagnostic, RuntimeCollaborationOperationEnvelope,
-    RuntimeCollaborationOperationPayload, RuntimeCollaborationOperationResult,
-    RuntimeCollaborationOperationStatus, RuntimeCollaborationPresenceEnvelope,
-    RuntimeCollaborationRebase, RuntimeCollaborationRebaseStrategy,
-    RuntimeCollaborationSelectionEnvelope, RuntimeCollaborationServerClock,
-    RuntimeCollaborationUndoRedoAction, RuntimeSessionInfoResponse,
-    validate_runtime_collaboration_operation_batch,
+    PackageRegistryListResponseV01, RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata,
+    RuntimeCollaborationChange, RuntimeCollaborationConflict, RuntimeCollaborationNack,
+    RuntimeCollaborationNackReason, RuntimeCollaborationOperationBatch,
+    RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationDiagnostic,
+    RuntimeCollaborationOperationEnvelope, RuntimeCollaborationOperationPayload,
+    RuntimeCollaborationOperationResult, RuntimeCollaborationOperationStatus,
+    RuntimeCollaborationPresenceEnvelope, RuntimeCollaborationRebase,
+    RuntimeCollaborationRebaseStrategy, RuntimeCollaborationSelectionEnvelope,
+    RuntimeCollaborationServerClock, RuntimeCollaborationUndoRedoAction,
+    RuntimeSessionInfoResponse, validate_runtime_collaboration_operation_batch,
     validate_runtime_collaboration_operation_batch_result,
     validate_runtime_collaboration_operation_envelope,
     validate_runtime_collaboration_operation_result,
@@ -52,12 +52,13 @@ use crate::{
     RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeExtensionManager,
     RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
     RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope,
-    RuntimePatchResponse, RuntimePreviewStartRequest, RuntimeTelemetrySnapshot, SessionRunRequest,
-    ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource,
-    build_execution_plan_request_current, build_execution_plan_run_request_current,
-    collaboration_broadcast_event_after_high_water, collaboration_event,
-    generated_shader_response_from_preview_document, project_document_payload_schema_diagnostics,
-    project_document_validation_diagnostics_current, run_dummy_execution,
+    RuntimePackageManager, RuntimePackageRegistrySnapshot, RuntimePatchResponse,
+    RuntimePreviewStartRequest, RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic,
+    ShaderDiagnosticPhase, ShaderDiagnosticSource, build_execution_plan_request_current,
+    build_execution_plan_run_request_current, collaboration_broadcast_event_after_high_water,
+    collaboration_event, generated_shader_response_from_preview_document,
+    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
+    run_dummy_execution,
     runtime_time::created_at_now,
     schema_version_diagnostic,
     session_registry::{
@@ -154,6 +155,7 @@ pub struct RuntimeServerState {
     pub assets: Arc<RwLock<RuntimeAssetStore>>,
     pub io_devices: Arc<RuntimeIoDeviceManager>,
     pub extensions: Arc<RuntimeExtensionRegistrySnapshot>,
+    pub packages: Arc<RuntimePackageRegistrySnapshot>,
     pub logs: Arc<RuntimeLogStore>,
     pub endpoint: RuntimeEndpointConfig,
     pub started_at_wall_clock: String,
@@ -170,12 +172,15 @@ impl RuntimeServerState {
     pub fn with_endpoint(host: String, port: u16) -> Self {
         let logs = Arc::new(RuntimeLogStore::default());
         let extension_scan = RuntimeExtensionManager::from_env().scan_registry();
+        let package_scan = RuntimePackageManager::from_env().scan_registry();
         logs.record_runtime_diagnostics(extension_scan.log_diagnostics());
+        logs.record_runtime_diagnostics(package_scan.log_diagnostics());
         Self {
             sessions: RuntimeSessionRegistry::default(),
             assets: Arc::new(RwLock::new(RuntimeAssetStore::default())),
             io_devices: Arc::new(RuntimeIoDeviceManager::new()),
             extensions: Arc::new(extension_scan.into_snapshot()),
+            packages: Arc::new(package_scan.into_snapshot()),
             logs,
             endpoint: RuntimeEndpointConfig::new(host, port),
             started_at_wall_clock: created_at_now(),
@@ -248,6 +253,7 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/sidecar/health", get(sidecar_health))
         .route("/v0/sidecar/shutdown", post(sidecar_shutdown))
         .route("/v0/extensions", get(runtime_extensions))
+        .route("/v0/packages", get(runtime_packages))
         .route("/v0/runtime/logs", get(runtime_logs))
         .route("/v0/runtime/logs/stream", get(runtime_logs_stream))
         .route("/v0/io/devices", get(io_devices))
@@ -419,6 +425,7 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "runtime.logs",
             "runtime.logs.stream",
             "runtime.extensions",
+            "runtime.packages",
             "runtime.profile.localManaged",
             "runtime.profile.localShared",
             "runtime.profile.remote",
@@ -455,6 +462,12 @@ async fn runtime_extensions(
     State(state): State<RuntimeServerState>,
 ) -> Json<RuntimeExtensionListResponse> {
     Json(state.extensions.response())
+}
+
+async fn runtime_packages(
+    State(state): State<RuntimeServerState>,
+) -> Json<PackageRegistryListResponseV01> {
+    Json(state.packages.response())
 }
 
 async fn runtime_logs(State(state): State<RuntimeServerState>) -> Json<RuntimeLogSnapshotResponse> {
@@ -777,7 +790,10 @@ fn load_session_for(
             return session_json(state, response);
         }
     };
-    let response = session.load_project_current(*request);
+    let response = session.load_project_current_with_package_registry_revision(
+        *request,
+        Some(state.packages.revision()),
+    );
     if response.ok && response.snapshot.loaded() {
         publish_session_event(
             &record,
@@ -3123,6 +3139,87 @@ mod tests {
 
         let logs = get_json_with(app, "/v0/runtime/logs").await;
         assert_eq!(logs["events"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn runtime_packages_endpoint_returns_startup_snapshot_without_rescan() {
+        let package_dir = server_temp_package_dir("endpoint-startup-snapshot");
+        write_server_valid_package_manifest(&package_dir, "example/server-package");
+        let (app, state) = runtime_router_with_package_dirs(vec![package_dir.clone()]);
+
+        let first_packages = get_json_with(app.clone(), "/v0/packages").await;
+        serde_json::from_value::<PackageRegistryListResponseV01>(first_packages.clone())
+            .expect("package registry endpoint should match Contracts DTO");
+        assert_eq!(first_packages["ok"], true);
+        assert_eq!(
+            first_packages["packages"][0]["packageId"],
+            "example/server-package"
+        );
+        assert_eq!(
+            first_packages["packages"][0]["manifestPath"],
+            crate::RUNTIME_PACKAGE_MANIFEST_FILE
+        );
+        assert_eq!(state.packages.revision(), 1);
+        assert_eq!(state.packages.event_id(), "package-registry-event-000001");
+
+        write_server_package_manifest(&package_dir, "{ not-json");
+        let second_packages = get_json_with(app.clone(), "/v0/packages").await;
+        assert_eq!(second_packages, first_packages);
+
+        let logs_after_polling = get_json_with(app, "/v0/runtime/logs").await;
+        assert_eq!(logs_after_polling["events"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn runtime_packages_and_logs_redact_absolute_package_paths() {
+        let package_dir = server_temp_package_dir("redacted-extension-only");
+        write_server_valid_extension_manifest(&package_dir);
+        let (app, _) = runtime_router_with_package_dirs(vec![package_dir.clone()]);
+
+        let packages = get_json_with(app.clone(), "/v0/packages").await;
+        assert_eq!(packages["ok"], false);
+        assert_eq!(
+            packages["diagnostics"][0]["code"],
+            "package.root.extension-only"
+        );
+        assert!(
+            !packages
+                .to_string()
+                .contains(&package_dir.display().to_string())
+        );
+
+        let logs = get_json_with(app, "/v0/runtime/logs").await;
+        assert_eq!(logs["events"][0]["code"], "package.root.extension-only");
+        assert!(
+            !logs
+                .to_string()
+                .contains(&package_dir.display().to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_pins_package_registry_snapshot_revision() {
+        let package_dir = server_temp_package_dir("session-pin");
+        write_server_valid_package_manifest(&package_dir, "example/session-pin");
+        let (app, state) = runtime_router_with_package_dirs(vec![package_dir]);
+
+        let loaded = post_json_with(
+            app,
+            "/v0/sessions/default/load",
+            sample_project_document_current(),
+        )
+        .await;
+        assert_eq!(loaded["ok"], true);
+
+        let record = state.sessions.default_record();
+        let session = record
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        assert_eq!(
+            session.snapshot().package_registry_revision,
+            Some(state.packages.revision())
+        );
     }
 
     #[tokio::test]
@@ -6672,6 +6769,7 @@ mod tests {
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
             extensions: std::sync::Arc::new(RuntimeExtensionRegistrySnapshot::default()),
+            packages: std::sync::Arc::new(RuntimePackageRegistrySnapshot::default()),
             logs,
             endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
             started_at_wall_clock: created_at_now(),
@@ -6688,6 +6786,7 @@ mod tests {
                 Arc::new(ServerFakeIoDeviceRegistry { devices }),
             )),
             extensions: std::sync::Arc::new(RuntimeExtensionRegistrySnapshot::default()),
+            packages: std::sync::Arc::new(RuntimePackageRegistrySnapshot::default()),
             logs,
             endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
             started_at_wall_clock: created_at_now(),
@@ -6705,11 +6804,32 @@ mod tests {
             assets: Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             io_devices: Arc::new(RuntimeIoDeviceManager::new()),
             extensions: Arc::new(extension_scan.into_snapshot()),
+            packages: Arc::new(RuntimePackageRegistrySnapshot::default()),
             logs,
             endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
             started_at_wall_clock: created_at_now(),
             started_at: std::time::Instant::now(),
         })
+    }
+
+    fn runtime_router_with_package_dirs(
+        package_dirs: Vec<PathBuf>,
+    ) -> (Router, RuntimeServerState) {
+        let logs = Arc::new(RuntimeLogStore::default());
+        let package_scan = RuntimePackageManager::with_package_dirs(package_dirs).scan_registry();
+        logs.record_runtime_diagnostics(package_scan.log_diagnostics());
+        let state = RuntimeServerState {
+            sessions: RuntimeSessionRegistry::dry_preview(),
+            assets: Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            io_devices: Arc::new(RuntimeIoDeviceManager::new()),
+            extensions: Arc::new(RuntimeExtensionRegistrySnapshot::default()),
+            packages: Arc::new(package_scan.into_snapshot()),
+            logs,
+            endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
+            started_at_wall_clock: created_at_now(),
+            started_at: std::time::Instant::now(),
+        };
+        (runtime_router_with_state(state.clone()), state)
     }
 
     fn server_temp_extension_dir(name: &str) -> PathBuf {
@@ -6719,6 +6839,16 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("extension temp dir should create");
+        dir
+    }
+
+    fn server_temp_package_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "skenion-runtime-server-package-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("package temp dir should create");
         dir
     }
 
@@ -6743,6 +6873,65 @@ mod tests {
               "provides": {},
               "permissions": []
             }"#,
+        );
+    }
+
+    fn write_server_package_manifest(package_dir: &Path, body: &str) {
+        std::fs::write(package_dir.join(crate::RUNTIME_PACKAGE_MANIFEST_FILE), body)
+            .expect("package manifest should write");
+    }
+
+    fn write_server_valid_package_manifest(package_dir: &Path, package_id: &str) {
+        write_server_package_manifest(
+            package_dir,
+            &format!(
+                r#"{{
+                  "schema": "skenion.package.manifest",
+                  "schemaVersion": "0.1.0",
+                  "id": "{package_id}",
+                  "version": "0.46.0",
+                  "category": "patch",
+                  "source": "workspace",
+                  "root": "package",
+                  "trust": "trusted",
+                  "contracts": {{
+                    "line": "0.46",
+                    "range": ">=0.46.0 <0.47.0"
+                  }},
+                  "provides": {{
+                    "patches": [
+                      {{
+                        "id": "{package_id}.main",
+                        "path": "patches/main.skenion.json"
+                      }}
+                    ]
+                  }},
+                  "paths": {{
+                    "patches": ["patches/main.skenion.json"]
+                  }},
+                  "checksums": [
+                    {{
+                      "id": "manifest",
+                      "path": "skenion.package.json",
+                      "checksum": {{
+                        "algorithm": "sha256",
+                        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                      }}
+                    }}
+                  ],
+                  "evidence": [
+                    {{
+                      "id": "manifest-checksum",
+                      "kind": "checksum",
+                      "path": "evidence/manifest.sha256",
+                      "checksum": {{
+                        "algorithm": "sha256",
+                        "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                      }}
+                    }}
+                  ]
+                }}"#
+            ),
         );
     }
 
