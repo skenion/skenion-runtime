@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.46.0](https://github.com/skenion/skenion-runtime/compare/v0.45.0...v0.46.0) (2026-06-24)
+
+
+### Features
+
+* **runtime:** add read-only package registry substrate ([#157](https://github.com/skenion/skenion-runtime/issues/157)) ([c0402cf](https://github.com/skenion/skenion-runtime/commit/c0402cf8f52c8f27efe2be95009b3c7e6e5bedab))
+
+
+### Bug Fixes
+
+* **runtime:** record package load diagnostics without success logs ([#155](https://github.com/skenion/skenion-runtime/issues/155)) ([23a2da6](https://github.com/skenion/skenion-runtime/commit/23a2da603e8010ed5ca08154d655a4a65c1d8f24))
+
 ## [0.45.0](https://github.com/skenion/skenion-runtime/compare/skenion-runtime-v0.43.0...skenion-runtime-v0.45.0) (2026-06-23)
 
 
