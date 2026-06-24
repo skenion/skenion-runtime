@@ -28,15 +28,15 @@ Default-session compatibility aliases are removal debt, not v0 product behavior.
 New Runtime API work should use explicit sessions and current 0.1 project
 payloads.
 
-## Component Releases And Compatibility Matrices
+## Component Releases And Compatibility Boundaries
 
-Release Please owns natural component releases for this repository. The hub
-verifies and promotes compatibility matrices; it does not conduct component
-releases or require Runtime, Contracts, SDK, Studio, docs, and examples to
-publish the same product version. Runtime release work must declare the
-Contracts compatibility line it supports: supporting Contracts `0.45` means
-supporting `>=0.45.0 <0.46.0`, while Runtime may release at its own component
-version.
+Release Please owns natural component releases for this repository. The hub and
+organization Project are operating ledgers, not compatibility authorities and
+not component release conductors. Runtime compatibility is proven at the
+Runtime boundary: build against the released Contracts crate version, expose
+the Runtime API/protocol metadata Studio needs, and verify the release artifact
+workflow in Runtime CI. Do not introduce a separate hub-owned compatibility
+matrix verifier or push Runtime/Studio artifact evidence into Contracts.
 
 Registry publishing and binary release artifacts must be produced only through
 GitHub Actions release workflows and Release Please. Local verification may use
@@ -44,8 +44,8 @@ dry-run/build commands, but never publish locally.
 
 All release-state writes must happen inside GitHub Actions as well. Do not
 create, edit, delete, promote, demote, or repair GitHub Releases, release
-assets, tags, prerelease/draft flags, release notes, compatibility matrices,
-Runtime binary evidence, npm packages, or crates from a local shell. This
+assets, tags, prerelease/draft flags, release notes, Runtime binary evidence,
+npm packages, crates, or release promotion ledgers from a local shell. This
 includes `gh release edit`, `gh release upload`, `gh release delete`, manual tag
 mutation, local registry publish, or ad hoc release metadata patches with a
 locally exported token. Local commands may inspect state, run dry-run/build
@@ -56,7 +56,7 @@ auditable logs.
 Workflows that need cross-repository or release automation credentials must use
 the organization Actions secret `GH_TOKEN`. Do not add `RELEASE_PLEASE_TOKEN`,
 `SKENION_RELEASE_TRAIN_TOKEN`, or default Actions-token fallbacks for release,
-compatibility-matrix, artifact-verification, or promotion workflows.
+artifact-verification, or promotion workflows.
 
 Runtime is a product binary in v0. Release work must account for multi-arch
 sidecar assets, checksums, and desktop/local-managed consumers. Do not add a
