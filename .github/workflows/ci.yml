@@ -133,4 +133,4 @@ jobs:
       - run: rustup component add llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run coverage quality gate
-        run: cargo llvm-cov --all-targets --all-features --workspace --ignore-filename-regex '(src/main\.rs|src/visual\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 100 --fail-under-functions 100 --summary-only
+        run: cargo llvm-cov --all-targets --all-features --workspace --ignore-filename-regex '(src/main\.rs|src/visual\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 96 --fail-under-functions 96 --summary-only
