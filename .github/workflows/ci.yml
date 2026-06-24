@@ -17,6 +17,68 @@ env:
   RUNTIME_BIN: target/debug/skenion-runtime
 
 jobs:
+  release-workflow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check release script syntax
+        run: bash -n scripts/*.sh
+      - name: Parse workflow YAML
+        run: |
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path) }' .github/workflows/*.yml
+      - name: Dry-run Runtime DSUB S3 artifact metadata
+        env:
+          SKENION_RELEASE_S3_ENDPOINT: https://s3.dsub.io
+          SKENION_RELEASE_S3_REGION: us-east-1
+          SKENION_RELEASE_S3_BUCKET: skenion
+          SKENION_RELEASE_S3_PREFIX: releases
+          SKENION_RELEASE_S3_FORCE_PATH_STYLE: "true"
+          SKENION_RELEASE_PUBLIC_BASE_URL: https://cdn.dsub.io/skenion/releases
+          SOURCE_COMMIT: 0000000000000000000000000000000000000000
+          RELEASE_TIER: release-blocking
+          CONTRACTS_VERSION: 0.46.0
+          CONTRACTS_LINE: "0.46"
+        run: |
+          mkdir -p dist
+          asset="dist/skenion-runtime-v0.0.0-x86_64-unknown-linux-gnu.tar.gz"
+          printf 'runtime dry-run artifact\n' >"${asset}"
+          (
+            cd dist
+            sha256sum "$(basename "${asset}")" >"$(basename "${asset}").sha256"
+          )
+          scripts/publish-runtime-asset-s3.sh \
+            --dry-run \
+            x86_64-unknown-linux-gnu \
+            0.0.0 \
+            v0.0.0 \
+            "${asset}" \
+            "${asset}.sha256"
+          python3 -m json.tool "${asset}.manifest.json" >/dev/null
+          python3 - "${asset}.manifest.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as fh:
+              manifest = json.load(fh)
+
+          assert manifest["schema"] == "skenion.runtime.releaseArtifact.v1"
+          assert manifest["component"] == "skenion-runtime"
+          assert manifest["runtimeVersion"] == "0.0.0"
+          assert manifest["releaseTag"] == "v0.0.0"
+          assert manifest["target"] == "x86_64-unknown-linux-gnu"
+          assert manifest["tier"] == "release-blocking"
+          assert manifest["sourceCommit"] == "0000000000000000000000000000000000000000"
+          assert manifest["contracts"] == {"version": "0.46.0", "line": "0.46"}
+          assert manifest["artifact"]["s3"] == {
+              "bucket": "skenion",
+              "key": "releases/skenion-runtime/v0.0.0/x86_64-unknown-linux-gnu/skenion-runtime-v0.0.0-x86_64-unknown-linux-gnu.tar.gz",
+          }
+          assert manifest["checksum"]["publicUrl"].endswith(".sha256")
+          assert manifest["manifest"]["publicUrl"].endswith(".manifest.json")
+          PY
+      - name: Validate mocked Runtime DSUB S3 publisher
+        run: scripts/validate-runtime-asset-s3-publisher.sh
+
   runtime:
     runs-on: ubuntu-latest
     steps:

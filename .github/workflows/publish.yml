@@ -45,9 +45,11 @@ jobs:
           fi
 
           runtime_version="${RELEASE_TAG#v}"
-          echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "tag_ref=refs/tags/${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "runtime_version=${runtime_version}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "tag=${RELEASE_TAG}"
+            echo "tag_ref=refs/tags/${RELEASE_TAG}"
+            echo "runtime_version=${runtime_version}"
+          } >> "${GITHUB_OUTPUT}"
       - uses: actions/checkout@v6
         with:
           ref: ${{ steps.request.outputs.tag_ref }}
@@ -139,7 +141,7 @@ jobs:
             echo "- Runtime version: ${{ steps.package.outputs.version }}"
             echo "- Contracts line: ${{ steps.package.outputs.contracts_line }}"
             echo "- Contracts dependency version: ${{ steps.package.outputs.contracts_version }}"
-            echo "- Distribution: GitHub Release multi-arch binary assets"
+            echo "- Distribution: DSUB S3 Runtime binary artifacts"
           } >> "${GITHUB_STEP_SUMMARY}"
       - name: Verify released contracts crate
         run: |
@@ -194,6 +196,14 @@ jobs:
       RELEASE_TAG: ${{ needs.release.outputs.tag }}
       RUNTIME_BIN: target/${{ matrix.target }}/release/skenion-runtime${{ contains(matrix.target, 'windows') && '.exe' || '' }}
     steps:
+      - name: Require GitHub release mutation token
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::GH_TOKEN organization Actions secret is required for GitHub Release mutation."
+            exit 1
+          fi
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.release.outputs.tag_ref }}
@@ -215,6 +225,29 @@ jobs:
       - id: package
         name: Package runtime asset
         run: scripts/package-runtime-asset.sh "${TARGET}" "${VERSION}" dist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - id: manifest
+        name: Generate Runtime artifact manifest
+        env:
+          SKENION_RELEASE_S3_ENDPOINT: ${{ secrets.SKENION_RELEASE_S3_ENDPOINT }}
+          SKENION_RELEASE_S3_REGION: ${{ secrets.SKENION_RELEASE_S3_REGION }}
+          SKENION_RELEASE_S3_BUCKET: ${{ secrets.SKENION_RELEASE_S3_BUCKET }}
+          SKENION_RELEASE_S3_PREFIX: ${{ secrets.SKENION_RELEASE_S3_PREFIX }}
+          SKENION_RELEASE_S3_FORCE_PATH_STYLE: ${{ secrets.SKENION_RELEASE_S3_FORCE_PATH_STYLE }}
+          SKENION_RELEASE_PUBLIC_BASE_URL: ${{ secrets.SKENION_RELEASE_PUBLIC_BASE_URL }}
+          RELEASE_TIER: ${{ matrix.tier }}
+          CONTRACTS_VERSION: ${{ needs.release.outputs.contracts_version }}
+          CONTRACTS_LINE: ${{ needs.release.outputs.contracts_line }}
+        run: |
+          SOURCE_COMMIT="$(git rev-parse HEAD)" scripts/publish-runtime-asset-s3.sh \
+            --dry-run \
+            "${TARGET}" \
+            "${VERSION}" \
+            "${RELEASE_TAG}" \
+            "${{ steps.package.outputs.asset_path }}" \
+            "${{ steps.package.outputs.checksum_path }}"
       - id: attest
         name: Generate runtime asset provenance
         uses: actions/attest@v4
@@ -222,13 +255,78 @@ jobs:
           subject-path: |
             ${{ steps.package.outputs.asset_path }}
             ${{ steps.package.outputs.checksum_path }}
-      - name: Upload GitHub Release assets
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+            ${{ steps.manifest.outputs.manifest_path }}
+      - name: Install AWS CLI
         run: |
-          gh release upload "${RELEASE_TAG}" \
+          python -m pip install --upgrade pip
+          python -m pip install awscli
+          python - <<'PY'
+          import os
+          import sysconfig
+
+          scripts = sysconfig.get_path("scripts")
+          if not scripts:
+              raise SystemExit("could not determine Python scripts directory for awscli")
+          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as output:
+              print(scripts, file=output)
+          PY
+      - name: Check AWS CLI
+        run: |
+          aws --version
+      - id: publish
+        name: Publish Runtime artifact to DSUB S3
+        env:
+          SKENION_RELEASE_S3_ENDPOINT: ${{ secrets.SKENION_RELEASE_S3_ENDPOINT }}
+          SKENION_RELEASE_S3_REGION: ${{ secrets.SKENION_RELEASE_S3_REGION }}
+          SKENION_RELEASE_S3_BUCKET: ${{ secrets.SKENION_RELEASE_S3_BUCKET }}
+          SKENION_RELEASE_S3_PREFIX: ${{ secrets.SKENION_RELEASE_S3_PREFIX }}
+          SKENION_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.SKENION_RELEASE_S3_ACCESS_KEY_ID }}
+          SKENION_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.SKENION_RELEASE_S3_SECRET_ACCESS_KEY }}
+          SKENION_RELEASE_S3_FORCE_PATH_STYLE: ${{ secrets.SKENION_RELEASE_S3_FORCE_PATH_STYLE }}
+          SKENION_RELEASE_PUBLIC_BASE_URL: ${{ secrets.SKENION_RELEASE_PUBLIC_BASE_URL }}
+          RELEASE_TIER: ${{ matrix.tier }}
+          CONTRACTS_VERSION: ${{ needs.release.outputs.contracts_version }}
+          CONTRACTS_LINE: ${{ needs.release.outputs.contracts_line }}
+        run: |
+          SOURCE_COMMIT="$(git rev-parse HEAD)" scripts/publish-runtime-asset-s3.sh \
+            --use-existing-manifest \
+            "${TARGET}" \
+            "${VERSION}" \
+            "${RELEASE_TAG}" \
             "${{ steps.package.outputs.asset_path }}" \
             "${{ steps.package.outputs.checksum_path }}"
+      - name: Upload Runtime manifest to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          MANIFEST_PATH: ${{ steps.publish.outputs.manifest_path }}
+        run: |
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::GH_TOKEN organization Actions secret is required for GitHub Release mutation."
+            exit 1
+          fi
+
+          manifest_name="$(basename "${MANIFEST_PATH}")"
+          release_assets="$(mktemp)"
+          download_dir="$(mktemp -d)"
+          cleanup_release_asset_check() {
+            rm -f "${release_assets}"
+            rm -rf "${download_dir}"
+          }
+          trap cleanup_release_asset_check EXIT
+
+          gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' >"${release_assets}"
+          if grep -Fxq "${manifest_name}" "${release_assets}"; then
+            gh release download "${RELEASE_TAG}" --pattern "${manifest_name}" --dir "${download_dir}"
+            if cmp -s "${MANIFEST_PATH}" "${download_dir}/${manifest_name}"; then
+              echo "GitHub Release manifest asset already exists with identical content: ${manifest_name}"
+              exit 0
+            fi
+
+            echo "::error::GitHub Release manifest asset already exists with different content: ${manifest_name}"
+            exit 1
+          fi
+
+          gh release upload "${RELEASE_TAG}" "${MANIFEST_PATH}"
       - name: Summarize runtime asset
         run: |
           {
@@ -237,6 +335,9 @@ jobs:
             echo "- Target: ${TARGET}"
             echo "- Tier: ${{ matrix.tier }}"
             echo "- Asset: ${{ steps.package.outputs.asset_name }}"
-            echo "- Checksum: ${{ steps.package.outputs.asset_name }}.sha256"
+            echo "- Artifact URL: ${{ steps.publish.outputs.asset_url }}"
+            echo "- Checksum URL: ${{ steps.publish.outputs.checksum_url }}"
+            echo "- Manifest URL: ${{ steps.publish.outputs.manifest_url }}"
+            echo "- GitHub Release manifest asset: $(basename "${{ steps.publish.outputs.manifest_path }}")"
             echo "- Provenance: ${{ steps.attest.outputs.attestation-url }}"
           } >> "${GITHUB_STEP_SUMMARY}"
