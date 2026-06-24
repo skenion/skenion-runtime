@@ -1,0 +1,119 @@
+name: Backfill Canonical Release Tags
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  backfill-v0-45-0:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create canonical v0.45.0 tag alias
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          LEGACY_TAG: skenion-runtime-v0.45.0
+          CANONICAL_TAG: v0.45.0
+          EXPECTED_COMMIT: 0ff7209de002ea4534ecdf5cf103c592275d51ac
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::GH_TOKEN is required."
+            exit 1
+          fi
+
+          repo="${GITHUB_REPOSITORY:?}"
+
+          json_ref_type() {
+            python3 -c 'import json, sys; print(json.load(sys.stdin)["object"]["type"])'
+          }
+
+          json_ref_sha() {
+            python3 -c 'import json, sys; print(json.load(sys.stdin)["object"]["sha"])'
+          }
+
+          resolve_tag_commit() {
+            local tag="$1"
+            local ref_json
+            if ! ref_json="$(gh api "repos/${repo}/git/ref/tags/${tag}" 2>/dev/null)"; then
+              return 1
+            fi
+
+            local ref_type
+            local ref_sha
+            ref_type="$(json_ref_type <<<"${ref_json}")"
+            ref_sha="$(json_ref_sha <<<"${ref_json}")"
+
+            if [[ "${ref_type}" == "commit" ]]; then
+              echo "${ref_sha}"
+              return 0
+            fi
+
+            if [[ "${ref_type}" == "tag" ]]; then
+              local tag_json
+              tag_json="$(gh api "repos/${repo}/git/tags/${ref_sha}")"
+              local tag_type
+              local tag_sha
+              tag_type="$(json_ref_type <<<"${tag_json}")"
+              tag_sha="$(json_ref_sha <<<"${tag_json}")"
+              if [[ "${tag_type}" != "commit" ]]; then
+                echo "::error::Tag '${tag}' resolves to '${tag_type}', not a commit." >&2
+                return 2
+              fi
+              echo "${tag_sha}"
+              return 0
+            fi
+
+            echo "::error::Tag '${tag}' resolves to unsupported Git object type '${ref_type}'." >&2
+            return 2
+          }
+
+          if ! legacy_commit="$(resolve_tag_commit "${LEGACY_TAG}")"; then
+            echo "::error::Legacy tag '${LEGACY_TAG}' is missing or unreadable."
+            exit 1
+          fi
+
+          if [[ "${legacy_commit}" != "${EXPECTED_COMMIT}" ]]; then
+            echo "::error::Legacy tag '${LEGACY_TAG}' points to '${legacy_commit}', expected '${EXPECTED_COMMIT}'."
+            exit 1
+          fi
+
+          set +e
+          canonical_commit="$(resolve_tag_commit "${CANONICAL_TAG}")"
+          canonical_status=$?
+          set -e
+
+          if [[ "${canonical_status}" -eq 0 ]]; then
+            if [[ "${canonical_commit}" == "${EXPECTED_COMMIT}" ]]; then
+              echo "Canonical tag '${CANONICAL_TAG}' already points to '${EXPECTED_COMMIT}'; no-op."
+              exit 0
+            fi
+            echo "::error::Canonical tag '${CANONICAL_TAG}' points to '${canonical_commit}', expected '${EXPECTED_COMMIT}'."
+            exit 1
+          fi
+
+          if [[ "${canonical_status}" -ne 1 ]]; then
+            echo "::error::Canonical tag '${CANONICAL_TAG}' exists but could not be resolved safely."
+            exit 1
+          fi
+
+          gh api \
+            --method POST \
+            "repos/${repo}/git/refs" \
+            -f ref="refs/tags/${CANONICAL_TAG}" \
+            -f sha="${EXPECTED_COMMIT}" \
+            >/dev/null
+
+          created_commit="$(resolve_tag_commit "${CANONICAL_TAG}")"
+          if [[ "${created_commit}" != "${EXPECTED_COMMIT}" ]]; then
+            echo "::error::Created tag '${CANONICAL_TAG}' points to '${created_commit}', expected '${EXPECTED_COMMIT}'."
+            exit 1
+          fi
+
+          echo "Created lightweight tag 'refs/tags/${CANONICAL_TAG}' at '${EXPECTED_COMMIT}'."
