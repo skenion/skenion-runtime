@@ -113,8 +113,8 @@ pub use dsp::{
 };
 pub use extension_manager::{
     RUNTIME_EXTENSION_ABI_VERSION, RUNTIME_EXTENSION_MANIFEST_FILE, RuntimeExtensionDescriptor,
-    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeExtensionStatus,
-    SKENION_EXTENSION_PATH_ENV,
+    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeExtensionRegistrySnapshot,
+    RuntimeExtensionStatus, SKENION_EXTENSION_PATH_ENV,
 };
 pub use io_device_manager::{
     RuntimeIoBindingConfig, RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,

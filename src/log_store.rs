@@ -30,8 +30,11 @@ pub struct RuntimeLogEvent {
     pub timestamp: String,
     pub source: RuntimeLogSource,
     pub level: DiagnosticSeverity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -103,8 +106,9 @@ impl RuntimeLogStore {
         for diagnostic in diagnostics {
             self.push(
                 diagnostic.severity.clone(),
-                None,
+                diagnostic.code.clone(),
                 diagnostic.message.clone(),
+                diagnostic.details.clone(),
             );
         }
     }
@@ -115,6 +119,7 @@ impl RuntimeLogStore {
                 shader_diagnostic_severity(&diagnostic.severity),
                 Some(diagnostic.code.clone()),
                 diagnostic.message.clone(),
+                None,
             );
         }
     }
@@ -125,6 +130,7 @@ impl RuntimeLogStore {
                 clock_diagnostic_severity(&diagnostic.severity),
                 Some(diagnostic.code.clone()),
                 diagnostic.message.clone(),
+                None,
             );
         }
     }
@@ -135,11 +141,18 @@ impl RuntimeLogStore {
                 io_diagnostic_severity(&diagnostic.severity),
                 Some(diagnostic.code.clone()),
                 diagnostic.message.clone(),
+                None,
             );
         }
     }
 
-    fn push(&self, level: DiagnosticSeverity, code: Option<String>, message: String) {
+    fn push(
+        &self,
+        level: DiagnosticSeverity,
+        code: Option<String>,
+        message: String,
+        details: Option<serde_json::Value>,
+    ) {
         let event = {
             let mut inner = self
                 .inner
@@ -152,6 +165,7 @@ impl RuntimeLogStore {
                 level: level.clone(),
                 code,
                 message,
+                details,
             };
             inner.next_id = inner.next_id.saturating_add(1);
             if matches!(
@@ -206,6 +220,7 @@ mod tests {
     };
 
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn runtime_log_store_replays_only_warning_and_error_backlog() {
@@ -296,5 +311,35 @@ mod tests {
         assert_eq!(snapshot.events[3].code.as_deref(), Some("io-host"));
         assert_eq!(snapshot.events[4].code.as_deref(), Some("shader-warning"));
         assert_eq!(receiver.try_recv().unwrap().message, "clock drifted");
+    }
+
+    #[test]
+    fn runtime_log_store_preserves_structured_runtime_diagnostic_context() {
+        let store = RuntimeLogStore::new(8);
+
+        store.record_runtime_diagnostics(&[RuntimeDiagnostic::structured_warning(
+            "extension.manifest.missing",
+            "extension package is missing a manifest",
+            json!({
+                "packagePath": "/tmp/skenion-extension",
+                "action": "scan",
+            }),
+        )]);
+
+        let snapshot = store.snapshot();
+
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(
+            snapshot.events[0].code.as_deref(),
+            Some("extension.manifest.missing")
+        );
+        assert_eq!(
+            snapshot.events[0].details.as_ref().unwrap()["packagePath"],
+            "/tmp/skenion-extension"
+        );
+        assert_eq!(
+            snapshot.events[0].details.as_ref().unwrap()["action"],
+            "scan"
+        );
     }
 }

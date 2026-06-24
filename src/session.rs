@@ -1726,6 +1726,10 @@ fn project_document_from_request_current(
         graph,
         view_state,
         patch_library: request.patch_library.clone(),
+        package_dependencies: Vec::new(),
+        package_lock: Vec::new(),
+        resource_lock: Vec::new(),
+        provider_refs: Vec::new(),
         tutorial: None,
         help: None,
     }

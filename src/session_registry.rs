@@ -6,9 +6,9 @@ use std::{
 
 use axum::{http::HeaderMap, response::sse::Event};
 use serde::Deserialize;
-use serde_json::Value;
 use skenion_contracts::{
-    RuntimeConnectionProfile, RuntimeConnectionProfileMode, RuntimeEventReplayGap,
+    RuntimeConnectionProfile, RuntimeConnectionProfileMode,
+    RuntimeDiagnostic as ContractRuntimeDiagnostic, RuntimeEventReplayGap,
     RuntimeEventReplayGapReason, RuntimeEventReplayMetadata, RuntimeEventReplayWindow,
     RuntimeHistory as ContractRuntimeHistory, RuntimeHistoryEntry as ContractRuntimeHistoryEntry,
     RuntimeSessionCapabilitySet, RuntimeSessionInfoResponse, RuntimeSessionLifecycleState,
@@ -163,13 +163,7 @@ impl RuntimeSessionRecord {
                 .expect("runtime session lock should not be poisoned");
             session.snapshot()
         };
-        let mut diagnostics = Vec::new();
-        for diagnostic in &snapshot.diagnostics {
-            diagnostics.push(
-                serde_json::to_value(diagnostic)
-                    .expect("runtime diagnostic should serialize to JSON"),
-            );
-        }
+        let diagnostics = contract_diagnostics(&snapshot.diagnostics);
         RuntimeSessionInfoResponse {
             schema: "skenion.runtime.session.info".to_owned(),
             schema_version: "0.1.0".to_owned(),
@@ -501,11 +495,15 @@ fn contract_history_entry(entry: &crate::RuntimeHistoryEntry) -> ContractRuntime
     .expect("runtime history entry should match contract shape")
 }
 
-fn contract_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> Vec<Value> {
+fn contract_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> Vec<ContractRuntimeDiagnostic> {
     let mut values = Vec::new();
     for diagnostic in diagnostics {
         values.push(
-            serde_json::to_value(diagnostic).expect("runtime diagnostic should serialize to JSON"),
+            serde_json::from_value(
+                serde_json::to_value(diagnostic)
+                    .expect("runtime diagnostic should serialize to JSON"),
+            )
+            .expect("runtime diagnostic should match contract shape"),
         );
     }
     values
@@ -647,7 +645,7 @@ mod tests {
             .expect("published event should be stored");
         assert_eq!(stored.sequence, 1);
         assert_eq!(stored.replay.cursor, "1");
-        assert_eq!(stored.diagnostics[0]["message"], "covered diagnostic");
+        assert_eq!(stored.diagnostics[0].message, "covered diagnostic");
         assert_eq!(current_session_event_sequence(&record), 1);
     }
 
@@ -831,7 +829,7 @@ mod tests {
 
         assert_eq!(response.diagnostics.len(), 1);
         assert_eq!(
-            response.diagnostics[0]["message"],
+            response.diagnostics[0].message,
             "no project loaded in runtime session"
         );
     }

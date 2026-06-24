@@ -50,14 +50,14 @@ use crate::{
     ProjectRequestCurrent, RunProjectRequestCurrent, RuntimeControlEventRequest,
     RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
     RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeExtensionManager,
-    RuntimeIoDeviceListResponse, RuntimeIoDeviceManager, RuntimeLogSnapshotResponse,
-    RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope, RuntimePatchResponse,
-    RuntimePreviewStartRequest, RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic,
-    ShaderDiagnosticPhase, ShaderDiagnosticSource, build_execution_plan_request_current,
-    build_execution_plan_run_request_current, collaboration_broadcast_event_after_high_water,
-    collaboration_event, generated_shader_response_from_preview_document,
-    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
-    run_dummy_execution,
+    RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
+    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope,
+    RuntimePatchResponse, RuntimePreviewStartRequest, RuntimeTelemetrySnapshot, SessionRunRequest,
+    ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource,
+    build_execution_plan_request_current, build_execution_plan_run_request_current,
+    collaboration_broadcast_event_after_high_water, collaboration_event,
+    generated_shader_response_from_preview_document, project_document_payload_schema_diagnostics,
+    project_document_validation_diagnostics_current, run_dummy_execution,
     runtime_time::created_at_now,
     schema_version_diagnostic,
     session_registry::{
@@ -153,7 +153,7 @@ pub struct RuntimeServerState {
     pub sessions: RuntimeSessionRegistry,
     pub assets: Arc<RwLock<RuntimeAssetStore>>,
     pub io_devices: Arc<RuntimeIoDeviceManager>,
-    pub extensions: Arc<RuntimeExtensionManager>,
+    pub extensions: Arc<RuntimeExtensionRegistrySnapshot>,
     pub logs: Arc<RuntimeLogStore>,
     pub endpoint: RuntimeEndpointConfig,
     pub started_at_wall_clock: String,
@@ -169,11 +169,13 @@ impl Default for RuntimeServerState {
 impl RuntimeServerState {
     pub fn with_endpoint(host: String, port: u16) -> Self {
         let logs = Arc::new(RuntimeLogStore::default());
+        let extension_scan = RuntimeExtensionManager::from_env().scan_registry();
+        logs.record_runtime_diagnostics(extension_scan.log_diagnostics());
         Self {
             sessions: RuntimeSessionRegistry::default(),
             assets: Arc::new(RwLock::new(RuntimeAssetStore::default())),
             io_devices: Arc::new(RuntimeIoDeviceManager::new()),
-            extensions: Arc::new(RuntimeExtensionManager::from_env()),
+            extensions: Arc::new(extension_scan.into_snapshot()),
             logs,
             endpoint: RuntimeEndpointConfig::new(host, port),
             started_at_wall_clock: created_at_now(),
@@ -452,7 +454,7 @@ async fn sidecar_shutdown(
 async fn runtime_extensions(
     State(state): State<RuntimeServerState>,
 ) -> Json<RuntimeExtensionListResponse> {
-    Json(state.extensions.list_extensions())
+    Json(state.extensions.response())
 }
 
 async fn runtime_logs(State(state): State<RuntimeServerState>) -> Json<RuntimeLogSnapshotResponse> {
@@ -2727,7 +2729,10 @@ fn cors_layer() -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use axum::{
         body::{Body, to_bytes},
@@ -3106,6 +3111,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_extension_startup_keeps_runtime_logs_empty() {
+        let package_dir = server_temp_extension_dir("success-package");
+        write_server_valid_extension_manifest(&package_dir);
+        let app = runtime_router_with_extension_package_dirs(vec![package_dir]);
+
+        let extensions = get_json_with(app.clone(), "/v0/extensions").await;
+        assert_eq!(extensions["ok"], true);
+        assert_eq!(extensions["diagnostics"], json!([]));
+        assert_eq!(extensions["extensions"][0]["status"], "loaded");
+
+        let logs = get_json_with(app, "/v0/runtime/logs").await;
+        assert_eq!(logs["events"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn startup_extension_scan_logs_package_diagnostics_once() {
+        let missing_manifest_dir = server_temp_extension_dir("startup-missing-manifest");
+        let malformed_manifest_dir = server_temp_extension_dir("startup-malformed-manifest");
+        write_server_extension_manifest(&malformed_manifest_dir, "{ not-json");
+        let app = runtime_router_with_extension_package_dirs(vec![
+            missing_manifest_dir.clone(),
+            malformed_manifest_dir.clone(),
+        ]);
+
+        let startup_logs = get_json_with(app.clone(), "/v0/runtime/logs").await;
+        let startup_events = startup_logs["events"].as_array().unwrap();
+        let malformed_manifest_path =
+            malformed_manifest_dir.join(crate::RUNTIME_EXTENSION_MANIFEST_FILE);
+        let expected_malformed_manifest_path =
+            std::fs::canonicalize(&malformed_manifest_path).unwrap_or(malformed_manifest_path);
+        assert_eq!(startup_events.len(), 2);
+        assert!(startup_events.iter().any(|event| {
+            event["code"] == "extension.manifest.missing"
+                && event["details"]["packagePath"] == missing_manifest_dir.display().to_string()
+                && event["details"]["action"] == "scan"
+                && event["details"]["registryEvent"] == "extension-package-load"
+        }));
+        assert!(startup_events.iter().any(|event| {
+            event["code"] == "extension.manifest.parse-failed"
+                && event["details"]["packagePath"] == malformed_manifest_dir.display().to_string()
+                && event["details"]["manifestPath"]
+                    == expected_malformed_manifest_path.display().to_string()
+        }));
+
+        let first_extensions = get_json_with(app.clone(), "/v0/extensions").await;
+        let second_extensions = get_json_with(app.clone(), "/v0/extensions").await;
+        assert_eq!(first_extensions, second_extensions);
+        assert_eq!(first_extensions["ok"], false);
+        assert_eq!(
+            first_extensions["diagnostics"][0]["code"],
+            "extension.manifest.missing"
+        );
+        assert_eq!(
+            first_extensions["extensions"][0]["diagnostics"][0]["code"],
+            "extension.manifest.parse-failed"
+        );
+
+        let logs_after_polling = get_json_with(app, "/v0/runtime/logs").await;
+        assert_eq!(logs_after_polling["events"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn runtime_log_stream_preserves_package_diagnostic_context() {
+        let missing_manifest_dir = server_temp_extension_dir("stream-missing-manifest");
+        let app = runtime_router_with_extension_package_dirs(vec![missing_manifest_dir.clone()]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/runtime/logs/stream")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("runtime log stream should emit")
+            .expect("runtime log stream should have a chunk")
+            .expect("runtime log stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("runtime log stream should be utf8");
+
+        assert!(text.contains("event: log"));
+        assert!(text.contains("\"code\":\"extension.manifest.missing\""));
+        assert!(text.contains("\"details\""));
+        assert!(text.contains("\"registryEvent\":\"extension-package-load\""));
+        assert!(text.contains(&missing_manifest_dir.display().to_string()));
+    }
+
+    #[tokio::test]
     async fn runtime_log_snapshot_replays_warning_error_backlog() {
         let app = runtime_router_with_fake_io_devices(Vec::new());
 
@@ -3343,6 +3439,7 @@ mod tests {
             level: DiagnosticSeverity::Warning,
             code: Some("test-log".to_owned()),
             message: "test log".to_owned(),
+            details: None,
         };
         let session = RuntimeSession::default();
         let record = RuntimeSessionRegistry::dry_preview().default_record();
@@ -6574,7 +6671,7 @@ mod tests {
             sessions: RuntimeSessionRegistry::dry_preview(),
             assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
-            extensions: std::sync::Arc::new(RuntimeExtensionManager::default()),
+            extensions: std::sync::Arc::new(RuntimeExtensionRegistrySnapshot::default()),
             logs,
             endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
             started_at_wall_clock: created_at_now(),
@@ -6590,12 +6687,63 @@ mod tests {
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::with_device_registry(
                 Arc::new(ServerFakeIoDeviceRegistry { devices }),
             )),
-            extensions: std::sync::Arc::new(RuntimeExtensionManager::default()),
+            extensions: std::sync::Arc::new(RuntimeExtensionRegistrySnapshot::default()),
             logs,
             endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
             started_at_wall_clock: created_at_now(),
             started_at: std::time::Instant::now(),
         })
+    }
+
+    fn runtime_router_with_extension_package_dirs(package_dirs: Vec<PathBuf>) -> Router {
+        let logs = Arc::new(RuntimeLogStore::default());
+        let extension_scan =
+            RuntimeExtensionManager::with_package_dirs(package_dirs).scan_registry();
+        logs.record_runtime_diagnostics(extension_scan.log_diagnostics());
+        runtime_router_with_state(RuntimeServerState {
+            sessions: RuntimeSessionRegistry::dry_preview(),
+            assets: Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            io_devices: Arc::new(RuntimeIoDeviceManager::new()),
+            extensions: Arc::new(extension_scan.into_snapshot()),
+            logs,
+            endpoint: RuntimeEndpointConfig::new(DEFAULT_HOST.to_owned(), DEFAULT_PORT),
+            started_at_wall_clock: created_at_now(),
+            started_at: std::time::Instant::now(),
+        })
+    }
+
+    fn server_temp_extension_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "skenion-runtime-server-extension-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("extension temp dir should create");
+        dir
+    }
+
+    fn write_server_extension_manifest(package_dir: &Path, body: &str) {
+        std::fs::write(
+            package_dir.join(crate::RUNTIME_EXTENSION_MANIFEST_FILE),
+            body,
+        )
+        .expect("extension manifest should write");
+    }
+
+    fn write_server_valid_extension_manifest(package_dir: &Path) {
+        write_server_extension_manifest(
+            package_dir,
+            r#"{
+              "schema": "skenion.extension.manifest",
+              "schemaVersion": "0.1.0",
+              "id": "example/server-success",
+              "version": "0.1.0",
+              "runtimeAbiVersion": "0.1.0",
+              "kind": "node-pack",
+              "provides": {},
+              "permissions": []
+            }"#,
+        );
     }
 
     fn sample_project() -> Value {
