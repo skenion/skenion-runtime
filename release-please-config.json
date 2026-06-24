@@ -2,7 +2,9 @@
   "release-type": "rust",
   "packages": {
     ".": {
-      "package-name": "skenion-runtime"
+      "package-name": "skenion-runtime",
+      "include-component-in-tag": false,
+      "include-v-in-tag": true
     }
   }
 }
