@@ -38,6 +38,14 @@ for forbidden in ("actions/upload-artifact@", "actions/download-artifact@"):
     if forbidden in workflow_text:
         fail(f"publish workflow must not use GitHub Actions artifacts for Runtime release handoff; found {forbidden!r}")
 
+for forbidden in (
+    "scripts/check-local-contracts-integration.sh",
+    "SKENION_CONTRACTS_RUST_PATH",
+    "patch.crates-io",
+):
+    if forbidden in workflow_text:
+        fail(f"publish workflow must not use developer-only local Contracts integration; found {forbidden!r}")
+
 runtime_assets = "\n".join(jobs["runtime-assets"])
 if "scripts/check-runtime-asset-s3-existing.sh" not in runtime_assets:
     fail("runtime-assets job must check DSUB S3 before building release binaries")

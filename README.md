@@ -39,6 +39,34 @@ The preview process manager is exposed through the Runtime session HTTP API.
 Standalone preview child commands consume prepared plan or preview-document
 artifacts and are not graph import or authoring APIs.
 
+## Local Contracts Integration
+
+Default Runtime builds use the released `skenion-contracts` crate declared in
+`Cargo.toml`; normal `cargo build` and `cargo test` do not require sibling
+repositories or remote source clones.
+
+For pre-release Contracts and Runtime work, validate against a local Contracts
+checkout with the developer-only helper:
+
+```sh
+scripts/check-local-contracts-integration.sh
+```
+
+The helper defaults to `../skenion-contracts/packages/rust`, falls back to the
+historical `../Skenion-contracts/packages/rust` checkout name when needed, or
+accepts `SKENION_CONTRACTS_RUST_PATH=/path/to/skenion-contracts/packages/rust`.
+It verifies that Runtime's declared `skenion-contracts` version and Contracts
+line match the local crate, then runs Cargo with a temporary
+`[patch.crates-io]` config. Extra arguments replace the default
+`cargo test --all-targets --all-features` command, for example:
+
+```sh
+scripts/check-local-contracts-integration.sh check --all-targets --all-features
+```
+
+This local integration path is not a release input. Release and publish
+workflows must continue to consume released registry artifacts only.
+
 ## Status
 
 Bootstrap repository for the skenion project. Implementation follows the public architecture and release rules defined in [skenion/skenion](https://github.com/skenion/skenion).
