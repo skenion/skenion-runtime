@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.2](https://github.com/skenion/skenion-runtime/compare/v0.47.1...v0.47.2) (2026-06-25)
+
+
+### Bug Fixes
+
+* **ci:** retry runtime public artifact verification ([#172](https://github.com/skenion/skenion-runtime/issues/172)) ([092fad4](https://github.com/skenion/skenion-runtime/commit/092fad4dc8e26acd4bdd014c96f40a59c858c341))
+
 ## [0.47.1](https://github.com/skenion/skenion-runtime/compare/v0.47.0...v0.47.1) (2026-06-25)
 
 
