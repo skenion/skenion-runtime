@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.5](https://github.com/skenion/skenion-runtime/compare/v0.47.4...v0.47.5) (2026-06-25)
+
+
+### Bug Fixes
+
+* **ci:** trust successful runtime S3 uploads ([23e996d](https://github.com/skenion/skenion-runtime/commit/23e996d8bb97cc4559784029e448c3259549076a)), closes [#180](https://github.com/skenion/skenion-runtime/issues/180)
+
 ## [0.47.4](https://github.com/skenion/skenion-runtime/compare/v0.47.3...v0.47.4) (2026-06-25)
 
 
