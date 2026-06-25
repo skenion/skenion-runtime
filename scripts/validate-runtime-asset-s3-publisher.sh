@@ -6,6 +6,8 @@ publisher="${repo_root}/scripts/publish-runtime-asset-s3.sh"
 existing_checker="${repo_root}/scripts/check-runtime-asset-s3-existing.sh"
 tmp_root="$(mktemp -d)"
 target="x86_64-unknown-linux-gnu"
+platform_slug="linux-x64"
+archive_extension="tar.gz"
 version="1.2.3"
 release_tag="v1.2.3"
 source_commit="1111111111111111111111111111111111111111"
@@ -61,6 +63,8 @@ write_metadata() {
 sha256=${sha}
 component=skenion-runtime
 target=${target}
+platform-slug=${platform_slug}
+archive-format=${archive_extension}
 runtime-version=${version}
 source-tag=${release_tag}
 source-commit=${source_commit}
@@ -208,6 +212,8 @@ case "${command_name}" in
 sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 component=skenion-runtime
 target=x86_64-unknown-linux-gnu
+platform-slug=linux-x64
+archive-format=tar.gz
 runtime-version=1.2.3
 source-tag=v1.2.3
 source-commit=1111111111111111111111111111111111111111
@@ -345,7 +351,7 @@ prepare_case() {
   local case_dir="$1"
   local content="$2"
   local asset_dir="${case_dir}/dist"
-  local asset_path="${asset_dir}/skenion-runtime-v${version}-${target}.tar.gz"
+  local asset_path="${asset_dir}/skenion-runtime-v${version}-${platform_slug}.${archive_extension}"
 
   mkdir -p "${asset_dir}"
   printf '%s\n' "${content}" >"${asset_path}"
@@ -354,7 +360,7 @@ prepare_case() {
 
 asset_path_for() {
   local case_dir="$1"
-  printf '%s/dist/skenion-runtime-v%s-%s.tar.gz' "${case_dir}" "${version}" "${target}"
+  printf '%s/dist/skenion-runtime-v%s-%s.%s' "${case_dir}" "${version}" "${platform_slug}" "${archive_extension}"
 }
 
 object_path_for_key() {
@@ -365,7 +371,7 @@ object_path_for_key() {
 
 runtime_key_for_asset() {
   local asset="$1"
-  printf '%s/skenion-runtime/%s/%s/%s' "${prefix}" "${release_tag}" "${target}" "$(basename "${asset}")"
+  printf '%s/skenion-runtime/%s/%s/%s' "${prefix}" "${release_tag}" "${platform_slug}" "$(basename "${asset}")"
 }
 
 reset_logs() {
@@ -623,15 +629,19 @@ assert manifest["component"] == "skenion-runtime"
 assert manifest["runtimeVersion"] == "1.2.3"
 assert manifest["releaseTag"] == "v1.2.3"
 assert manifest["target"] == "x86_64-unknown-linux-gnu"
+assert manifest["rustTargetTriple"] == "x86_64-unknown-linux-gnu"
+assert manifest["platformSlug"] == "linux-x64"
+assert manifest["artifact"]["archiveFormat"] == "tar.gz"
 assert manifest["artifact"]["s3"]["bucket"] == "skenion"
-assert manifest["artifact"]["publicUrl"].startswith("https://cdn.example.test/skenion/releases/")
+assert "/linux-x64/" in manifest["artifact"]["publicUrl"]
+assert "unknown-linux-gnu" not in manifest["artifact"]["publicUrl"]
 assert manifest["checksum"]["publicUrl"].endswith(".sha256")
 assert manifest["manifest"]["publicUrl"].endswith(".manifest.json")
 PY
 
-  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.tar\.gz$'
-  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.sha256$'
-  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.manifest\.json$'
+  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/linux-x64/.*\.tar\.gz$'
+  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/linux-x64/.*\.sha256$'
+  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/linux-x64/.*\.manifest\.json$'
 }
 
 assert_upload_missing_s3_metadata_is_not_a_failure_case() {
@@ -643,7 +653,7 @@ assert_upload_missing_s3_metadata_is_not_a_failure_case() {
   assert_put_count "${case_dir}" 3
   assert_no_head_after_put_for_same_key "${case_dir}"
   assert_not_contains "${case_dir}/output.log" 'S3 metadata does not match expected immutable artifact'
-  assert_contains "${case_dir}/output.log" 'uploaded Runtime release object: s3://skenion/releases/skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.tar\.gz'
+  assert_contains "${case_dir}/output.log" 'uploaded Runtime release object: s3://skenion/releases/skenion-runtime/v1\.2\.3/linux-x64/.*\.tar\.gz'
 }
 
 assert_public_head_retry_case() {
@@ -655,7 +665,7 @@ assert_public_head_retry_case() {
   assert_no_body_downloads "${case_dir}"
   assert_contains "${case_dir}/output.log" 'public Runtime release asset .* is not ready on attempt 1/3: HEAD request failed; retrying in 0s'
   assert_contains "${case_dir}/output.log" 'public Runtime release asset .* is not ready on attempt 2/3: HEAD request failed; retrying in 0s'
-  head_count="$(grep -c '^HEAD skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.tar\.gz$' "${case_dir}/curl.log" || true)"
+  head_count="$(grep -c '^HEAD skenion-runtime/v1\.2\.3/linux-x64/.*\.tar\.gz$' "${case_dir}/curl.log" || true)"
   if [[ "${head_count}" != "3" ]]; then
     sed 's/^/[curl] /' "${case_dir}/curl.log" >&2
     fail "expected public asset HEAD to be retried until third attempt, saw ${head_count}"
@@ -750,14 +760,14 @@ assert_head_miss_concurrent_put_race_case() {
   prepare_case "${case_dir}" "runtime concurrent put race artifact"
   asset="$(asset_path_for "${case_dir}")"
   asset_name="$(basename "${asset}")"
-  raced_path="${case_dir}/s3/${bucket}/${prefix}/skenion-runtime/${release_tag}/${target}/${asset_name}"
+  raced_path="${case_dir}/s3/${bucket}/${prefix}/skenion-runtime/${release_tag}/${platform_slug}/${asset_name}"
 
   expect_failure "${case_dir}" --skip-public-verification STUB_AWS_CONCURRENT_CREATE_ON_PUT=1
   assert_no_body_downloads "${case_dir}"
   assert_contains "${case_dir}/output.log" 'failed to conditionally upload Runtime release artifact without overwriting'
   assert_contains "${case_dir}/output.log" 'PreconditionFailed'
-  assert_contains "${case_dir}/aws.log" "^put-precondition-failed ${bucket}/${prefix}/skenion-runtime/${release_tag}/${target}/${asset_name}$"
-  assert_not_contains "${case_dir}/aws.log" "^put ${bucket}/${prefix}/skenion-runtime/${release_tag}/${target}/${asset_name}$"
+  assert_contains "${case_dir}/aws.log" "^put-precondition-failed ${bucket}/${prefix}/skenion-runtime/${release_tag}/${platform_slug}/${asset_name}$"
+  assert_not_contains "${case_dir}/aws.log" "^put ${bucket}/${prefix}/skenion-runtime/${release_tag}/${platform_slug}/${asset_name}$"
   assert_contains "${raced_path}" '^concurrent object$'
 }
 

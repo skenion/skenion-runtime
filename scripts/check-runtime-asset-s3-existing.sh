@@ -10,6 +10,44 @@ target="$1"
 version="$2"
 release_tag="$3"
 
+runtime_platform_slug() {
+  case "$1" in
+    aarch64-apple-darwin)
+      printf '%s' "macos-apple-silicon"
+      ;;
+    x86_64-apple-darwin)
+      printf '%s' "macos-intel"
+      ;;
+    x86_64-pc-windows-msvc)
+      printf '%s' "windows-x64"
+      ;;
+    aarch64-pc-windows-msvc)
+      printf '%s' "windows-arm64"
+      ;;
+    x86_64-unknown-linux-gnu)
+      printf '%s' "linux-x64"
+      ;;
+    aarch64-unknown-linux-gnu)
+      printf '%s' "linux-arm64"
+      ;;
+    *)
+      echo "unsupported Runtime release target triple: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+runtime_archive_extension() {
+  case "$1" in
+    *windows*)
+      printf '%s' "zip"
+      ;;
+    *)
+      printf '%s' "tar.gz"
+      ;;
+  esac
+}
+
 require_env() {
   local name="$1"
   if [[ -z "${!name:-}" ]]; then
@@ -81,11 +119,13 @@ if [[ "${SKENION_RELEASE_S3_FORCE_PATH_STYLE:-}" =~ ^(1|true|TRUE|yes|YES)$ ]]; 
   aws configure set default.s3.addressing_style path
 fi
 
-asset_name="skenion-runtime-v${version}-${target}.tar.gz"
+platform_slug="$(runtime_platform_slug "${target}")"
+archive_extension="$(runtime_archive_extension "${target}")"
+asset_name="skenion-runtime-v${version}-${platform_slug}.${archive_extension}"
 checksum_name="${asset_name}.sha256"
 manifest_name="${asset_name}.manifest.json"
 prefix="$(trim_slashes "${SKENION_RELEASE_S3_PREFIX}")"
-artifact_dir="$(join_key "${prefix}" "skenion-runtime/${release_tag}/${target}")"
+artifact_dir="$(join_key "${prefix}" "skenion-runtime/${release_tag}/${platform_slug}")"
 asset_key="$(join_key "${artifact_dir}" "${asset_name}")"
 checksum_key="$(join_key "${artifact_dir}" "${checksum_name}")"
 manifest_key="$(join_key "${artifact_dir}" "${manifest_name}")"
@@ -197,6 +237,8 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "asset_name=${asset_name}"
     echo "checksum_name=${checksum_name}"
     echo "manifest_name=${manifest_name}"
+    echo "platform_slug=${platform_slug}"
+    echo "archive_extension=${archive_extension}"
   } >>"${GITHUB_OUTPUT}"
 fi
 

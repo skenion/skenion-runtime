@@ -10,7 +10,11 @@ import sys
 from pathlib import Path
 
 workflow_path = Path(sys.argv[1])
+repo_root = workflow_path.parents[2]
 lines = workflow_path.read_text(encoding="utf-8").splitlines()
+workflow_text = "\n".join(lines)
+ci_text = (repo_root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+release_downloads_script = (repo_root / "scripts/update-runtime-release-downloads.sh").read_text(encoding="utf-8")
 
 jobs = {}
 current = None
@@ -33,7 +37,6 @@ missing = required_jobs - set(jobs)
 if missing:
     fail(f"publish workflow is missing required jobs: {sorted(missing)}")
 
-workflow_text = "\n".join(lines)
 for forbidden in ("actions/upload-artifact@", "actions/download-artifact@"):
     if forbidden in workflow_text:
         fail(f"publish workflow must not use GitHub Actions artifacts for Runtime release handoff; found {forbidden!r}")
@@ -76,6 +79,36 @@ if runtime_assets.count("if: steps.existing.outputs.exists != 'true'") < 8:
     fail("runtime-assets build/package/publish steps must be gated by the S3 existence check")
 if "--skip-public-verification" not in runtime_assets:
     fail("runtime-assets publish step must not block on CDN public verification")
+
+for required_slug in (
+    "macos-apple-silicon",
+    "macos-intel",
+    "windows-x64",
+    "windows-arm64",
+    "linux-x64",
+    "linux-arm64",
+):
+    if required_slug not in release_downloads_script:
+        fail(f"release download generator must expose public platform slug {required_slug!r}")
+
+for forbidden_public_token in (
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+):
+    if forbidden_public_token in release_downloads_script:
+        fail(f"release download generator must not expose Rust target triple {forbidden_public_token!r}")
+
+for public_fixture_text in (workflow_text, ci_text, release_downloads_script):
+    if re.search(r"skenion-runtime/v[^\n]*unknown-linux-gnu", public_fixture_text):
+        fail("public Runtime release links must not contain unknown-linux-gnu target triples")
+    if re.search(r"skenion-runtime-v[^\n]*unknown-linux-gnu", public_fixture_text):
+        fail("public Runtime release filenames must not contain unknown-linux-gnu target triples")
+    if re.search(r"windows-(?:x64|arm64)[^\n]*\.tar\.gz", public_fixture_text):
+        fail("Windows Runtime public archives must use .zip, not .tar.gz")
 
 release_downloads = "\n".join(jobs["release-downloads"])
 if "scripts/update-runtime-release-downloads.sh" not in release_downloads:
