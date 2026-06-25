@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.8](https://github.com/skenion/skenion-runtime/compare/v0.47.7...v0.47.8) (2026-06-25)
+
+
+### Bug Fixes
+
+* **ci:** publish runtime raw binaries ([#191](https://github.com/skenion/skenion-runtime/issues/191)) ([5778a1e](https://github.com/skenion/skenion-runtime/commit/5778a1eb100230e8c33155972e42844a966d6954))
+
 ## [0.47.7](https://github.com/skenion/skenion-runtime/compare/v0.47.6...v0.47.7) (2026-06-25)
 
 
