@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.7](https://github.com/skenion/skenion-runtime/compare/v0.47.6...v0.47.7) (2026-06-25)
+
+
+### Bug Fixes
+
+* **ci:** use public runtime archive names ([89ab73c](https://github.com/skenion/skenion-runtime/commit/89ab73c32db4dc75c6b04163877a7093753ab0c6))
+
 ## [0.47.6](https://github.com/skenion/skenion-runtime/compare/v0.47.5...v0.47.6) (2026-06-25)
 
 
