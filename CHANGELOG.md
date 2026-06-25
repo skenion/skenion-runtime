@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.1](https://github.com/skenion/skenion-runtime/compare/v0.47.0...v0.47.1) (2026-06-25)
+
+
+### Bug Fixes
+
+* **ci:** verify runtime S3 artifacts by content ([#170](https://github.com/skenion/skenion-runtime/issues/170)) ([c931b97](https://github.com/skenion/skenion-runtime/commit/c931b97296d4507b687bdfda108098b67b73d5fc))
+
 ## [0.47.0](https://github.com/skenion/skenion-runtime/compare/v0.46.0...v0.47.0) (2026-06-25)
 
 
