@@ -78,6 +78,34 @@ jobs:
           PY
       - name: Validate mocked Runtime DSUB S3 publisher
         run: scripts/validate-runtime-asset-s3-publisher.sh
+      - name: Validate Runtime release download notes
+        env:
+          SKENION_RELEASE_PUBLIC_BASE_URL: https://cdn.dsub.io/skenion/releases
+        run: |
+          body="$(mktemp)"
+          output="$(mktemp)"
+          cat >"${body}" <<'EOF'
+          ## [0.0.0](https://github.com/skenion/skenion-runtime/compare/v0.0.0...v0.0.1) (2026-06-25)
+
+          ### Bug Fixes
+
+          * **ci:** example release note
+          EOF
+
+          scripts/update-runtime-release-downloads.sh \
+            --dry-run \
+            --body-file "${body}" \
+            --output "${output}" \
+            v0.0.0 \
+            0.0.0
+
+          grep -q '### Runtime Downloads' "${output}"
+          grep -q 'skenion-runtime/v0.0.0/aarch64-apple-darwin/skenion-runtime-v0.0.0-aarch64-apple-darwin.tar.gz' "${output}"
+          grep -q 'skenion-runtime/v0.0.0/x86_64-pc-windows-msvc/skenion-runtime-v0.0.0-x86_64-pc-windows-msvc.tar.gz.sha256' "${output}"
+          if grep -q 'manifest.json' "${output}"; then
+            echo "::error::Release notes must not surface Runtime manifest JSON links as user-facing downloads."
+            exit 1
+          fi
       - name: Validate deterministic Runtime asset packaging
         run: scripts/validate-runtime-asset-packaging.sh
       - name: Validate Runtime publish workflow gating

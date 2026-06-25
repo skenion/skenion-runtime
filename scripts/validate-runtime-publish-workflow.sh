@@ -28,7 +28,7 @@ def fail(message):
     raise SystemExit(1)
 
 
-required_jobs = {"runtime-assets"}
+required_jobs = {"runtime-assets", "release-downloads"}
 missing = required_jobs - set(jobs)
 if missing:
     fail(f"publish workflow is missing required jobs: {sorted(missing)}")
@@ -47,8 +47,10 @@ if "scripts/package-runtime-asset.sh" not in runtime_assets:
     fail("runtime-assets job must package the release binary exactly once per target")
 if "scripts/publish-runtime-asset-s3.sh" not in runtime_assets:
     fail("runtime-assets job must publish the package produced in the same job attempt")
-if "gh release upload" not in runtime_assets:
-    fail("runtime-assets job must upload metadata-only manifest assets to GitHub Release")
+if "gh release upload" in runtime_assets:
+    fail("runtime-assets job must not upload metadata-only manifest assets to GitHub Release")
+if "GitHub Release manifest asset" in runtime_assets:
+    fail("runtime-assets summary must not advertise metadata-only GitHub Release manifest assets")
 
 if runtime_assets.count("cargo build --release") != 1:
     fail("runtime-assets job must contain exactly one release cargo build command")
@@ -66,6 +68,16 @@ if runtime_assets.count("if: steps.existing.outputs.exists != 'true'") < 8:
     fail("runtime-assets build/package/publish steps must be gated by the S3 existence check")
 if "--skip-public-verification" not in runtime_assets:
     fail("runtime-assets publish step must not block on CDN public verification")
+
+release_downloads = "\n".join(jobs["release-downloads"])
+if "scripts/update-runtime-release-downloads.sh" not in release_downloads:
+    fail("release-downloads job must update GitHub Release notes with DSUB S3 download links")
+if "--delete-github-manifest-assets" not in release_downloads:
+    fail("release-downloads job must remove old metadata-only GitHub Release manifest assets")
+if "ref: main" not in release_downloads:
+    fail("release-downloads job must checkout main so workflow_dispatch can repair older release tags")
+if "gh release upload" in release_downloads:
+    fail("release-downloads job must not upload release assets")
 
 for job_name, body_lines in jobs.items():
     if job_name == "runtime-assets":

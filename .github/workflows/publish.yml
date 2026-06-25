@@ -321,39 +321,6 @@ jobs:
             "${RELEASE_TAG}" \
             "${{ steps.package.outputs.asset_path }}" \
             "${{ steps.package.outputs.checksum_path }}"
-      - name: Upload Runtime manifest to GitHub Release
-        if: steps.existing.outputs.exists != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          MANIFEST_PATH: ${{ steps.publish.outputs.manifest_path }}
-        run: |
-          if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::GH_TOKEN organization Actions secret is required for GitHub Release mutation."
-            exit 1
-          fi
-
-          manifest_name="$(basename "${MANIFEST_PATH}")"
-          release_assets="$(mktemp)"
-          download_dir="$(mktemp -d)"
-          cleanup_release_asset_check() {
-            rm -f "${release_assets}"
-            rm -rf "${download_dir}"
-          }
-          trap cleanup_release_asset_check EXIT
-
-          gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' >"${release_assets}"
-          if grep -Fxq "${manifest_name}" "${release_assets}"; then
-            gh release download "${RELEASE_TAG}" --pattern "${manifest_name}" --dir "${download_dir}"
-            if cmp -s "${MANIFEST_PATH}" "${download_dir}/${manifest_name}"; then
-              echo "GitHub Release manifest asset already exists with identical content: ${manifest_name}"
-              exit 0
-            fi
-
-            echo "::error::GitHub Release manifest asset already exists with different content: ${manifest_name}"
-            exit 1
-          fi
-
-          gh release upload "${RELEASE_TAG}" "${MANIFEST_PATH}"
       - name: Summarize runtime asset
         if: steps.existing.outputs.exists != 'true'
         run: |
@@ -366,7 +333,6 @@ jobs:
             echo "- Artifact URL: ${{ steps.publish.outputs.asset_url }}"
             echo "- Checksum URL: ${{ steps.publish.outputs.checksum_url }}"
             echo "- Manifest URL: ${{ steps.publish.outputs.manifest_url }}"
-            echo "- GitHub Release manifest asset: $(basename "${{ steps.publish.outputs.manifest_path }}")"
             echo "- Provenance: ${{ steps.attest.outputs.attestation-url }}"
           } >> "${GITHUB_STEP_SUMMARY}"
       - name: Summarize existing runtime asset
@@ -383,3 +349,39 @@ jobs:
             echo "- Checksum URL: ${{ steps.existing.outputs.checksum_url }}"
             echo "- Manifest URL: ${{ steps.existing.outputs.manifest_url }}"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  release-downloads:
+    name: update release download links
+    runs-on: ubuntu-latest
+    needs:
+      - release
+      - runtime-assets
+    if: always() && needs.release.result == 'success' && needs.runtime-assets.result == 'success'
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_TAG: ${{ needs.release.outputs.tag }}
+      VERSION: ${{ needs.release.outputs.version }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      SKENION_RELEASE_PUBLIC_BASE_URL: ${{ secrets.SKENION_RELEASE_PUBLIC_BASE_URL }}
+    steps:
+      - name: Require GitHub release mutation token
+        run: |
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::GH_TOKEN organization Actions secret is required for GitHub Release mutation."
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Update GitHub Release download links
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          scripts/update-runtime-release-downloads.sh \
+            --delete-github-manifest-assets \
+            "${RELEASE_TAG}" \
+            "${VERSION}"
