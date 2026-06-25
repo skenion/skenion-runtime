@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.6](https://github.com/skenion/skenion-runtime/compare/v0.47.5...v0.47.6) (2026-06-25)
+
+
+### Bug Fixes
+
+* **ci:** publish runtime S3 links in releases ([6bdd062](https://github.com/skenion/skenion-runtime/commit/6bdd062b63c7ae4fc68db0ca1ce9d8cb53e6fe5d)), closes [#183](https://github.com/skenion/skenion-runtime/issues/183)
+
 ## [0.47.5](https://github.com/skenion/skenion-runtime/compare/v0.47.4...v0.47.5) (2026-06-25)
 
 
