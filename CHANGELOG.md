@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.4](https://github.com/skenion/skenion-runtime/compare/v0.47.3...v0.47.4) (2026-06-25)
+
+
+### Bug Fixes
+
+* **ci:** tolerate metadata-free runtime S3 reruns ([#178](https://github.com/skenion/skenion-runtime/issues/178)) ([05b170a](https://github.com/skenion/skenion-runtime/commit/05b170a992dd5630fc95f0f67154d57349c4c1ac))
+
 ## [0.47.3](https://github.com/skenion/skenion-runtime/compare/v0.47.2...v0.47.3) (2026-06-25)
 
 
