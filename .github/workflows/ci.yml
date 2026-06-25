@@ -137,7 +137,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run Rust tests with coverage thresholds
         if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-        run: cargo llvm-cov --all-targets --all-features --workspace --ignore-filename-regex '(src/main\.rs|src/visual\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 96 --fail-under-functions 96 --summary-only
+        run: cargo llvm-cov --all-targets --all-features --workspace --ignore-filename-regex '(src/main\.rs|src/visual\.rs|src/serve\.rs|src/loader\.rs|/rustlib/|tests/)' --fail-under-lines 97 --fail-under-functions 96 --summary-only
       - name: Run Rust tests without coverage on main push
         if: github.event_name == 'push'
         run: cargo test --all-targets --all-features
