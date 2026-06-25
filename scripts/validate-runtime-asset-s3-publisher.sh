@@ -14,9 +14,18 @@ prefix="releases"
 public_base="https://cdn.example.test/skenion/releases"
 
 cleanup() {
-  rm -rf "${tmp_root}"
+  if [[ "${KEEP_RUNTIME_PUBLISH_TEST_TMP:-}" == "1" ]]; then
+    echo "keeping Runtime publisher validation tmp dir: ${tmp_root}" >&2
+  else
+    rm -rf "${tmp_root}"
+  fi
 }
 trap cleanup EXIT
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
 
 sha256_file() {
   local path="$1"
@@ -25,8 +34,7 @@ sha256_file() {
   elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "${path}" | awk '{print $1}'
   else
-    echo "no sha256 checksum tool found" >&2
-    exit 1
+    fail "no sha256 checksum tool found"
   fi
 }
 
@@ -212,7 +220,10 @@ EOF
         fi
 
         command cp "${body}" "${path}"
-        write_metadata_file "${path}" "${metadata}"
+        rm -f "${path}.stub-metadata"
+        if [[ "${STUB_AWS_DROP_PUT_METADATA:-}" != "1" ]]; then
+          write_metadata_file "${path}" "${metadata}"
+        fi
         echo "put ${bucket}/${key}" >>"${log}"
         printf '{"ETag":"stub-etag"}\n'
         ;;
@@ -279,7 +290,6 @@ if [[ "${method}" != "HEAD" ]]; then
   echo "unexpected public body download in metadata-only publisher" >&2
   exit 2
 fi
-
 if [[ "${url}" != "${public_base}/"* ]]; then
   echo "unexpected public URL: ${url}" >&2
   exit 2
@@ -358,60 +368,79 @@ runtime_key_for_asset() {
   printf '%s/skenion-runtime/%s/%s/%s' "${prefix}" "${release_tag}" "${target}" "$(basename "${asset}")"
 }
 
-run_publisher() {
+reset_logs() {
   local case_dir="$1"
-  local asset_path
-  local checksum_path
-  local -a base_env
-  local -a publisher_args=()
-  shift
-
-  while [[ "${1:-}" == --publisher-* ]]; do
-    case "$1" in
-      --publisher-skip-public-verification)
-        publisher_args+=(--skip-public-verification)
-        ;;
-      *)
-        echo "unknown run_publisher option: $1" >&2
-        exit 2
-        ;;
-    esac
-    shift
-  done
-
   mkdir -p "${case_dir}/s3/${bucket}/${prefix}"
   : >"${case_dir}/aws.log"
   : >"${case_dir}/curl.log"
+}
+
+base_env_args_for() {
+  local case_dir="$1"
+
+  base_env_args=(
+    "PATH=${tmp_root}/bin:${PATH}" \
+    "STUB_AWS_LOG=${case_dir}/aws.log" \
+    "STUB_CURL_LOG=${case_dir}/curl.log" \
+    "STUB_S3_ROOT=${case_dir}/s3" \
+    "STUB_CURL_STATE_DIR=${case_dir}/curl-state" \
+    "STUB_PUBLIC_BASE_URL=${public_base}" \
+    "STUB_PUBLIC_ROOT=${case_dir}/s3/${bucket}/${prefix}" \
+    "GITHUB_ACTIONS=true" \
+    "GITHUB_EVENT_NAME=workflow_dispatch" \
+    "SKENION_RELEASE_S3_ENDPOINT=https://s3.example.test" \
+    "SKENION_RELEASE_S3_REGION=us-east-1" \
+    "SKENION_RELEASE_S3_BUCKET=${bucket}" \
+    "SKENION_RELEASE_S3_PREFIX=${prefix}" \
+    "SKENION_RELEASE_S3_ACCESS_KEY_ID=test-access-key" \
+    "SKENION_RELEASE_S3_SECRET_ACCESS_KEY=test-secret-key" \
+    "SKENION_RELEASE_S3_FORCE_PATH_STYLE=true" \
+    "SKENION_RELEASE_PUBLIC_BASE_URL=${public_base}" \
+    "SKENION_PUBLIC_VERIFY_ATTEMPTS=3" \
+    "SKENION_PUBLIC_VERIFY_SLEEP_SECONDS=0" \
+    "SOURCE_COMMIT=${source_commit}" \
+    "RELEASE_TIER=release-blocking" \
+    "CONTRACTS_VERSION=1.2.0" \
+    "CONTRACTS_LINE=1.2"
+  )
+}
+
+run_publisher() {
+  local case_dir="$1"
+  local skip_public=false
+  local asset_path
+  local checksum_path
+  local -a base_env_args
+  local -a env_args=()
+  local -a publisher_args=()
+  shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --skip-public-verification)
+        skip_public=true
+        shift
+        ;;
+      *=*)
+        env_args+=("$1")
+        shift
+        ;;
+      *)
+        fail "unknown run_publisher argument: $1"
+        ;;
+    esac
+  done
+
+  if [[ "${skip_public}" == "true" ]]; then
+    publisher_args+=(--skip-public-verification)
+  fi
+
+  reset_logs "${case_dir}"
+  base_env_args_for "${case_dir}"
   asset_path="$(asset_path_for "${case_dir}")"
   checksum_path="${asset_path}.sha256"
 
-  base_env=(
-    "PATH=${tmp_root}/bin:${PATH}"
-    "STUB_AWS_LOG=${case_dir}/aws.log"
-    "STUB_CURL_LOG=${case_dir}/curl.log"
-    "STUB_S3_ROOT=${case_dir}/s3"
-    "STUB_CURL_STATE_DIR=${case_dir}/curl-state"
-    "STUB_PUBLIC_BASE_URL=${public_base}"
-    "STUB_PUBLIC_ROOT=${case_dir}/s3/${bucket}/${prefix}"
-    "GITHUB_ACTIONS=true"
-    "GITHUB_EVENT_NAME=workflow_dispatch"
-    "SKENION_RELEASE_S3_ENDPOINT=https://s3.example.test"
-    "SKENION_RELEASE_S3_REGION=us-east-1"
-    "SKENION_RELEASE_S3_BUCKET=${bucket}"
-    "SKENION_RELEASE_S3_PREFIX=${prefix}"
-    "SKENION_RELEASE_S3_ACCESS_KEY_ID=test-access-key"
-    "SKENION_RELEASE_S3_SECRET_ACCESS_KEY=test-secret-key"
-    "SKENION_RELEASE_S3_FORCE_PATH_STYLE=true"
-    "SKENION_RELEASE_PUBLIC_BASE_URL=${public_base}"
-    "SKENION_PUBLIC_VERIFY_ATTEMPTS=3"
-    "SKENION_PUBLIC_VERIFY_SLEEP_SECONDS=0"
-    "SOURCE_COMMIT=${source_commit}"
-    "RELEASE_TIER=release-blocking"
-    "CONTRACTS_VERSION=1.2.0"
-    "CONTRACTS_LINE=1.2"
-  )
-
-  env "${base_env[@]}" \
+  env "${base_env_args[@]}" \
     "${publisher}" \
     --dry-run \
     "${target}" \
@@ -420,11 +449,11 @@ run_publisher() {
     "${asset_path}" \
     "${checksum_path}" >/dev/null
 
-  env "${base_env[@]}" \
-    "$@" \
+  env "${base_env_args[@]}" \
+    "${env_args[@]+"${env_args[@]}"}" \
     "${publisher}" \
     --use-existing-manifest \
-    "${publisher_args[@]}" \
+    "${publisher_args[@]+"${publisher_args[@]}"}" \
     "${target}" \
     "${version}" \
     "${release_tag}" \
@@ -434,38 +463,93 @@ run_publisher() {
 
 run_existing_checker() {
   local case_dir="$1"
-  local -a base_env
+  local -a base_env_args
   shift
 
-  mkdir -p "${case_dir}/s3/${bucket}/${prefix}"
-  : >"${case_dir}/aws.log"
-  : >"${case_dir}/curl.log"
-
-  base_env=(
-    "PATH=${tmp_root}/bin:${PATH}"
-    "STUB_AWS_LOG=${case_dir}/aws.log"
-    "STUB_CURL_LOG=${case_dir}/curl.log"
-    "STUB_S3_ROOT=${case_dir}/s3"
-    "STUB_CURL_STATE_DIR=${case_dir}/curl-state"
-    "STUB_PUBLIC_BASE_URL=${public_base}"
-    "STUB_PUBLIC_ROOT=${case_dir}/s3/${bucket}/${prefix}"
-    "SKENION_RELEASE_S3_ENDPOINT=https://s3.example.test"
-    "SKENION_RELEASE_S3_REGION=us-east-1"
-    "SKENION_RELEASE_S3_BUCKET=${bucket}"
-    "SKENION_RELEASE_S3_PREFIX=${prefix}"
-    "SKENION_RELEASE_S3_ACCESS_KEY_ID=test-access-key"
-    "SKENION_RELEASE_S3_SECRET_ACCESS_KEY=test-secret-key"
-    "SKENION_RELEASE_S3_FORCE_PATH_STYLE=true"
-    "SKENION_RELEASE_PUBLIC_BASE_URL=${public_base}"
-    "SOURCE_COMMIT=${source_commit}"
-  )
-
-  env "${base_env[@]}" \
+  reset_logs "${case_dir}"
+  base_env_args_for "${case_dir}"
+  env "${base_env_args[@]}" \
     "$@" \
     "${existing_checker}" \
     "${target}" \
     "${version}" \
     "${release_tag}"
+}
+
+expect_success() {
+  local case_dir="$1"
+  shift
+
+  if ! run_publisher "${case_dir}" "$@" >"${case_dir}/output.log" 2>&1; then
+    sed 's/^/[publisher] /' "${case_dir}/output.log" >&2
+    fail "expected publisher case to succeed: $(basename "${case_dir}")"
+  fi
+}
+
+expect_failure() {
+  local case_dir="$1"
+  shift
+
+  if run_publisher "${case_dir}" "$@" >"${case_dir}/output.log" 2>&1; then
+    sed 's/^/[publisher] /' "${case_dir}/output.log" >&2
+    fail "expected publisher case to fail: $(basename "${case_dir}")"
+  fi
+}
+
+assert_contains() {
+  local file="$1"
+  local pattern="$2"
+  if ! grep -Eq "${pattern}" "${file}"; then
+    sed 's/^/[file] /' "${file}" >&2
+    fail "expected ${file} to contain pattern: ${pattern}"
+  fi
+}
+
+assert_not_contains() {
+  local file="$1"
+  local pattern="$2"
+  if grep -Eq "${pattern}" "${file}"; then
+    sed 's/^/[file] /' "${file}" >&2
+    fail "expected ${file} not to contain pattern: ${pattern}"
+  fi
+}
+
+assert_no_body_downloads() {
+  local case_dir="$1"
+
+  assert_not_contains "${case_dir}/aws.log" '^unexpected-get '
+  assert_not_contains "${case_dir}/curl.log" '^GET '
+}
+
+assert_put_count() {
+  local case_dir="$1"
+  local expected="$2"
+  local actual
+
+  actual="$(grep -c '^put ' "${case_dir}/aws.log" || true)"
+  if [[ "${actual}" != "${expected}" ]]; then
+    sed 's/^/[aws] /' "${case_dir}/aws.log" >&2
+    fail "expected ${expected} put events, saw ${actual}"
+  fi
+}
+
+assert_no_head_after_put_for_same_key() {
+  local case_dir="$1"
+
+  python3 - "${case_dir}/aws.log" <<'PY'
+import sys
+from pathlib import Path
+
+events = [line.strip() for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]
+for index, event in enumerate(events):
+    if not event.startswith("put "):
+        continue
+    key = event.removeprefix("put ")
+    later_head = f"head {key}"
+    if later_head in events[index + 1 :]:
+        print(f"post-upload HEAD detected for {key}", file=sys.stderr)
+        raise SystemExit(1)
+PY
 }
 
 seed_existing_release_objects() {
@@ -504,32 +588,15 @@ EOF
   write_metadata "${manifest_object}" "$(sha256_file "${manifest_object}")"
 }
 
-assert_no_body_downloads() {
-  local case_dir="$1"
-
-  if grep -q '^unexpected-get ' "${case_dir}/aws.log"; then
-    echo "publisher performed authenticated S3 object download" >&2
-    exit 1
-  fi
-  if grep -q '^GET ' "${case_dir}/curl.log"; then
-    echo "publisher performed public body download" >&2
-    exit 1
-  fi
-}
-
 assert_github_actions_guard_case() {
   local case_dir="${tmp_root}/github-actions-guard"
 
   prepare_case "${case_dir}" "runtime github actions guard artifact"
-  if run_publisher "${case_dir}" GITHUB_ACTIONS= GITHUB_EVENT_NAME=push >"${case_dir}/output.log" 2>&1; then
-    echo "expected GitHub Actions guard publisher case to fail" >&2
-    exit 1
-  fi
-
-  grep -q 'Runtime release artifact publishing must run from GitHub Actions' "${case_dir}/output.log"
+  expect_failure "${case_dir}" GITHUB_ACTIONS= GITHUB_EVENT_NAME=push
+  assert_contains "${case_dir}/output.log" 'Runtime release artifact publishing must run from GitHub Actions'
   if [[ -s "${case_dir}/aws.log" ]]; then
-    echo "publisher reached S3 stub despite GitHub Actions guard refusal" >&2
-    exit 1
+    sed 's/^/[aws] /' "${case_dir}/aws.log" >&2
+    fail "publisher reached S3 stub despite GitHub Actions guard refusal"
   fi
 }
 
@@ -538,9 +605,11 @@ assert_success_case() {
   local manifest
 
   prepare_case "${case_dir}" "runtime success artifact"
-  run_publisher "${case_dir}" >"${case_dir}/output.log" 2>&1
+  expect_success "${case_dir}"
   manifest="$(asset_path_for "${case_dir}").manifest.json"
   assert_no_body_downloads "${case_dir}"
+  assert_put_count "${case_dir}" 3
+  assert_no_head_after_put_for_same_key "${case_dir}"
 
   python3 - "${manifest}" <<'PY'
 import json
@@ -560,25 +629,21 @@ assert manifest["checksum"]["publicUrl"].endswith(".sha256")
 assert manifest["manifest"]["publicUrl"].endswith(".manifest.json")
 PY
 
-  python3 - "${case_dir}/aws.log" <<'PY'
-import sys
+  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.tar\.gz$'
+  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.sha256$'
+  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.manifest\.json$'
+}
 
-with open(sys.argv[1], encoding="utf-8") as fh:
-    events = [line.strip() for line in fh if line.strip()]
+assert_upload_missing_s3_metadata_is_not_a_failure_case() {
+  local case_dir="${tmp_root}/upload-missing-s3-metadata"
 
-put_indexes = [
-    (index, event.removeprefix("put "))
-    for index, event in enumerate(events)
-    if event.startswith("put ")
-]
-assert len(put_indexes) == 3, events
-for index, key in put_indexes:
-    assert any(event == f"head {key}" for event in events[index + 1 :]), (key, events)
-PY
-
-  grep -q '^HEAD skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.tar\.gz$' "${case_dir}/curl.log"
-  grep -q '^HEAD skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.sha256$' "${case_dir}/curl.log"
-  grep -q '^HEAD skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.manifest\.json$' "${case_dir}/curl.log"
+  prepare_case "${case_dir}" "runtime upload missing s3 metadata artifact"
+  expect_success "${case_dir}" --skip-public-verification STUB_AWS_DROP_PUT_METADATA=1
+  assert_no_body_downloads "${case_dir}"
+  assert_put_count "${case_dir}" 3
+  assert_no_head_after_put_for_same_key "${case_dir}"
+  assert_not_contains "${case_dir}/output.log" 'S3 metadata does not match expected immutable artifact'
+  assert_contains "${case_dir}/output.log" 'uploaded Runtime release object: s3://skenion/releases/skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.tar\.gz'
 }
 
 assert_public_head_retry_case() {
@@ -586,15 +651,14 @@ assert_public_head_retry_case() {
   local head_count
 
   prepare_case "${case_dir}" "runtime public head retry artifact"
-  run_publisher "${case_dir}" STUB_CURL_FAIL_HEAD_ATTEMPTS=2 >"${case_dir}/output.log" 2>&1
+  expect_success "${case_dir}" STUB_CURL_FAIL_HEAD_ATTEMPTS=2
   assert_no_body_downloads "${case_dir}"
-
-  grep -q 'public Runtime release asset .* is not ready on attempt 1/3: HEAD request failed; retrying in 0s' "${case_dir}/output.log"
-  grep -q 'public Runtime release asset .* is not ready on attempt 2/3: HEAD request failed; retrying in 0s' "${case_dir}/output.log"
-  head_count="$(grep -c '^HEAD skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.tar\.gz$' "${case_dir}/curl.log")"
+  assert_contains "${case_dir}/output.log" 'public Runtime release asset .* is not ready on attempt 1/3: HEAD request failed; retrying in 0s'
+  assert_contains "${case_dir}/output.log" 'public Runtime release asset .* is not ready on attempt 2/3: HEAD request failed; retrying in 0s'
+  head_count="$(grep -c '^HEAD skenion-runtime/v1\.2\.3/x86_64-unknown-linux-gnu/.*\.tar\.gz$' "${case_dir}/curl.log" || true)"
   if [[ "${head_count}" != "3" ]]; then
-    echo "expected public asset HEAD to be retried until third attempt, saw ${head_count}" >&2
-    exit 1
+    sed 's/^/[curl] /' "${case_dir}/curl.log" >&2
+    fail "expected public asset HEAD to be retried until third attempt, saw ${head_count}"
   fi
 }
 
@@ -602,26 +666,18 @@ assert_public_missing_metadata_failure_case() {
   local case_dir="${tmp_root}/public-missing-metadata"
 
   prepare_case "${case_dir}" "runtime public missing metadata artifact"
-  if run_publisher "${case_dir}" STUB_CURL_DROP_SHA256_METADATA=1 >"${case_dir}/output.log" 2>&1; then
-    echo "expected public missing metadata case to fail" >&2
-    exit 1
-  fi
+  expect_failure "${case_dir}" STUB_CURL_DROP_SHA256_METADATA=1
   assert_no_body_downloads "${case_dir}"
-
-  grep -q 'missing x-amz-meta-sha256' "${case_dir}/output.log"
+  assert_contains "${case_dir}/output.log" 'missing x-amz-meta-sha256'
 }
 
 assert_public_mismatched_metadata_failure_case() {
   local case_dir="${tmp_root}/public-mismatched-metadata"
 
   prepare_case "${case_dir}" "runtime public mismatched metadata artifact"
-  if run_publisher "${case_dir}" STUB_CURL_CORRUPT_SHA256_METADATA=1 >"${case_dir}/output.log" 2>&1; then
-    echo "expected public mismatched metadata case to fail" >&2
-    exit 1
-  fi
+  expect_failure "${case_dir}" STUB_CURL_CORRUPT_SHA256_METADATA=1
   assert_no_body_downloads "${case_dir}"
-
-  grep -q 'public Runtime release .* HEAD metadata does not match local immutable artifact' "${case_dir}/output.log"
+  assert_contains "${case_dir}/output.log" 'public Runtime release .* HEAD metadata does not match local immutable artifact'
 }
 
 assert_existing_matching_metadata_skips_upload_case() {
@@ -629,20 +685,16 @@ assert_existing_matching_metadata_skips_upload_case() {
   local matching_count
 
   prepare_case "${case_dir}" "runtime existing matching metadata artifact"
-  run_publisher "${case_dir}" >/dev/null 2>&1
-  run_publisher "${case_dir}" --publisher-skip-public-verification >"${case_dir}/output.log" 2>&1
+  expect_success "${case_dir}" --skip-public-verification
+  reset_logs "${case_dir}"
+  expect_success "${case_dir}" --skip-public-verification
   assert_no_body_downloads "${case_dir}"
-
-  grep -q 'object already exists and will not be overwritten' "${case_dir}/output.log"
-  matching_count="$(grep -c 'object already exists and will not be overwritten' "${case_dir}/output.log")"
+  matching_count="$(grep -c 'object already exists and will not be overwritten' "${case_dir}/output.log" || true)"
   if [[ "${matching_count}" != "3" ]]; then
-    echo "expected all three existing release objects to match by metadata; saw ${matching_count}" >&2
-    exit 1
+    sed 's/^/[publisher] /' "${case_dir}/output.log" >&2
+    fail "expected all three existing release objects to match; saw ${matching_count}"
   fi
-  if grep -q '^put ' "${case_dir}/aws.log"; then
-    echo "publisher uploaded despite existing matching metadata for all release objects" >&2
-    exit 1
-  fi
+  assert_put_count "${case_dir}" 0
 }
 
 assert_existing_missing_metadata_skips_matching_asset_case() {
@@ -658,17 +710,14 @@ assert_existing_missing_metadata_skips_matching_asset_case() {
   mkdir -p "$(dirname "${existing}")"
   command cp "${asset}" "${existing}"
 
-  run_publisher "${case_dir}" --publisher-skip-public-verification >"${case_dir}/output.log" 2>&1
+  expect_success "${case_dir}" --skip-public-verification
   assert_no_body_downloads "${case_dir}"
-
-  grep -q 'object already exists without immutable metadata and matching size' "${case_dir}/output.log"
-  grep -q 'object already exists and will not be overwritten' "${case_dir}/output.log"
-  if grep -q "^put ${bucket}/${asset_key}$" "${case_dir}/aws.log"; then
-    echo "publisher uploaded despite existing missing metadata" >&2
-    exit 1
-  fi
-  grep -q "^put ${bucket}/${asset_key}\\.sha256$" "${case_dir}/aws.log"
-  grep -q "^put ${bucket}/${asset_key}\\.manifest\\.json$" "${case_dir}/aws.log"
+  assert_contains "${case_dir}/output.log" 'object already exists without immutable metadata and matching size'
+  assert_contains "${case_dir}/output.log" 'object already exists and will not be overwritten'
+  assert_not_contains "${case_dir}/aws.log" "^put ${bucket}/${asset_key}$"
+  assert_contains "${case_dir}/aws.log" "^put ${bucket}/${asset_key}\\.sha256$"
+  assert_contains "${case_dir}/aws.log" "^put ${bucket}/${asset_key}\\.manifest\\.json$"
+  assert_no_head_after_put_for_same_key "${case_dir}"
 }
 
 assert_existing_mismatched_metadata_fails_case() {
@@ -685,18 +734,11 @@ assert_existing_mismatched_metadata_fails_case() {
   command cp "${asset}" "${existing}"
   write_metadata "${existing}" "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
-  if run_publisher "${case_dir}" >"${case_dir}/output.log" 2>&1; then
-    echo "expected existing mismatched metadata case to fail" >&2
-    exit 1
-  fi
+  expect_failure "${case_dir}" --skip-public-verification
   assert_no_body_downloads "${case_dir}"
-
-  grep -q 'S3 metadata does not match expected immutable artifact' "${case_dir}/output.log"
-  grep -q 'refusing to overwrite existing Runtime release artifact' "${case_dir}/output.log"
-  if grep -q "^put ${bucket}/${asset_key}$" "${case_dir}/aws.log"; then
-    echo "publisher uploaded despite existing mismatched metadata" >&2
-    exit 1
-  fi
+  assert_contains "${case_dir}/output.log" 'S3 metadata does not match expected immutable artifact'
+  assert_contains "${case_dir}/output.log" 'refusing to overwrite existing Runtime release artifact'
+  assert_not_contains "${case_dir}/aws.log" "^put ${bucket}/${asset_key}$"
 }
 
 assert_head_miss_concurrent_put_race_case() {
@@ -710,20 +752,13 @@ assert_head_miss_concurrent_put_race_case() {
   asset_name="$(basename "${asset}")"
   raced_path="${case_dir}/s3/${bucket}/${prefix}/skenion-runtime/${release_tag}/${target}/${asset_name}"
 
-  if run_publisher "${case_dir}" STUB_AWS_CONCURRENT_CREATE_ON_PUT=1 >"${case_dir}/output.log" 2>&1; then
-    echo "expected concurrent conditional put race case to fail" >&2
-    exit 1
-  fi
+  expect_failure "${case_dir}" --skip-public-verification STUB_AWS_CONCURRENT_CREATE_ON_PUT=1
   assert_no_body_downloads "${case_dir}"
-
-  grep -q 'failed to conditionally upload Runtime release artifact without overwriting' "${case_dir}/output.log"
-  grep -q 'PreconditionFailed' "${case_dir}/output.log"
-  grep -q "^put-precondition-failed ${bucket}/${prefix}/skenion-runtime/${release_tag}/${target}/${asset_name}$" "${case_dir}/aws.log"
-  if grep -q "^put ${bucket}/${prefix}/skenion-runtime/${release_tag}/${target}/${asset_name}$" "${case_dir}/aws.log"; then
-    echo "publisher overwrote concurrent object despite conditional put failure" >&2
-    exit 1
-  fi
-  grep -q '^concurrent object$' "${raced_path}"
+  assert_contains "${case_dir}/output.log" 'failed to conditionally upload Runtime release artifact without overwriting'
+  assert_contains "${case_dir}/output.log" 'PreconditionFailed'
+  assert_contains "${case_dir}/aws.log" "^put-precondition-failed ${bucket}/${prefix}/skenion-runtime/${release_tag}/${target}/${asset_name}$"
+  assert_not_contains "${case_dir}/aws.log" "^put ${bucket}/${prefix}/skenion-runtime/${release_tag}/${target}/${asset_name}$"
+  assert_contains "${raced_path}" '^concurrent object$'
 }
 
 assert_existing_checker_missing_objects_case() {
@@ -731,14 +766,11 @@ assert_existing_checker_missing_objects_case() {
 
   mkdir -p "${case_dir}"
   run_existing_checker "${case_dir}" >"${case_dir}/output.log" 2>&1
-  grep -q 'runtime_asset_exists=false' "${case_dir}/output.log"
-  if grep -q '^put ' "${case_dir}/aws.log"; then
-    echo "existing checker uploaded despite missing release objects" >&2
-    exit 1
-  fi
+  assert_contains "${case_dir}/output.log" 'runtime_asset_exists=false'
+  assert_put_count "${case_dir}" 0
   if [[ -s "${case_dir}/curl.log" ]]; then
-    echo "existing checker touched public CDN despite S3-only preflight" >&2
-    exit 1
+    sed 's/^/[curl] /' "${case_dir}/curl.log" >&2
+    fail "existing checker touched public CDN despite S3-only preflight"
   fi
 }
 
@@ -748,14 +780,11 @@ assert_existing_checker_valid_objects_case() {
   mkdir -p "${case_dir}"
   seed_existing_release_objects "${case_dir}"
   run_existing_checker "${case_dir}" >"${case_dir}/output.log" 2>&1
-  grep -q 'runtime_asset_exists=true' "${case_dir}/output.log"
-  if grep -q '^put ' "${case_dir}/aws.log"; then
-    echo "existing checker uploaded despite existing release objects" >&2
-    exit 1
-  fi
+  assert_contains "${case_dir}/output.log" 'runtime_asset_exists=true'
+  assert_put_count "${case_dir}" 0
   if [[ -s "${case_dir}/curl.log" ]]; then
-    echo "existing checker touched public CDN despite S3-only preflight" >&2
-    exit 1
+    sed 's/^/[curl] /' "${case_dir}/curl.log" >&2
+    fail "existing checker touched public CDN despite S3-only preflight"
   fi
 }
 
@@ -773,21 +802,19 @@ assert_existing_checker_metadata_free_objects_case() {
   : >"$(metadata_path_for "${asset_object}")"
 
   run_existing_checker "${case_dir}" >"${case_dir}/output.log" 2>&1
-  grep -q 'runtime_asset_exists=true' "${case_dir}/output.log"
-  grep -q 'found existing Runtime release asset without S3 metadata' "${case_dir}/output.log"
-  if grep -q '^put ' "${case_dir}/aws.log"; then
-    echo "existing checker uploaded despite metadata-free existing object" >&2
-    exit 1
-  fi
+  assert_contains "${case_dir}/output.log" 'runtime_asset_exists=true'
+  assert_contains "${case_dir}/output.log" 'found existing Runtime release asset without S3 metadata'
+  assert_put_count "${case_dir}" 0
   if [[ -s "${case_dir}/curl.log" ]]; then
-    echo "existing checker touched public CDN despite metadata-free existing object" >&2
-    exit 1
+    sed 's/^/[curl] /' "${case_dir}/curl.log" >&2
+    fail "existing checker touched public CDN despite metadata-free existing object"
   fi
 }
 
 install_stubs "${tmp_root}/bin"
 assert_github_actions_guard_case
 assert_success_case
+assert_upload_missing_s3_metadata_is_not_a_failure_case
 assert_public_head_retry_case
 assert_public_missing_metadata_failure_case
 assert_public_mismatched_metadata_failure_case

@@ -437,25 +437,6 @@ PY
     exit 1
   }
 
-  verify_s3_object_metadata() {
-    local key="$1"
-    local expected_sha="$2"
-    local expected_size="$3"
-    local label="$4"
-
-    if ! aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3api head-object \
-      --bucket "${SKENION_RELEASE_S3_BUCKET}" \
-      --key "${key}" >"${head_json}" 2>"${head_err}"; then
-      echo "failed to verify uploaded Runtime release ${label}: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
-      cat "${head_err}" >&2
-      exit 1
-    fi
-
-    if ! s3_head_metadata_matches_expected "${key}" "${expected_sha}" "${expected_size}" "${label}"; then
-      exit 1
-    fi
-  }
-
   upload_object() {
     local path="$1"
     local key="$2"
@@ -479,7 +460,7 @@ PY
       exit 1
     fi
 
-    verify_s3_object_metadata "${key}" "${sha}" "${size}" "$(basename "${path}")"
+    echo "uploaded Runtime release object: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
   }
 
   read_public_header() {
