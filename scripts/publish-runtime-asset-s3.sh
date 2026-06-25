@@ -3,6 +3,7 @@ set -euo pipefail
 
 dry_run=false
 use_existing_manifest=false
+skip_public_verification=false
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --dry-run)
@@ -10,6 +11,9 @@ while [[ "${1:-}" == --* ]]; do
       ;;
     --use-existing-manifest)
       use_existing_manifest=true
+      ;;
+    --skip-public-verification)
+      skip_public_verification=true
       ;;
     *)
       echo "unknown option: $1" >&2
@@ -20,7 +24,7 @@ while [[ "${1:-}" == --* ]]; do
 done
 
 if [[ $# -ne 5 ]]; then
-  echo "usage: $0 [--dry-run] [--use-existing-manifest] <target-triple> <version> <release-tag> <asset-path> <checksum-path>" >&2
+  echo "usage: $0 [--dry-run] [--use-existing-manifest] [--skip-public-verification] <target-triple> <version> <release-tag> <asset-path> <checksum-path>" >&2
   exit 2
 fi
 
@@ -281,7 +285,7 @@ else
     echo "aws CLI is required for Runtime release artifact publishing." >&2
     exit 1
   fi
-  if ! command -v curl >/dev/null 2>&1; then
+  if [[ "${skip_public_verification}" != "true" ]] && ! command -v curl >/dev/null 2>&1; then
     echo "curl is required for Runtime release artifact public-read verification." >&2
     exit 1
   fi
@@ -313,7 +317,67 @@ else
   }
   trap cleanup_head EXIT
 
-  object_exists_with_same_content() {
+  read_s3_head_field() {
+    local field="$1"
+    local path="$2"
+
+    "${python_bin}" - "${field}" "${path}" <<'PY'
+import json
+import sys
+
+field = sys.argv[1]
+with open(sys.argv[2], encoding="utf-8") as fh:
+    head = json.load(fh)
+
+metadata = head.get("Metadata") or {}
+
+if field in {"sha256", "component", "target", "runtime-version", "source-tag", "source-commit"}:
+    print(metadata.get(field, ""))
+elif field == "size":
+    print(head.get("ContentLength", ""))
+else:
+    raise SystemExit(f"unsupported head field: {field}")
+PY
+  }
+
+  s3_head_metadata_matches_expected() {
+    local key="$1"
+    local expected_sha="$2"
+    local expected_size="$3"
+    local label="$4"
+    local actual_sha
+    local actual_size
+    local actual_component
+    local actual_target
+    local actual_version
+    local actual_tag
+    local actual_commit
+
+    actual_sha="$(read_s3_head_field sha256 "${head_json}")"
+    actual_size="$(read_s3_head_field size "${head_json}")"
+    actual_component="$(read_s3_head_field component "${head_json}")"
+    actual_target="$(read_s3_head_field target "${head_json}")"
+    actual_version="$(read_s3_head_field runtime-version "${head_json}")"
+    actual_tag="$(read_s3_head_field source-tag "${head_json}")"
+    actual_commit="$(read_s3_head_field source-commit "${head_json}")"
+
+    if [[ "${actual_sha}" == "${expected_sha}" \
+      && "${actual_size}" == "${expected_size}" \
+      && "${actual_component}" == "skenion-runtime" \
+      && "${actual_target}" == "${target}" \
+      && "${actual_version}" == "${version}" \
+      && "${actual_tag}" == "${release_tag}" \
+      && "${actual_commit}" == "${source_commit}" ]]; then
+      return 0
+    fi
+
+    echo "Runtime release ${label} S3 metadata does not match expected immutable artifact: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
+    echo "expected sha256=${expected_sha} size=${expected_size} component=skenion-runtime target=${target} runtime-version=${version} source-tag=${release_tag} source-commit=${source_commit}" >&2
+    echo "actual sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>} component=${actual_component:-<missing>} target=${actual_target:-<missing>} runtime-version=${actual_version:-<missing>} source-tag=${actual_tag:-<missing>} source-commit=${actual_commit:-<missing>}" >&2
+    return 1
+  }
+
+  object_exists_with_same_metadata() {
     local key="$1"
     local expected_sha="$2"
     local expected_size="$3"
@@ -321,8 +385,8 @@ else
     if aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3api head-object \
       --bucket "${SKENION_RELEASE_S3_BUCKET}" \
       --key "${key}" >"${head_json}" 2>"${head_err}"; then
-      if s3_object_matches_expected_content "${key}" "${expected_sha}" "${expected_size}" "existing object"; then
-        echo "object already exists with matching content: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
+      if s3_head_metadata_matches_expected "${key}" "${expected_sha}" "${expected_size}" "existing object"; then
+        echo "object already exists with matching immutable metadata: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
         return 0
       fi
       echo "refusing to overwrite existing Runtime release artifact: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
@@ -338,82 +402,7 @@ else
     exit 1
   }
 
-  read_s3_head_field() {
-    local field="$1"
-    local path="$2"
-
-    "${python_bin}" - "${field}" "${path}" <<'PY'
-import json
-import sys
-
-field = sys.argv[1]
-with open(sys.argv[2], encoding="utf-8") as fh:
-    head = json.load(fh)
-
-if field == "sha256":
-    print((head.get("Metadata") or {}).get("sha256", ""))
-elif field == "size":
-    print(head.get("ContentLength", ""))
-else:
-    raise SystemExit(f"unsupported head field: {field}")
-PY
-  }
-
-  download_s3_object_for_sha256() {
-    local key="$1"
-    local output_path="$2"
-
-    aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3 cp \
-      "s3://${SKENION_RELEASE_S3_BUCKET}/${key}" \
-      "${output_path}" \
-      --no-progress
-  }
-
-  s3_object_matches_expected_content() {
-    local key="$1"
-    local expected_sha="$2"
-    local expected_size="$3"
-    local label="$4"
-    local actual_sha
-    local actual_size
-    local downloaded_path
-    local downloaded_sha
-    local downloaded_size
-
-    actual_sha="$(read_s3_head_field sha256 "${head_json}")"
-    actual_size="$(read_s3_head_field size "${head_json}")"
-
-    if [[ "${actual_size}" != "${expected_size}" ]]; then
-      echo "Runtime release ${label} size does not match local file: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
-      echo "expected sha256=${expected_sha} size=${expected_size}" >&2
-      echo "actual sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>}" >&2
-      return 1
-    fi
-
-    downloaded_path="$(mktemp)"
-    if ! download_s3_object_for_sha256 "${key}" "${downloaded_path}"; then
-      rm -f "${downloaded_path}"
-      echo "failed to download Runtime release ${label} for authenticated checksum verification: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
-      return 1
-    fi
-
-    downloaded_sha="$(sha256_file "${downloaded_path}")"
-    downloaded_size="$(file_size "${downloaded_path}")"
-    rm -f "${downloaded_path}"
-
-    if [[ "${downloaded_sha}" != "${expected_sha}" || "${downloaded_size}" != "${expected_size}" ]]; then
-      echo "Runtime release ${label} content does not match local file after authenticated S3 download: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
-      echo "expected sha256=${expected_sha} size=${expected_size}" >&2
-      echo "head sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>}" >&2
-      echo "downloaded sha256=${downloaded_sha} size=${downloaded_size}" >&2
-      return 1
-    fi
-
-    echo "Runtime release ${label} content matches by authenticated S3 download; head metadata sha256=${actual_sha:-<missing>}"
-    return 0
-  }
-
-  verify_s3_object_content() {
+  verify_s3_object_metadata() {
     local key="$1"
     local expected_sha="$2"
     local expected_size="$3"
@@ -427,7 +416,7 @@ PY
       exit 1
     fi
 
-    if ! s3_object_matches_expected_content "${key}" "${expected_sha}" "${expected_size}" "${label}"; then
+    if ! s3_head_metadata_matches_expected "${key}" "${expected_sha}" "${expected_size}" "${label}"; then
       exit 1
     fi
   }
@@ -439,7 +428,7 @@ PY
     local size="$4"
     local content_type="$5"
 
-    if object_exists_with_same_content "${key}" "${sha}" "${size}"; then
+    if object_exists_with_same_metadata "${key}" "${sha}" "${size}"; then
       return 0
     fi
 
@@ -455,36 +444,77 @@ PY
       exit 1
     fi
 
-    verify_s3_object_content "${key}" "${sha}" "${size}" "$(basename "${path}")"
+    verify_s3_object_metadata "${key}" "${sha}" "${size}" "$(basename "${path}")"
   }
 
-  verify_public_content_length() {
+  read_public_header() {
+    local name="$1"
+    local path="$2"
+
+    awk -v header_name="${name}" '
+      BEGIN { IGNORECASE = 1 }
+      {
+        line = $0
+        gsub("\r", "", line)
+        split(line, parts, ":")
+        if (tolower(parts[1]) == tolower(header_name)) {
+          sub("^[^:]*:[[:space:]]*", "", line)
+          value = line
+        }
+      }
+      END { print value }
+    ' "${path}"
+  }
+
+  public_head_matches_expected() {
     local url="$1"
-    local expected_size="$2"
-    local label="$3"
-    local headers_path
+    local expected_sha="$2"
+    local expected_size="$3"
+    local label="$4"
     local actual_size
+    local actual_sha
+
+    actual_size="$(read_public_header "Content-Length" "${head_json}")"
+    actual_sha="$(read_public_header "x-amz-meta-sha256" "${head_json}")"
+
+    if [[ -z "${actual_size}" ]]; then
+      echo "public Runtime release ${label} is missing Content-Length: ${url}" >&2
+      return 1
+    fi
+    if [[ -z "${actual_sha}" ]]; then
+      echo "public Runtime release ${label} is missing x-amz-meta-sha256; CDN must expose S3 user metadata: ${url}" >&2
+      return 1
+    fi
+    if [[ "${actual_size}" != "${expected_size}" || "${actual_sha}" != "${expected_sha}" ]]; then
+      echo "public Runtime release ${label} HEAD metadata does not match local immutable artifact: ${url}" >&2
+      echo "expected sha256=${expected_sha} size=${expected_size}" >&2
+      echo "actual sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>}" >&2
+      return 1
+    fi
+
+    return 0
+  }
+
+  verify_public_head_metadata() {
+    local url="$1"
+    local expected_sha="$2"
+    local expected_size="$3"
+    local label="$4"
     local attempt
     local last_error
 
     for ((attempt = 1; attempt <= public_verify_attempts; attempt++)); do
-      headers_path="$(mktemp)"
+      : >"${head_json}"
       if curl --fail --silent --show-error --location --head \
-        --dump-header "${headers_path}" \
+        --dump-header "${head_json}" \
         --output /dev/null \
         "${url}"; then
-        actual_size="$(awk 'BEGIN { IGNORECASE = 1 } /^Content-Length:/ { gsub("\r", "", $2); value = $2 } END { print value }' "${headers_path}")"
-        rm -f "${headers_path}"
-
-        if [[ -z "${actual_size}" ]]; then
-          last_error="missing Content-Length"
-        elif [[ "${actual_size}" != "${expected_size}" ]]; then
-          last_error="Content-Length mismatch: expected size=${expected_size} actual size=${actual_size}"
-        else
+        if public_head_matches_expected "${url}" "${expected_sha}" "${expected_size}" "${label}"; then
           return 0
         fi
+
+        exit 1
       else
-        rm -f "${headers_path}"
         last_error="HEAD request failed"
       fi
 
@@ -498,56 +528,6 @@ PY
 
     if [[ "${last_error}" == HEAD\ request\ failed ]]; then
       echo "failed to verify public Runtime release ${label}: ${url}" >&2
-    elif [[ "${last_error}" == missing\ Content-Length ]]; then
-      echo "public Runtime release ${label} is missing Content-Length: ${url}" >&2
-    else
-      echo "public Runtime release ${label} Content-Length does not match local file: ${url}" >&2
-      echo "${last_error}" >&2
-    fi
-    exit 1
-  }
-
-  verify_public_file_matches() {
-    local url="$1"
-    local expected_path="$2"
-    local label="$3"
-    local body_path
-    local expected_sha
-    local actual_sha
-    local attempt
-    local last_error
-
-    for ((attempt = 1; attempt <= public_verify_attempts; attempt++)); do
-      body_path="$(mktemp)"
-      if curl --fail --silent --show-error --location \
-        --output "${body_path}" \
-        "${url}"; then
-        if cmp -s "${expected_path}" "${body_path}"; then
-          rm -f "${body_path}"
-          return 0
-        fi
-
-        expected_sha="$(sha256_file "${expected_path}")"
-        actual_sha="$(sha256_file "${body_path}")"
-        last_error="content mismatch: expected sha256=${expected_sha} actual sha256=${actual_sha}"
-      else
-        last_error="download failed"
-      fi
-      rm -f "${body_path}"
-
-      if ((attempt < public_verify_attempts)); then
-        echo "public Runtime release ${label} is not ready on attempt ${attempt}/${public_verify_attempts}: ${last_error}; retrying in ${public_verify_sleep_seconds}s: ${url}" >&2
-        if ((public_verify_sleep_seconds > 0)); then
-          sleep "${public_verify_sleep_seconds}"
-        fi
-      fi
-    done
-
-    if [[ "${last_error}" == download\ failed ]]; then
-      echo "failed to download public Runtime release ${label}: ${url}" >&2
-    else
-      echo "public Runtime release ${label} content does not match local file: ${url}" >&2
-      echo "${last_error}" >&2
     fi
     exit 1
   }
@@ -556,9 +536,11 @@ PY
   upload_object "${checksum_path}" "${checksum_key}" "${checksum_sha}" "${checksum_size}" "text/plain"
   upload_object "${manifest_path}" "${manifest_key}" "${manifest_sha}" "${manifest_size}" "application/json"
 
-  verify_public_content_length "${asset_url}" "${asset_size}" "asset ${asset_name}"
-  verify_public_file_matches "${checksum_url}" "${checksum_path}" "checksum ${checksum_name}"
-  verify_public_file_matches "${manifest_url}" "${manifest_path}" "manifest ${manifest_name}"
+  if [[ "${skip_public_verification}" != "true" ]]; then
+    verify_public_head_metadata "${asset_url}" "${asset_sha}" "${asset_size}" "asset ${asset_name}"
+    verify_public_head_metadata "${checksum_url}" "${checksum_sha}" "${checksum_size}" "checksum ${checksum_name}"
+    verify_public_head_metadata "${manifest_url}" "${manifest_sha}" "${manifest_size}" "manifest ${manifest_name}"
+  fi
 fi
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then

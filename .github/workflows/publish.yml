@@ -207,29 +207,69 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.release.outputs.tag_ref }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Install AWS CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install awscli
+          python - <<'PY'
+          import os
+          import sysconfig
+
+          scripts = sysconfig.get_path("scripts")
+          if not scripts:
+              raise SystemExit("could not determine Python scripts directory for awscli")
+          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as output:
+              print(scripts, file=output)
+          PY
+      - name: Check AWS CLI
+        run: aws --version
+      - id: existing
+        name: Check existing Runtime artifact in DSUB S3
+        env:
+          SKENION_RELEASE_S3_ENDPOINT: ${{ secrets.SKENION_RELEASE_S3_ENDPOINT }}
+          SKENION_RELEASE_S3_REGION: ${{ secrets.SKENION_RELEASE_S3_REGION }}
+          SKENION_RELEASE_S3_BUCKET: ${{ secrets.SKENION_RELEASE_S3_BUCKET }}
+          SKENION_RELEASE_S3_PREFIX: ${{ secrets.SKENION_RELEASE_S3_PREFIX }}
+          SKENION_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.SKENION_RELEASE_S3_ACCESS_KEY_ID }}
+          SKENION_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.SKENION_RELEASE_S3_SECRET_ACCESS_KEY }}
+          SKENION_RELEASE_S3_FORCE_PATH_STYLE: ${{ secrets.SKENION_RELEASE_S3_FORCE_PATH_STYLE }}
+          SKENION_RELEASE_PUBLIC_BASE_URL: ${{ secrets.SKENION_RELEASE_PUBLIC_BASE_URL }}
+        run: |
+          SOURCE_COMMIT="$(git rev-parse HEAD)" scripts/check-runtime-asset-s3-existing.sh \
+            "${TARGET}" \
+            "${VERSION}" \
+            "${RELEASE_TAG}"
       - name: Install Linux native dependencies
-        if: runner.os == 'Linux'
+        if: steps.existing.outputs.exists != 'true' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
-      - run: rustup show
+      - name: Show Rust toolchain
+        if: steps.existing.outputs.exists != 'true'
+        run: rustup show
       - name: Add Rust target
+        if: steps.existing.outputs.exists != 'true'
         run: rustup target add "${TARGET}"
       - uses: Swatinem/rust-cache@v2
+        if: steps.existing.outputs.exists != 'true'
         with:
           prefix-key: skenion-runtime-release-assets-${{ matrix.target }}
           cache-all-crates: "true"
           cache-on-failure: "true"
       - name: Build runtime binary
+        if: steps.existing.outputs.exists != 'true'
         run: cargo build --release --locked --bin skenion-runtime --all-features --target "${TARGET}"
       - name: Smoke runtime binary
+        if: steps.existing.outputs.exists != 'true'
         run: scripts/smoke-runtime-binary.sh "${RUNTIME_BIN}"
       - id: package
         name: Package runtime asset
+        if: steps.existing.outputs.exists != 'true'
         run: scripts/package-runtime-asset.sh "${TARGET}" "${VERSION}" dist
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.x"
       - id: manifest
         name: Generate Runtime artifact manifest
+        if: steps.existing.outputs.exists != 'true'
         env:
           SKENION_RELEASE_S3_ENDPOINT: ${{ secrets.SKENION_RELEASE_S3_ENDPOINT }}
           SKENION_RELEASE_S3_REGION: ${{ secrets.SKENION_RELEASE_S3_REGION }}
@@ -250,31 +290,16 @@ jobs:
             "${{ steps.package.outputs.checksum_path }}"
       - id: attest
         name: Generate runtime asset provenance
+        if: steps.existing.outputs.exists != 'true'
         uses: actions/attest@v4
         with:
           subject-path: |
             ${{ steps.package.outputs.asset_path }}
             ${{ steps.package.outputs.checksum_path }}
             ${{ steps.manifest.outputs.manifest_path }}
-      - name: Install AWS CLI
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install awscli
-          python - <<'PY'
-          import os
-          import sysconfig
-
-          scripts = sysconfig.get_path("scripts")
-          if not scripts:
-              raise SystemExit("could not determine Python scripts directory for awscli")
-          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as output:
-              print(scripts, file=output)
-          PY
-      - name: Check AWS CLI
-        run: |
-          aws --version
       - id: publish
         name: Publish Runtime artifact to DSUB S3
+        if: steps.existing.outputs.exists != 'true'
         env:
           SKENION_RELEASE_S3_ENDPOINT: ${{ secrets.SKENION_RELEASE_S3_ENDPOINT }}
           SKENION_RELEASE_S3_REGION: ${{ secrets.SKENION_RELEASE_S3_REGION }}
@@ -289,6 +314,7 @@ jobs:
           CONTRACTS_LINE: ${{ needs.release.outputs.contracts_line }}
         run: |
           SOURCE_COMMIT="$(git rev-parse HEAD)" scripts/publish-runtime-asset-s3.sh \
+            --skip-public-verification \
             --use-existing-manifest \
             "${TARGET}" \
             "${VERSION}" \
@@ -296,6 +322,7 @@ jobs:
             "${{ steps.package.outputs.asset_path }}" \
             "${{ steps.package.outputs.checksum_path }}"
       - name: Upload Runtime manifest to GitHub Release
+        if: steps.existing.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           MANIFEST_PATH: ${{ steps.publish.outputs.manifest_path }}
@@ -328,6 +355,7 @@ jobs:
 
           gh release upload "${RELEASE_TAG}" "${MANIFEST_PATH}"
       - name: Summarize runtime asset
+        if: steps.existing.outputs.exists != 'true'
         run: |
           {
             echo "## Runtime Asset"
@@ -340,4 +368,18 @@ jobs:
             echo "- Manifest URL: ${{ steps.publish.outputs.manifest_url }}"
             echo "- GitHub Release manifest asset: $(basename "${{ steps.publish.outputs.manifest_path }}")"
             echo "- Provenance: ${{ steps.attest.outputs.attestation-url }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Summarize existing runtime asset
+        if: steps.existing.outputs.exists == 'true'
+        run: |
+          {
+            echo "## Runtime Asset"
+            echo ""
+            echo "- Target: ${TARGET}"
+            echo "- Tier: ${{ matrix.tier }}"
+            echo "- Status: existing immutable DSUB S3 artifact; build/package/publish skipped"
+            echo "- Asset: ${{ steps.existing.outputs.asset_name }}"
+            echo "- Artifact URL: ${{ steps.existing.outputs.asset_url }}"
+            echo "- Checksum URL: ${{ steps.existing.outputs.checksum_url }}"
+            echo "- Manifest URL: ${{ steps.existing.outputs.manifest_url }}"
           } >> "${GITHUB_STEP_SUMMARY}"

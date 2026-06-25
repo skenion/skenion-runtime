@@ -78,6 +78,10 @@ jobs:
           PY
       - name: Validate mocked Runtime DSUB S3 publisher
         run: scripts/validate-runtime-asset-s3-publisher.sh
+      - name: Validate deterministic Runtime asset packaging
+        run: scripts/validate-runtime-asset-packaging.sh
+      - name: Validate Runtime publish workflow gating
+        run: scripts/validate-runtime-publish-workflow.sh
 
   rust-quality:
     name: Rust quality, coverage, and runtime smoke

@@ -10,6 +10,17 @@ target="$1"
 version="$2"
 output_dir="$3"
 
+find_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+  elif command -v python >/dev/null 2>&1; then
+    command -v python
+  else
+    echo "python3 or python is required for deterministic Runtime asset packaging." >&2
+    exit 1
+  fi
+}
+
 binary_name="skenion-runtime"
 if [[ "${target}" == *windows* ]]; then
   binary_name="skenion-runtime.exe"
@@ -24,20 +35,49 @@ fi
 asset_name="skenion-runtime-v${version}-${target}.tar.gz"
 asset_path="${output_dir}/${asset_name}"
 checksum_path="${asset_path}.sha256"
-staging_dir="$(mktemp -d)"
-package_dir="${staging_dir}/skenion-runtime-v${version}-${target}"
+python_bin="$(find_python)"
 
-cleanup() {
-  rm -rf "${staging_dir}"
-}
-trap cleanup EXIT
+mkdir -p "${output_dir}"
 
-mkdir -p "${output_dir}" "${package_dir}"
-cp "${binary_path}" "${package_dir}/${binary_name}"
-chmod 755 "${package_dir}/${binary_name}" 2>/dev/null || true
-printf "skenion-runtime %s\nTarget: %s\n" "${version}" "${target}" >"${package_dir}/README.txt"
+"${python_bin}" - "${binary_path}" "${asset_path}" "${version}" "${target}" "${binary_name}" <<'PY'
+import gzip
+import io
+import os
+import sys
+import tarfile
 
-tar -czf "${asset_path}" -C "${staging_dir}" "skenion-runtime-v${version}-${target}"
+binary_path, asset_path, version, target, binary_name = sys.argv[1:]
+package_name = f"skenion-runtime-v{version}-{target}"
+readme_bytes = f"skenion-runtime {version}\nTarget: {target}\n".encode("utf-8")
+
+
+def tar_info(name, size, mode, type_=tarfile.REGTYPE):
+    info = tarfile.TarInfo(name)
+    info.size = size
+    info.mode = mode
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    info.mtime = 0
+    info.type = type_
+    return info
+
+
+with open(asset_path, "wb") as raw:
+    with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+            directory = tar_info(package_name, 0, 0o755, tarfile.DIRTYPE)
+            archive.addfile(directory)
+
+            readme_name = f"{package_name}/README.txt"
+            archive.addfile(tar_info(readme_name, len(readme_bytes), 0o644), io.BytesIO(readme_bytes))
+
+            binary_name_in_archive = f"{package_name}/{binary_name}"
+            binary_size = os.path.getsize(binary_path)
+            with open(binary_path, "rb") as binary:
+                archive.addfile(tar_info(binary_name_in_archive, binary_size, 0o755), binary)
+PY
 
 if command -v sha256sum >/dev/null 2>&1; then
   (
