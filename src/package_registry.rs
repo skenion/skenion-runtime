@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use skenion_contracts::{
     PackageChecksumAlgorithmV01, PackageChecksumV01, PackageDiagnosticSeverityV01,
     PackageDiagnosticV01, PackageManifestV01, PackageProvidedRefV01, PackageProvidesV01,
-    PackageRegistryEntryV01, PackageRegistryListResponseV01, SKENION_PACKAGE_MANIFEST_FILE_NAME,
-    validate_package_manifest_v01,
+    PackageRegistryEntryV01, PackageRegistryListResponseV01, PackageRootKindV01, PackageSourceV01,
+    PackageTrustV01, SKENION_PACKAGE_MANIFEST_FILE_NAME, validate_package_manifest_v01,
 };
 
 use crate::{DiagnosticSeverity, RuntimeDiagnostic};
@@ -359,9 +359,9 @@ fn package_entry_from_manifest(
         package_id: manifest.id,
         version: manifest.version,
         category: manifest.category,
-        source: manifest.source,
-        root: manifest.root,
-        trust: manifest.trust,
+        source: PackageSourceV01::Workspace,
+        root: PackageRootKindV01::Package,
+        trust: PackageTrustV01::Trusted,
         contracts: manifest.contracts,
         runtime_abi_range: manifest.runtime_abi_range,
         targets: manifest.targets,
@@ -827,19 +827,17 @@ mod tests {
     }
 
     fn valid_manifest(package_id: &str) -> String {
+        let provided_id = package_id.replace('/', ".");
         format!(
             r#"{{
               "schema": "skenion.package.manifest",
               "schemaVersion": "0.1.0",
               "id": "{package_id}",
-              "version": "0.46.0",
+              "version": "0.49.0",
               "category": "patch",
-              "source": "workspace",
-              "root": "package",
-              "trust": "trusted",
-              "contracts": {{ "line": "0.46", "range": ">=0.46.0 <0.47.0" }},
+              "contracts": {{ "line": "0.49", "range": ">=0.49.0 <0.50.0" }},
               "provides": {{
-                "patches": [{{ "id": "{package_id}.main", "path": "patches/main.skenion.json" }}]
+                "patches": [{{ "id": "{provided_id}.main", "path": "patches/main.skenion.json" }}]
               }},
               "paths": {{ "patches": ["patches/main.skenion.json"] }},
               "checksums": [
@@ -926,7 +924,16 @@ mod tests {
         assert!(response.ok);
         assert_eq!(response.packages.len(), 1);
         assert_eq!(response.packages[0].package_id, "example/package");
-        assert_eq!(response.packages[0].version, "0.46.0");
+        assert_eq!(response.packages[0].version, "0.49.0");
+        assert_eq!(response.packages[0].contracts.line, "0.49");
+        assert_eq!(response.packages[0].contracts.range, ">=0.49.0 <0.50.0");
+        assert_eq!(response.packages[0].source, PackageSourceV01::Workspace);
+        assert_eq!(response.packages[0].root, PackageRootKindV01::Package);
+        assert_eq!(response.packages[0].trust, PackageTrustV01::Trusted);
+        assert_eq!(
+            response.packages[0].provides.patches[0].id,
+            "example.package.main"
+        );
         assert_eq!(
             response.packages[0].manifest_path,
             RUNTIME_PACKAGE_MANIFEST_FILE
@@ -993,6 +1000,29 @@ mod tests {
                 .unwrap()
                 .get("manifestPath"),
             Some(&json!(RUNTIME_PACKAGE_MANIFEST_FILE))
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_projection_fields_fail_closed_under_contracts_049() {
+        let package_dir = temp_dir("legacy-projection-fields");
+        let body = valid_manifest("example/legacy-fields").replace(
+            "\"category\": \"patch\",",
+            r#""category": "patch",
+              "source": "workspace",
+              "root": "package",
+              "trust": "trusted","#,
+        );
+        write_package_manifest(&package_dir, &body);
+        let manager = RuntimePackageManager::with_package_dirs(vec![package_dir]);
+
+        let response = manager.list_packages();
+
+        assert!(!response.ok);
+        assert!(response.packages.is_empty());
+        assert_eq!(
+            codes(&response.diagnostics),
+            vec!["package.manifest.decode-failed"]
         );
     }
 

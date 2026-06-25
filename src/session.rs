@@ -2313,6 +2313,32 @@ fn paste_graph_fragment_into_graph_current(
     request: &PasteGraphFragmentRequest,
 ) -> Result<(GraphDocumentCurrent, IdRemapResult), (Vec<RuntimeOperationDiagnostic>, IdRemapResult)>
 {
+    if let Some(interface_policy) = request
+        .options
+        .as_ref()
+        .and_then(|options| options.interface_incident_edge_policy)
+    {
+        return Err((
+            vec![RuntimeOperationDiagnostic {
+                severity: "error".to_owned(),
+                code: "paste.options.unsupported-interface-incident-edge-policy".to_owned(),
+                message:
+                    "interfaceIncidentEdgePolicy is not supported by the current Runtime paste substrate"
+                        .to_owned(),
+                path: Some("request.options.interfaceIncidentEdgePolicy".to_owned()),
+                target: Some(request.target.clone()),
+                expected_revision: None,
+                actual_revision: Some(graph.revision.clone()),
+                duplicates: None,
+                nodes: None,
+                edges: None,
+                interface_policy: Some(interface_policy),
+                interface_detail: None,
+            }],
+            empty_id_remap(),
+        ));
+    }
+
     let outside_policy = request
         .options
         .as_ref()
@@ -2342,6 +2368,8 @@ fn paste_graph_fragment_into_graph_current(
                 duplicates: None,
                 nodes: diagnostic.nodes.clone(),
                 edges: diagnostic.edges.clone(),
+                interface_policy: None,
+                interface_detail: None,
             })
             .collect();
         return Err((
@@ -2675,6 +2703,8 @@ fn operation_error(
         duplicates,
         nodes: None,
         edges,
+        interface_policy: None,
+        interface_detail: None,
     }
 }
 
@@ -2692,6 +2722,8 @@ fn operation_diagnostics_from_validation_report(
         duplicates: None,
         nodes: None,
         edges: None,
+        interface_policy: None,
+        interface_detail: None,
     }]
 }
 
@@ -2718,6 +2750,8 @@ fn runtime_diagnostic_to_operation_diagnostic(
         duplicates: None,
         nodes: None,
         edges: None,
+        interface_policy: None,
+        interface_detail: None,
     }
 }
 
@@ -4274,6 +4308,7 @@ mod tests {
         operation.request.options = Some(skenion_contracts::PasteGraphFragmentOptions {
             outside_endpoint_policy: None,
             id_conflict_policy: Some(skenion_contracts::IdConflictPolicy::Reject),
+            interface_incident_edge_policy: None,
             preserve_relative_positions: None,
         });
 
@@ -4294,6 +4329,41 @@ mod tests {
                 .map(String::as_str),
             Some("value_1")
         );
+    }
+
+    #[test]
+    fn paste_graph_fragment_rejects_unsupported_interface_incident_edge_policy() {
+        let mut session = RuntimeSession::default();
+        load_sample_project(&mut session);
+        let mut operation = paste_operation("1");
+        operation.request.options = Some(skenion_contracts::PasteGraphFragmentOptions {
+            outside_endpoint_policy: None,
+            id_conflict_policy: Some(skenion_contracts::IdConflictPolicy::Remap),
+            interface_incident_edge_policy: Some(
+                skenion_contracts::InterfaceIncidentEdgePolicyV01::Reject,
+            ),
+            preserve_relative_positions: None,
+        });
+
+        let response = session.apply_runtime_operation(operation);
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(response.revision_after, None);
+        assert!(response.id_remap.node_id_map.is_empty());
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.options.unsupported-interface-incident-edge-policy"
+        );
+        assert_eq!(
+            response.diagnostics[0].path.as_deref(),
+            Some("request.options.interfaceIncidentEdgePolicy")
+        );
+        assert_eq!(
+            response.diagnostics[0].interface_policy,
+            Some(skenion_contracts::InterfaceIncidentEdgePolicyV01::Reject)
+        );
+        assert_eq!(session.snapshot().graph_revision(), Some("1"));
     }
 
     #[test]
@@ -4446,6 +4516,8 @@ mod tests {
                 duplicates: None,
                 nodes: None,
                 edges: None,
+                interface_policy: None,
+                interface_detail: None,
             });
         let info = super::operation_diagnostic_to_runtime_diagnostic(RuntimeOperationDiagnostic {
             severity: "info".to_owned(),
@@ -4458,6 +4530,8 @@ mod tests {
             duplicates: None,
             nodes: None,
             edges: None,
+            interface_policy: None,
+            interface_detail: None,
         });
         assert_eq!(warning.severity, crate::DiagnosticSeverity::Warning);
         assert_eq!(warning.code.as_deref(), Some("paste.warning"));
@@ -5089,6 +5163,7 @@ mod tests {
         edge_conflict.options = Some(skenion_contracts::PasteGraphFragmentOptions {
             outside_endpoint_policy: None,
             id_conflict_policy: Some(skenion_contracts::IdConflictPolicy::Reject),
+            interface_incident_edge_policy: None,
             preserve_relative_positions: None,
         });
         edge_conflict.fragment.nodes[0].id = "new_value".to_owned();
@@ -5558,6 +5633,7 @@ mod tests {
                 skenion_contracts::GraphFragmentOutsideEndpointPolicyV01::Omit,
             ),
             id_conflict_policy: Some(skenion_contracts::IdConflictPolicy::Remap),
+            interface_incident_edge_policy: None,
             preserve_relative_positions: Some(true),
         });
 

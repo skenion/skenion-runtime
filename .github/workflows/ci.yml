@@ -36,8 +36,8 @@ jobs:
           SKENION_RELEASE_PUBLIC_BASE_URL: https://cdn.dsub.io/skenion/releases
           SOURCE_COMMIT: "0000000000000000000000000000000000000000"
           RELEASE_TIER: release-blocking
-          CONTRACTS_VERSION: "0.46.0"
-          CONTRACTS_LINE: "0.46"
+          CONTRACTS_VERSION: "0.49.0"
+          CONTRACTS_LINE: "0.49"
         run: |
           mkdir -p dist
           asset="dist/skenion-runtime-v0.0.0-x86_64-unknown-linux-gnu.tar.gz"
@@ -68,7 +68,7 @@ jobs:
           assert manifest["target"] == "x86_64-unknown-linux-gnu"
           assert manifest["tier"] == "release-blocking"
           assert manifest["sourceCommit"] == "0000000000000000000000000000000000000000"
-          assert manifest["contracts"] == {"version": "0.46.0", "line": "0.46"}
+          assert manifest["contracts"] == {"version": "0.49.0", "line": "0.49"}
           assert manifest["artifact"]["s3"] == {
               "bucket": "skenion",
               "key": "releases/skenion-runtime/v0.0.0/x86_64-unknown-linux-gnu/skenion-runtime-v0.0.0-x86_64-unknown-linux-gnu.tar.gz",

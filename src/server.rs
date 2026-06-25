@@ -963,6 +963,8 @@ fn apply_session_operation_for(
                     duplicates: None,
                     nodes: None,
                     edges: None,
+                    interface_policy: None,
+                    interface_detail: None,
                 }],
             });
         }
@@ -1750,6 +1752,8 @@ fn invalid_paste_operation_response(
             duplicates: None,
             nodes: None,
             edges: None,
+            interface_policy: None,
+            interface_detail: None,
         }],
     }
 }
@@ -3154,6 +3158,12 @@ mod tests {
         assert_eq!(
             first_packages["packages"][0]["packageId"],
             "example/server-package"
+        );
+        assert_eq!(first_packages["packages"][0]["version"], "0.49.0");
+        assert_eq!(first_packages["packages"][0]["contracts"]["line"], "0.49");
+        assert_eq!(
+            first_packages["packages"][0]["provides"]["patches"][0]["id"],
+            "example.server-package.main"
         );
         assert_eq!(
             first_packages["packages"][0]["manifestPath"],
@@ -6882,6 +6892,7 @@ mod tests {
     }
 
     fn write_server_valid_package_manifest(package_dir: &Path, package_id: &str) {
+        let provided_id = package_id.replace('/', ".");
         write_server_package_manifest(
             package_dir,
             &format!(
@@ -6889,19 +6900,16 @@ mod tests {
                   "schema": "skenion.package.manifest",
                   "schemaVersion": "0.1.0",
                   "id": "{package_id}",
-                  "version": "0.46.0",
+                  "version": "0.49.0",
                   "category": "patch",
-                  "source": "workspace",
-                  "root": "package",
-                  "trust": "trusted",
                   "contracts": {{
-                    "line": "0.46",
-                    "range": ">=0.46.0 <0.47.0"
+                    "line": "0.49",
+                    "range": ">=0.49.0 <0.50.0"
                   }},
                   "provides": {{
                     "patches": [
                       {{
-                        "id": "{package_id}.main",
+                        "id": "{provided_id}.main",
                         "path": "patches/main.skenion.json"
                       }}
                     ]
