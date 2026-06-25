@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.9](https://github.com/skenion/skenion-runtime/compare/v0.47.8...v0.47.9) (2026-06-25)
+
+
+### Bug Fixes
+
+* **ci:** tighten runtime release cache gates ([41bebe6](https://github.com/skenion/skenion-runtime/commit/41bebe6bbc5650d23b8ca46bcd848d2d295844b3)), closes [#193](https://github.com/skenion/skenion-runtime/issues/193)
+
 ## [0.47.8](https://github.com/skenion/skenion-runtime/compare/v0.47.7...v0.47.8) (2026-06-25)
 
 
