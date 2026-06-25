@@ -37,26 +37,15 @@ runtime_platform_slug() {
   esac
 }
 
-runtime_archive_extension() {
+runtime_asset_filename() {
   case "$1" in
     *windows*)
-      printf '%s' "zip"
+      printf 'skenion-runtime-v%s-%s.exe' "$2" "$3"
       ;;
     *)
-      printf '%s' "tar.gz"
+      printf 'skenion-runtime-v%s-%s' "$2" "$3"
       ;;
   esac
-}
-
-find_python() {
-  if command -v python3 >/dev/null 2>&1; then
-    command -v python3
-  elif command -v python >/dev/null 2>&1; then
-    command -v python
-  else
-    echo "python3 or python is required for deterministic Runtime asset packaging." >&2
-    exit 1
-  fi
 }
 
 binary_name="skenion-runtime"
@@ -71,76 +60,12 @@ if [[ ! -f "${binary_path}" ]]; then
 fi
 
 platform_slug="$(runtime_platform_slug "${target}")"
-archive_extension="$(runtime_archive_extension "${target}")"
-asset_name="skenion-runtime-v${version}-${platform_slug}.${archive_extension}"
+asset_name="$(runtime_asset_filename "${target}" "${version}" "${platform_slug}")"
 asset_path="${output_dir}/${asset_name}"
 checksum_path="${asset_path}.sha256"
-python_bin="$(find_python)"
 
 mkdir -p "${output_dir}"
-
-"${python_bin}" - "${binary_path}" "${asset_path}" "${version}" "${target}" "${platform_slug}" "${archive_extension}" "${binary_name}" <<'PY'
-import gzip
-import io
-import os
-import sys
-import tarfile
-import zipfile
-
-binary_path, asset_path, version, target, platform_slug, archive_extension, binary_name = sys.argv[1:]
-package_name = f"skenion-runtime-v{version}-{platform_slug}"
-readme_bytes = (
-    f"skenion-runtime {version}\n"
-    f"Platform: {platform_slug}\n"
-    f"Target: {target}\n"
-).encode("utf-8")
-
-
-def tar_info(name, size, mode, type_=tarfile.REGTYPE):
-    info = tarfile.TarInfo(name)
-    info.size = size
-    info.mode = mode
-    info.uid = 0
-    info.gid = 0
-    info.uname = ""
-    info.gname = ""
-    info.mtime = 0
-    info.type = type_
-    return info
-
-
-def zip_info(name, mode):
-    info = zipfile.ZipInfo(name)
-    info.date_time = (1980, 1, 1, 0, 0, 0)
-    info.create_system = 3
-    info.external_attr = mode << 16
-    info.compress_type = zipfile.ZIP_DEFLATED
-    return info
-
-
-if archive_extension == "tar.gz":
-    with open(asset_path, "wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
-            with tarfile.open(fileobj=gz, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-                directory = tar_info(package_name, 0, 0o755, tarfile.DIRTYPE)
-                archive.addfile(directory)
-
-                readme_name = f"{package_name}/README.txt"
-                archive.addfile(tar_info(readme_name, len(readme_bytes), 0o644), io.BytesIO(readme_bytes))
-
-                binary_name_in_archive = f"{package_name}/{binary_name}"
-                binary_size = os.path.getsize(binary_path)
-                with open(binary_path, "rb") as binary:
-                    archive.addfile(tar_info(binary_name_in_archive, binary_size, 0o755), binary)
-elif archive_extension == "zip":
-    with zipfile.ZipFile(asset_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        archive.writestr(zip_info(f"{package_name}/", 0o755), b"")
-        archive.writestr(zip_info(f"{package_name}/README.txt", 0o644), readme_bytes)
-        with open(binary_path, "rb") as binary:
-            archive.writestr(zip_info(f"{package_name}/{binary_name}", 0o755), binary.read())
-else:
-    raise SystemExit(f"unsupported archive extension: {archive_extension}")
-PY
+cp "${binary_path}" "${asset_path}"
 
 if command -v sha256sum >/dev/null 2>&1; then
   (
@@ -163,7 +88,7 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "asset_path=${asset_path}"
     echo "checksum_path=${checksum_path}"
     echo "platform_slug=${platform_slug}"
-    echo "archive_extension=${archive_extension}"
+    echo "binary_format=raw-binary"
   } >>"${GITHUB_OUTPUT}"
 fi
 

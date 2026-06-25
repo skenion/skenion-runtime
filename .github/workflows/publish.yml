@@ -141,7 +141,7 @@ jobs:
             echo "- Runtime version: ${{ steps.package.outputs.version }}"
             echo "- Contracts line: ${{ steps.package.outputs.contracts_line }}"
             echo "- Contracts dependency version: ${{ steps.package.outputs.contracts_version }}"
-            echo "- Distribution: DSUB S3 Runtime binary artifacts"
+            echo "- Distribution: DSUB S3 Runtime raw binary artifacts"
           } >> "${GITHUB_STEP_SUMMARY}"
       - name: Verify released contracts crate
         run: |
@@ -151,7 +151,7 @@ jobs:
           fi
 
   runtime-assets:
-    name: runtime asset (${{ matrix.target }})
+    name: runtime asset (${{ matrix.platform_slug }})
     runs-on: ${{ matrix.runner }}
     needs: release
     continue-on-error: ${{ matrix.release_blocking == false }}
@@ -167,26 +167,32 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
+            platform_slug: macos-apple-silicon
             runner: macos-14
             release_blocking: true
             tier: release-blocking
           - target: x86_64-apple-darwin
+            platform_slug: macos-intel
             runner: macos-15-intel
             release_blocking: true
             tier: release-blocking
           - target: x86_64-pc-windows-msvc
+            platform_slug: windows-x64
             runner: windows-2022
             release_blocking: true
             tier: release-blocking
           - target: x86_64-unknown-linux-gnu
+            platform_slug: linux-x64
             runner: ubuntu-24.04
             release_blocking: true
             tier: release-blocking
           - target: aarch64-pc-windows-msvc
+            platform_slug: windows-arm64
             runner: windows-11-arm
             release_blocking: false
             tier: preview
           - target: aarch64-unknown-linux-gnu
+            platform_slug: linux-arm64
             runner: ubuntu-24.04-arm
             release_blocking: false
             tier: preview
@@ -327,7 +333,6 @@ jobs:
           {
             echo "## Runtime Asset"
             echo ""
-            echo "- Target: ${TARGET}"
             echo "- Platform slug: ${{ steps.package.outputs.platform_slug }}"
             echo "- Tier: ${{ matrix.tier }}"
             echo "- Asset: ${{ steps.package.outputs.asset_name }}"
@@ -342,7 +347,6 @@ jobs:
           {
             echo "## Runtime Asset"
             echo ""
-            echo "- Target: ${TARGET}"
             echo "- Platform slug: ${{ steps.existing.outputs.platform_slug }}"
             echo "- Tier: ${{ matrix.tier }}"
             echo "- Status: existing immutable DSUB S3 artifact; build/package/publish skipped"

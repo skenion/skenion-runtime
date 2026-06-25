@@ -89,33 +89,33 @@ import sys
 
 output_path, public_base, release_tag, version = sys.argv[1:]
 targets = [
-    ("macOS Apple Silicon", "macos-apple-silicon", "tar.gz", "release"),
-    ("macOS Intel", "macos-intel", "tar.gz", "release"),
-    ("Windows x64", "windows-x64", "zip", "release"),
-    ("Windows ARM64", "windows-arm64", "zip", "preview"),
-    ("Linux x64", "linux-x64", "tar.gz", "release"),
-    ("Linux ARM64", "linux-arm64", "tar.gz", "preview"),
+    ("macOS Apple Silicon", "macos-apple-silicon", "", "release"),
+    ("macOS Intel", "macos-intel", "", "release"),
+    ("Windows x64", "windows-x64", ".exe", "release"),
+    ("Windows ARM64", "windows-arm64", ".exe", "preview"),
+    ("Linux x64", "linux-x64", "", "release"),
+    ("Linux ARM64", "linux-arm64", "", "preview"),
 ]
 
-def archive_url(platform_slug: str, extension: str) -> str:
-    filename = f"skenion-runtime-v{version}-{platform_slug}.{extension}"
+def binary_url(platform_slug: str, extension: str) -> str:
+    filename = f"skenion-runtime-v{version}-{platform_slug}{extension}"
     return f"{public_base}/skenion-runtime/{release_tag}/{platform_slug}/{filename}"
 
 lines = [
     "<!-- skenion-runtime-downloads:start -->",
     "### Runtime Downloads",
     "",
-    "Runtime binary archives are served from DSUB S3. Use the SHA-256 file next to each archive to verify downloads.",
+    "Runtime binaries are served from DSUB S3. Use the SHA-256 file next to each binary to verify downloads.",
     "",
-    "| Platform | Tier | Archive | SHA-256 |",
+    "| Platform | Tier | Binary | SHA-256 |",
     "| --- | --- | --- | --- |",
 ]
 
 for platform, platform_slug, extension, tier in targets:
-    archive = archive_url(platform_slug, extension)
-    checksum = f"{archive}.sha256"
+    binary = binary_url(platform_slug, extension)
+    checksum = f"{binary}.sha256"
     lines.append(
-        f"| {platform} | {tier} | [{extension}]({archive}) | [sha256]({checksum}) |"
+        f"| {platform} | {tier} | [binary]({binary}) | [sha256]({checksum}) |"
     )
 
 lines.extend(["", "<!-- skenion-runtime-downloads:end -->", ""])
@@ -156,16 +156,14 @@ PY
 
 delete_manifest_assets() {
   local asset
-  local pattern_tar
-  local pattern_zip
+  local pattern_binary
 
-  pattern_tar="skenion-runtime-v${version}-*.tar.gz.manifest.json"
-  pattern_zip="skenion-runtime-v${version}-*.zip.manifest.json"
+  pattern_binary="skenion-runtime-v${version}-*.manifest.json"
   while IFS= read -r asset; do
-    # This pattern intentionally uses the target wildcard to remove all per-target manifest assets.
+    # This pattern intentionally uses the platform wildcard to remove all per-platform manifest assets.
     # shellcheck disable=SC2254
     case "${asset}" in
-      ${pattern_tar} | ${pattern_zip})
+      ${pattern_binary})
         gh release delete-asset "${release_tag}" "${asset}" --yes
         ;;
     esac

@@ -37,13 +37,13 @@ runtime_platform_slug() {
   esac
 }
 
-runtime_archive_extension() {
+runtime_asset_filename() {
   case "$1" in
     *windows*)
-      printf '%s' "zip"
+      printf 'skenion-runtime-v%s-%s.exe' "$2" "$3"
       ;;
     *)
-      printf '%s' "tar.gz"
+      printf 'skenion-runtime-v%s-%s' "$2" "$3"
       ;;
   esac
 }
@@ -120,8 +120,7 @@ if [[ "${SKENION_RELEASE_S3_FORCE_PATH_STYLE:-}" =~ ^(1|true|TRUE|yes|YES)$ ]]; 
 fi
 
 platform_slug="$(runtime_platform_slug "${target}")"
-archive_extension="$(runtime_archive_extension "${target}")"
-asset_name="skenion-runtime-v${version}-${platform_slug}.${archive_extension}"
+asset_name="$(runtime_asset_filename "${target}" "${version}" "${platform_slug}")"
 checksum_name="${asset_name}.sha256"
 manifest_name="${asset_name}.manifest.json"
 prefix="$(trim_slashes "${SKENION_RELEASE_S3_PREFIX}")"
@@ -154,7 +153,7 @@ with open(sys.argv[2], encoding="utf-8") as fh:
 
 metadata = head.get("Metadata") or {}
 
-if field in {"sha256", "component", "target", "runtime-version", "source-tag", "source-commit"}:
+if field in {"sha256", "component", "target", "binary-format", "runtime-version", "source-tag", "source-commit"}:
     print(metadata.get(field, ""))
 elif field == "size":
     print(head.get("ContentLength", ""))
@@ -173,11 +172,13 @@ summarize_existing_metadata() {
   local actual_version
   local actual_tag
   local actual_commit
+  local actual_binary_format
 
   actual_sha="$(read_head_field sha256 "${head_json}")"
   actual_size="$(read_head_field size "${head_json}")"
   actual_component="$(read_head_field component "${head_json}")"
   actual_target="$(read_head_field target "${head_json}")"
+  actual_binary_format="$(read_head_field binary-format "${head_json}")"
   actual_version="$(read_head_field runtime-version "${head_json}")"
   actual_tag="$(read_head_field source-tag "${head_json}")"
   actual_commit="$(read_head_field source-commit "${head_json}")"
@@ -187,7 +188,7 @@ summarize_existing_metadata() {
     exit 1
   fi
 
-  if [[ -n "${actual_sha}${actual_component}${actual_target}${actual_version}${actual_tag}${actual_commit}" ]]; then
+  if [[ -n "${actual_sha}${actual_component}${actual_target}${actual_binary_format}${actual_version}${actual_tag}${actual_commit}" ]]; then
     echo "found existing Runtime release ${label} with S3 metadata: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
   else
     echo "found existing Runtime release ${label} without S3 metadata: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
@@ -238,7 +239,7 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "checksum_name=${checksum_name}"
     echo "manifest_name=${manifest_name}"
     echo "platform_slug=${platform_slug}"
-    echo "archive_extension=${archive_extension}"
+    echo "binary_format=raw-binary"
   } >>"${GITHUB_OUTPUT}"
 fi
 

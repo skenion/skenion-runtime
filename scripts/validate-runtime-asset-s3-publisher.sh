@@ -7,7 +7,7 @@ existing_checker="${repo_root}/scripts/check-runtime-asset-s3-existing.sh"
 tmp_root="$(mktemp -d)"
 target="x86_64-unknown-linux-gnu"
 platform_slug="linux-x64"
-archive_extension="tar.gz"
+binary_format="raw-binary"
 version="1.2.3"
 release_tag="v1.2.3"
 source_commit="1111111111111111111111111111111111111111"
@@ -64,7 +64,7 @@ sha256=${sha}
 component=skenion-runtime
 target=${target}
 platform-slug=${platform_slug}
-archive-format=${archive_extension}
+binary-format=${binary_format}
 runtime-version=${version}
 source-tag=${release_tag}
 source-commit=${source_commit}
@@ -213,7 +213,7 @@ sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 component=skenion-runtime
 target=x86_64-unknown-linux-gnu
 platform-slug=linux-x64
-archive-format=tar.gz
+binary-format=raw-binary
 runtime-version=1.2.3
 source-tag=v1.2.3
 source-commit=1111111111111111111111111111111111111111
@@ -351,7 +351,7 @@ prepare_case() {
   local case_dir="$1"
   local content="$2"
   local asset_dir="${case_dir}/dist"
-  local asset_path="${asset_dir}/skenion-runtime-v${version}-${platform_slug}.${archive_extension}"
+  local asset_path="${asset_dir}/skenion-runtime-v${version}-${platform_slug}"
 
   mkdir -p "${asset_dir}"
   printf '%s\n' "${content}" >"${asset_path}"
@@ -360,7 +360,7 @@ prepare_case() {
 
 asset_path_for() {
   local case_dir="$1"
-  printf '%s/dist/skenion-runtime-v%s-%s.%s' "${case_dir}" "${version}" "${platform_slug}" "${archive_extension}"
+  printf '%s/dist/skenion-runtime-v%s-%s' "${case_dir}" "${version}" "${platform_slug}"
 }
 
 object_path_for_key() {
@@ -631,15 +631,17 @@ assert manifest["releaseTag"] == "v1.2.3"
 assert manifest["target"] == "x86_64-unknown-linux-gnu"
 assert manifest["rustTargetTriple"] == "x86_64-unknown-linux-gnu"
 assert manifest["platformSlug"] == "linux-x64"
-assert manifest["artifact"]["archiveFormat"] == "tar.gz"
+assert manifest["artifact"]["binaryFormat"] == "raw-binary"
+assert manifest["artifact"]["executableName"] == "skenion-runtime-v1.2.3-linux-x64"
 assert manifest["artifact"]["s3"]["bucket"] == "skenion"
+assert manifest["artifact"]["s3"]["key"].endswith("/linux-x64/skenion-runtime-v1.2.3-linux-x64")
 assert "/linux-x64/" in manifest["artifact"]["publicUrl"]
 assert "unknown-linux-gnu" not in manifest["artifact"]["publicUrl"]
 assert manifest["checksum"]["publicUrl"].endswith(".sha256")
 assert manifest["manifest"]["publicUrl"].endswith(".manifest.json")
 PY
 
-  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/linux-x64/.*\.tar\.gz$'
+  assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/linux-x64/skenion-runtime-v1\.2\.3-linux-x64$'
   assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/linux-x64/.*\.sha256$'
   assert_contains "${case_dir}/curl.log" '^HEAD skenion-runtime/v1\.2\.3/linux-x64/.*\.manifest\.json$'
 }
@@ -653,7 +655,7 @@ assert_upload_missing_s3_metadata_is_not_a_failure_case() {
   assert_put_count "${case_dir}" 3
   assert_no_head_after_put_for_same_key "${case_dir}"
   assert_not_contains "${case_dir}/output.log" 'S3 metadata does not match expected immutable artifact'
-  assert_contains "${case_dir}/output.log" 'uploaded Runtime release object: s3://skenion/releases/skenion-runtime/v1\.2\.3/linux-x64/.*\.tar\.gz'
+  assert_contains "${case_dir}/output.log" 'uploaded Runtime release object: s3://skenion/releases/skenion-runtime/v1\.2\.3/linux-x64/skenion-runtime-v1\.2\.3-linux-x64'
 }
 
 assert_public_head_retry_case() {
@@ -665,7 +667,7 @@ assert_public_head_retry_case() {
   assert_no_body_downloads "${case_dir}"
   assert_contains "${case_dir}/output.log" 'public Runtime release asset .* is not ready on attempt 1/3: HEAD request failed; retrying in 0s'
   assert_contains "${case_dir}/output.log" 'public Runtime release asset .* is not ready on attempt 2/3: HEAD request failed; retrying in 0s'
-  head_count="$(grep -c '^HEAD skenion-runtime/v1\.2\.3/linux-x64/.*\.tar\.gz$' "${case_dir}/curl.log" || true)"
+  head_count="$(grep -c '^HEAD skenion-runtime/v1\.2\.3/linux-x64/skenion-runtime-v1\.2\.3-linux-x64$' "${case_dir}/curl.log" || true)"
   if [[ "${head_count}" != "3" ]]; then
     sed 's/^/[curl] /' "${case_dir}/curl.log" >&2
     fail "expected public asset HEAD to be retried until third attempt, saw ${head_count}"

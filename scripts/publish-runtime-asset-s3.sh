@@ -72,30 +72,19 @@ runtime_platform_slug() {
   esac
 }
 
-runtime_archive_extension() {
+runtime_asset_filename() {
   case "$1" in
     *windows*)
-      printf '%s' "zip"
+      printf 'skenion-runtime-v%s-%s.exe' "$2" "$3"
       ;;
     *)
-      printf '%s' "tar.gz"
+      printf 'skenion-runtime-v%s-%s' "$2" "$3"
       ;;
   esac
 }
 
-runtime_archive_content_type() {
-  case "$1" in
-    zip)
-      printf '%s' "application/zip"
-      ;;
-    tar.gz)
-      printf '%s' "application/gzip"
-      ;;
-    *)
-      echo "unsupported Runtime archive extension: $1" >&2
-      exit 1
-      ;;
-  esac
+runtime_binary_content_type() {
+  printf '%s' "application/octet-stream"
 }
 
 require_env() {
@@ -209,12 +198,16 @@ fi
 asset_name="$(basename "${asset_path}")"
 checksum_name="$(basename "${checksum_path}")"
 platform_slug="$(runtime_platform_slug "${target}")"
-archive_extension="$(runtime_archive_extension "${target}")"
-archive_content_type="$(runtime_archive_content_type "${archive_extension}")"
-expected_asset_name="skenion-runtime-v${version}-${platform_slug}.${archive_extension}"
+binary_format="raw-binary"
+binary_content_type="$(runtime_binary_content_type)"
+expected_asset_name="$(runtime_asset_filename "${target}" "${version}" "${platform_slug}")"
 expected_checksum_name="${expected_asset_name}.sha256"
 if [[ "${asset_name}" != "${expected_asset_name}" ]]; then
-  echo "Runtime release asset filename must use public platform slug '${platform_slug}', got: ${asset_name}" >&2
+  echo "Runtime release asset filename must use versioned public platform slug '${platform_slug}', got: ${asset_name}" >&2
+  exit 1
+fi
+if [[ "${asset_name}" == *.tar.gz || "${asset_name}" == *.zip || "${asset_name}" != skenion-runtime-v"${version}"-"${platform_slug}"* ]]; then
+  echo "Runtime release asset filename must be a raw binary and include '-v${version}-': ${asset_name}" >&2
   exit 1
 fi
 if [[ "${checksum_name}" != "${expected_checksum_name}" ]]; then
@@ -253,7 +246,8 @@ export RUNTIME_RELEASE_VERSION="${version}"
 export RUNTIME_RELEASE_TAG="${release_tag}"
 export RUNTIME_RELEASE_TARGET="${target}"
 export RUNTIME_RELEASE_PLATFORM_SLUG="${platform_slug}"
-export RUNTIME_RELEASE_ARCHIVE_FORMAT="${archive_extension}"
+export RUNTIME_RELEASE_BINARY_FORMAT="${binary_format}"
+export RUNTIME_RELEASE_EXECUTABLE_NAME="${asset_name}"
 export RUNTIME_RELEASE_TIER="${release_tier}"
 export RUNTIME_RELEASE_SOURCE_COMMIT="${source_commit}"
 export RUNTIME_RELEASE_CONTRACTS_VERSION="${contracts_version}"
@@ -295,7 +289,8 @@ manifest = {
     },
     "artifact": {
         "filename": os.environ["RUNTIME_RELEASE_ASSET_NAME"],
-        "archiveFormat": os.environ["RUNTIME_RELEASE_ARCHIVE_FORMAT"],
+        "binaryFormat": os.environ["RUNTIME_RELEASE_BINARY_FORMAT"],
+        "executableName": os.environ["RUNTIME_RELEASE_EXECUTABLE_NAME"],
         "sha256": os.environ["RUNTIME_RELEASE_ASSET_SHA256"],
         "size": int(os.environ["RUNTIME_RELEASE_ASSET_SIZE"]),
         "s3": {
@@ -402,7 +397,7 @@ with open(sys.argv[2], encoding="utf-8") as fh:
 
 metadata = head.get("Metadata") or {}
 
-if field in {"sha256", "component", "target", "platform-slug", "archive-format", "runtime-version", "source-tag", "source-commit"}:
+if field in {"sha256", "component", "target", "platform-slug", "binary-format", "runtime-version", "source-tag", "source-commit"}:
     print(metadata.get(field, ""))
 elif field == "size":
     print(head.get("ContentLength", ""))
@@ -424,14 +419,14 @@ PY
     local actual_tag
     local actual_commit
     local actual_platform_slug
-    local actual_archive_format
+    local actual_binary_format
 
     actual_sha="$(read_s3_head_field sha256 "${head_json}")"
     actual_size="$(read_s3_head_field size "${head_json}")"
     actual_component="$(read_s3_head_field component "${head_json}")"
     actual_target="$(read_s3_head_field target "${head_json}")"
     actual_platform_slug="$(read_s3_head_field platform-slug "${head_json}")"
-    actual_archive_format="$(read_s3_head_field archive-format "${head_json}")"
+    actual_binary_format="$(read_s3_head_field binary-format "${head_json}")"
     actual_version="$(read_s3_head_field runtime-version "${head_json}")"
     actual_tag="$(read_s3_head_field source-tag "${head_json}")"
     actual_commit="$(read_s3_head_field source-commit "${head_json}")"
@@ -441,7 +436,7 @@ PY
       && "${actual_component}" == "skenion-runtime" \
       && "${actual_target}" == "${target}" \
       && "${actual_platform_slug}" == "${platform_slug}" \
-      && "${actual_archive_format}" == "${archive_extension}" \
+      && "${actual_binary_format}" == "${binary_format}" \
       && "${actual_version}" == "${version}" \
       && "${actual_tag}" == "${release_tag}" \
       && "${actual_commit}" == "${source_commit}" ]]; then
@@ -449,8 +444,8 @@ PY
     fi
 
     echo "Runtime release ${label} S3 metadata does not match expected immutable artifact: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
-    echo "expected sha256=${expected_sha} size=${expected_size} component=skenion-runtime target=${target} platform-slug=${platform_slug} archive-format=${archive_extension} runtime-version=${version} source-tag=${release_tag} source-commit=${source_commit}" >&2
-    echo "actual sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>} component=${actual_component:-<missing>} target=${actual_target:-<missing>} platform-slug=${actual_platform_slug:-<missing>} archive-format=${actual_archive_format:-<missing>} runtime-version=${actual_version:-<missing>} source-tag=${actual_tag:-<missing>} source-commit=${actual_commit:-<missing>}" >&2
+    echo "expected sha256=${expected_sha} size=${expected_size} component=skenion-runtime target=${target} platform-slug=${platform_slug} binary-format=${binary_format} runtime-version=${version} source-tag=${release_tag} source-commit=${source_commit}" >&2
+    echo "actual sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>} component=${actual_component:-<missing>} target=${actual_target:-<missing>} platform-slug=${actual_platform_slug:-<missing>} binary-format=${actual_binary_format:-<missing>} runtime-version=${actual_version:-<missing>} source-tag=${actual_tag:-<missing>} source-commit=${actual_commit:-<missing>}" >&2
     return 1
   }
 
@@ -466,14 +461,14 @@ PY
     local actual_tag
     local actual_commit
     local actual_platform_slug
-    local actual_archive_format
+    local actual_binary_format
 
     actual_sha="$(read_s3_head_field sha256 "${head_json}")"
     actual_size="$(read_s3_head_field size "${head_json}")"
     actual_component="$(read_s3_head_field component "${head_json}")"
     actual_target="$(read_s3_head_field target "${head_json}")"
     actual_platform_slug="$(read_s3_head_field platform-slug "${head_json}")"
-    actual_archive_format="$(read_s3_head_field archive-format "${head_json}")"
+    actual_binary_format="$(read_s3_head_field binary-format "${head_json}")"
     actual_version="$(read_s3_head_field runtime-version "${head_json}")"
     actual_tag="$(read_s3_head_field source-tag "${head_json}")"
     actual_commit="$(read_s3_head_field source-commit "${head_json}")"
@@ -485,7 +480,7 @@ PY
       return 1
     fi
 
-    if [[ -z "${actual_sha}${actual_component}${actual_target}${actual_platform_slug}${actual_archive_format}${actual_version}${actual_tag}${actual_commit}" ]]; then
+    if [[ -z "${actual_sha}${actual_component}${actual_target}${actual_platform_slug}${actual_binary_format}${actual_version}${actual_tag}${actual_commit}" ]]; then
       echo "object already exists without immutable metadata and matching size: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
       return 0
     fi
@@ -534,7 +529,7 @@ PY
       --key "${key}" \
       --body "${path}" \
       --content-type "${content_type}" \
-      --metadata "sha256=${sha},component=skenion-runtime,target=${target},platform-slug=${platform_slug},archive-format=${archive_extension},runtime-version=${version},source-tag=${release_tag},source-commit=${source_commit}" \
+      --metadata "sha256=${sha},component=skenion-runtime,target=${target},platform-slug=${platform_slug},binary-format=${binary_format},runtime-version=${version},source-tag=${release_tag},source-commit=${source_commit}" \
       --if-none-match '*' >/dev/null 2>"${head_err}"; then
       echo "failed to conditionally upload Runtime release artifact without overwriting: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
       cat "${head_err}" >&2
@@ -629,7 +624,7 @@ PY
     exit 1
   }
 
-  upload_object "${asset_path}" "${asset_key}" "${asset_sha}" "${asset_size}" "${archive_content_type}"
+  upload_object "${asset_path}" "${asset_key}" "${asset_sha}" "${asset_size}" "${binary_content_type}"
   upload_object "${checksum_path}" "${checksum_key}" "${checksum_sha}" "${checksum_size}" "text/plain"
   upload_object "${manifest_path}" "${manifest_key}" "${manifest_sha}" "${manifest_size}" "application/json"
 
@@ -650,6 +645,6 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "checksum_key=${checksum_key}"
     echo "manifest_key=${manifest_key}"
     echo "platform_slug=${platform_slug}"
-    echo "archive_extension=${archive_extension}"
+    echo "binary_format=${binary_format}"
   } >>"${GITHUB_OUTPUT}"
 fi

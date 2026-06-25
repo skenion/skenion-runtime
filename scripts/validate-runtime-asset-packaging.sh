@@ -31,7 +31,7 @@ validate_checksums_match() {
   local expected_sha
 
   if ! cmp -s "${asset_a}" "${asset_b}"; then
-    echo "same Runtime packaging inputs produced different archive bytes" >&2
+    echo "same Runtime packaging inputs produced different binary bytes" >&2
     echo "first sha256=$(sha256_file "${asset_a}")" >&2
     echo "second sha256=$(sha256_file "${asset_b}")" >&2
     exit 1
@@ -72,75 +72,24 @@ package_twice() {
   )
 
   validate_checksums_match "${tmp_root}/dist-a/${asset_name}" "${tmp_root}/dist-b/${asset_name}"
+  if ! cmp -s "${binary_dir}/${binary_name}" "${tmp_root}/dist-a/${asset_name}"; then
+    echo "packaged Runtime asset does not match built executable bytes" >&2
+    exit 1
+  fi
 }
 
 linux_work_dir="${tmp_root}/linux-work"
 linux_target="x86_64-unknown-linux-gnu"
 linux_slug="linux-x64"
-linux_asset_name="skenion-runtime-v${version}-${linux_slug}.tar.gz"
+linux_asset_name="skenion-runtime-v${version}-${linux_slug}"
 package_twice "${linux_work_dir}" "${linux_target}" "skenion-runtime" "${linux_asset_name}"
-
-python3 - "${tmp_root}/dist-a/${linux_asset_name}" "${version}" "${linux_target}" "${linux_slug}" <<'PY'
-import gzip
-import sys
-import tarfile
-
-asset_path, version, target, platform_slug = sys.argv[1:]
-package_name = f"skenion-runtime-v{version}-{platform_slug}"
-expected_names = [
-    package_name,
-    f"{package_name}/README.txt",
-    f"{package_name}/skenion-runtime",
-]
-
-with open(asset_path, "rb") as fh:
-    header = fh.read(10)
-assert header[4:8] == b"\x00\x00\x00\x00", header
-
-with gzip.open(asset_path, "rb") as gz:
-    with tarfile.open(fileobj=gz, mode="r:") as archive:
-        members = archive.getmembers()
-        assert [member.name for member in members] == expected_names
-        assert [member.mtime for member in members] == [0, 0, 0]
-        assert [member.uid for member in members] == [0, 0, 0]
-        assert [member.gid for member in members] == [0, 0, 0]
-        assert [member.uname for member in members] == ["", "", ""]
-        assert [member.gname for member in members] == ["", "", ""]
-        assert [oct(member.mode) for member in members] == ["0o755", "0o644", "0o755"]
-        assert members[0].isdir()
-        assert members[1].isfile()
-        assert members[2].isfile()
-        readme = archive.extractfile(members[1]).read().decode("utf-8")
-        assert readme == f"skenion-runtime {version}\nPlatform: {platform_slug}\nTarget: {target}\n"
-PY
 
 rm -rf "${tmp_root}/dist-a" "${tmp_root}/dist-b"
 
 windows_work_dir="${tmp_root}/windows-work"
 windows_target="x86_64-pc-windows-msvc"
 windows_slug="windows-x64"
-windows_asset_name="skenion-runtime-v${version}-${windows_slug}.zip"
+windows_asset_name="skenion-runtime-v${version}-${windows_slug}.exe"
 package_twice "${windows_work_dir}" "${windows_target}" "skenion-runtime.exe" "${windows_asset_name}"
-
-python3 - "${tmp_root}/dist-a/${windows_asset_name}" "${version}" "${windows_target}" "${windows_slug}" <<'PY'
-import sys
-import zipfile
-
-asset_path, version, target, platform_slug = sys.argv[1:]
-package_name = f"skenion-runtime-v{version}-{platform_slug}"
-expected_names = [
-    f"{package_name}/",
-    f"{package_name}/README.txt",
-    f"{package_name}/skenion-runtime.exe",
-]
-
-with zipfile.ZipFile(asset_path) as archive:
-    members = archive.infolist()
-    assert [member.filename for member in members] == expected_names
-    assert [member.date_time for member in members] == [(1980, 1, 1, 0, 0, 0)] * 3
-    assert [oct(member.external_attr >> 16) for member in members] == ["0o755", "0o644", "0o755"]
-    readme = archive.read(f"{package_name}/README.txt").decode("utf-8")
-    assert readme == f"skenion-runtime {version}\nPlatform: {platform_slug}\nTarget: {target}\n"
-PY
 
 echo "Runtime asset packaging validation passed."

@@ -40,7 +40,7 @@ jobs:
           CONTRACTS_LINE: "0.49"
         run: |
           mkdir -p dist
-          asset="dist/skenion-runtime-v0.0.0-linux-x64.tar.gz"
+          asset="dist/skenion-runtime-v0.0.0-linux-x64"
           printf 'runtime dry-run artifact\n' >"${asset}"
           (
             cd dist
@@ -71,10 +71,11 @@ jobs:
           assert manifest["tier"] == "release-blocking"
           assert manifest["sourceCommit"] == "0000000000000000000000000000000000000000"
           assert manifest["contracts"] == {"version": "0.49.0", "line": "0.49"}
-          assert manifest["artifact"]["archiveFormat"] == "tar.gz"
+          assert manifest["artifact"]["binaryFormat"] == "raw-binary"
+          assert manifest["artifact"]["executableName"] == "skenion-runtime-v0.0.0-linux-x64"
           assert manifest["artifact"]["s3"] == {
               "bucket": "skenion",
-              "key": "releases/skenion-runtime/v0.0.0/linux-x64/skenion-runtime-v0.0.0-linux-x64.tar.gz",
+              "key": "releases/skenion-runtime/v0.0.0/linux-x64/skenion-runtime-v0.0.0-linux-x64",
           }
           assert manifest["checksum"]["publicUrl"].endswith(".sha256")
           assert manifest["manifest"]["publicUrl"].endswith(".manifest.json")
@@ -103,14 +104,18 @@ jobs:
             0.0.0
 
           grep -q '### Runtime Downloads' "${output}"
-          grep -q 'skenion-runtime/v0.0.0/macos-apple-silicon/skenion-runtime-v0.0.0-macos-apple-silicon.tar.gz' "${output}"
-          grep -q 'skenion-runtime/v0.0.0/windows-x64/skenion-runtime-v0.0.0-windows-x64.zip.sha256' "${output}"
+          grep -q 'skenion-runtime/v0.0.0/macos-apple-silicon/skenion-runtime-v0.0.0-macos-apple-silicon' "${output}"
+          grep -q 'skenion-runtime/v0.0.0/windows-x64/skenion-runtime-v0.0.0-windows-x64.exe.sha256' "${output}"
           if grep -q 'unknown-linux-gnu' "${output}"; then
             echo "::error::Release notes must not surface Rust target triples in public Runtime download links."
             exit 1
           fi
           if grep -Eq 'windows-(x64|arm64)[^[:space:])]*\.tar\.gz' "${output}"; then
-            echo "::error::Windows Runtime public archives must use .zip."
+            echo "::error::Windows Runtime public binaries must use .exe."
+            exit 1
+          fi
+          if grep -Eq 'skenion-runtime-v[0-9]+\.[0-9]+\.[0-9]+-[^[:space:])]*(\.tar\.gz|\.zip)' "${output}"; then
+            echo "::error::Release notes must not surface Runtime tar.gz or zip archives."
             exit 1
           fi
           if grep -q 'manifest.json' "${output}"; then
