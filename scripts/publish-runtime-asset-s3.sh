@@ -310,31 +310,11 @@ else
     if aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3api head-object \
       --bucket "${SKENION_RELEASE_S3_BUCKET}" \
       --key "${key}" >"${head_json}" 2>"${head_err}"; then
-      local actual_sha
-      local actual_size
-      actual_sha="$("${python_bin}" - "${head_json}" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as fh:
-    head = json.load(fh)
-print((head.get("Metadata") or {}).get("sha256", ""))
-PY
-)"
-      actual_size="$("${python_bin}" - "${head_json}" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as fh:
-    head = json.load(fh)
-print(head.get("ContentLength", ""))
-PY
-)"
-      if [[ "${actual_sha}" == "${expected_sha}" && "${actual_size}" == "${expected_size}" ]]; then
-        echo "object already exists with matching checksum and size: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
+      if s3_object_matches_expected_content "${key}" "${expected_sha}" "${expected_size}" "existing object"; then
+        echo "object already exists with matching content: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
         return 0
       fi
       echo "refusing to overwrite existing Runtime release artifact: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
-      echo "expected sha256=${expected_sha} size=${expected_size}" >&2
-      echo "existing sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>}" >&2
       exit 1
     fi
 
@@ -347,13 +327,86 @@ PY
     exit 1
   }
 
-  verify_s3_object_metadata() {
+  read_s3_head_field() {
+    local field="$1"
+    local path="$2"
+
+    "${python_bin}" - "${field}" "${path}" <<'PY'
+import json
+import sys
+
+field = sys.argv[1]
+with open(sys.argv[2], encoding="utf-8") as fh:
+    head = json.load(fh)
+
+if field == "sha256":
+    print((head.get("Metadata") or {}).get("sha256", ""))
+elif field == "size":
+    print(head.get("ContentLength", ""))
+else:
+    raise SystemExit(f"unsupported head field: {field}")
+PY
+  }
+
+  download_s3_object_for_sha256() {
+    local key="$1"
+    local output_path="$2"
+
+    aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3 cp \
+      "s3://${SKENION_RELEASE_S3_BUCKET}/${key}" \
+      "${output_path}" \
+      --no-progress
+  }
+
+  s3_object_matches_expected_content() {
     local key="$1"
     local expected_sha="$2"
     local expected_size="$3"
     local label="$4"
     local actual_sha
     local actual_size
+    local downloaded_path
+    local downloaded_sha
+    local downloaded_size
+
+    actual_sha="$(read_s3_head_field sha256 "${head_json}")"
+    actual_size="$(read_s3_head_field size "${head_json}")"
+
+    if [[ "${actual_size}" != "${expected_size}" ]]; then
+      echo "Runtime release ${label} size does not match local file: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
+      echo "expected sha256=${expected_sha} size=${expected_size}" >&2
+      echo "actual sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>}" >&2
+      return 1
+    fi
+
+    downloaded_path="$(mktemp)"
+    if ! download_s3_object_for_sha256 "${key}" "${downloaded_path}"; then
+      rm -f "${downloaded_path}"
+      echo "failed to download Runtime release ${label} for authenticated checksum verification: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
+      return 1
+    fi
+
+    downloaded_sha="$(sha256_file "${downloaded_path}")"
+    downloaded_size="$(file_size "${downloaded_path}")"
+    rm -f "${downloaded_path}"
+
+    if [[ "${downloaded_sha}" != "${expected_sha}" || "${downloaded_size}" != "${expected_size}" ]]; then
+      echo "Runtime release ${label} content does not match local file after authenticated S3 download: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
+      echo "expected sha256=${expected_sha} size=${expected_size}" >&2
+      echo "head sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>}" >&2
+      echo "downloaded sha256=${downloaded_sha} size=${downloaded_size}" >&2
+      return 1
+    fi
+
+    echo "Runtime release ${label} content matches by authenticated S3 download; head metadata sha256=${actual_sha:-<missing>}"
+    return 0
+  }
+
+  verify_s3_object_content() {
+    local key="$1"
+    local expected_sha="$2"
+    local expected_size="$3"
+    local label="$4"
 
     if ! aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3api head-object \
       --bucket "${SKENION_RELEASE_S3_BUCKET}" \
@@ -363,27 +416,7 @@ PY
       exit 1
     fi
 
-    actual_sha="$("${python_bin}" - "${head_json}" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as fh:
-    head = json.load(fh)
-print((head.get("Metadata") or {}).get("sha256", ""))
-PY
-)"
-    actual_size="$("${python_bin}" - "${head_json}" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as fh:
-    head = json.load(fh)
-print(head.get("ContentLength", ""))
-PY
-)"
-
-    if [[ "${actual_sha}" != "${expected_sha}" || "${actual_size}" != "${expected_size}" ]]; then
-      echo "uploaded Runtime release ${label} metadata does not match local file: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
-      echo "expected sha256=${expected_sha} size=${expected_size}" >&2
-      echo "actual sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>}" >&2
+    if ! s3_object_matches_expected_content "${key}" "${expected_sha}" "${expected_size}" "${label}"; then
       exit 1
     fi
   }
@@ -399,12 +432,19 @@ PY
       return 0
     fi
 
-    aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3 cp "${path}" "s3://${SKENION_RELEASE_S3_BUCKET}/${key}" \
-      --no-progress \
+    if ! aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3api put-object \
+      --bucket "${SKENION_RELEASE_S3_BUCKET}" \
+      --key "${key}" \
+      --body "${path}" \
       --content-type "${content_type}" \
-      --metadata "sha256=${sha},component=skenion-runtime,target=${target},runtime-version=${version},source-tag=${release_tag},source-commit=${source_commit}"
+      --metadata "sha256=${sha},component=skenion-runtime,target=${target},runtime-version=${version},source-tag=${release_tag},source-commit=${source_commit}" \
+      --if-none-match '*' >/dev/null 2>"${head_err}"; then
+      echo "failed to conditionally upload Runtime release artifact without overwriting: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
+      cat "${head_err}" >&2
+      exit 1
+    fi
 
-    verify_s3_object_metadata "${key}" "${sha}" "${size}" "$(basename "${path}")"
+    verify_s3_object_content "${key}" "${sha}" "${size}" "$(basename "${path}")"
   }
 
   verify_public_content_length() {
