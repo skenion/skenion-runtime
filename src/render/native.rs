@@ -774,6 +774,15 @@ fn write_bytes(bytes: &mut Vec<u8>, offset: usize, value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    use crate::{
+        ControlState, ExecutionPlan, GraphDocument, GraphNode,
+        render::{
+            PREVIEW_DOCUMENT_SCHEMA, PREVIEW_DOCUMENT_SCHEMA_VERSION, RENDER_CLEAR_COLOR_KIND,
+            RENDER_OUTPUT_KIND,
+        },
+    };
 
     #[test]
     fn maps_scene_color_to_wgpu_color() {
@@ -806,6 +815,10 @@ mod tests {
                     value: ShaderUniformValue::I32(8),
                 },
                 ShaderUniformBinding {
+                    id: "seed".to_owned(),
+                    value: ShaderUniformValue::U32(42),
+                },
+                ShaderUniformBinding {
                     id: "tint".to_owned(),
                     value: ShaderUniformValue::ColorRgba([1.0, 0.5, 0.25, 0.8]),
                 },
@@ -819,6 +832,7 @@ mod tests {
         assert_eq!(read_f32(&uniform.bytes, 16), 0.75);
         assert_eq!(read_u32(&uniform.bytes, 20), 1);
         assert_eq!(read_i32(&uniform.bytes, 24), 8);
+        assert_eq!(read_u32(&uniform.bytes, 28), 42);
         assert_eq!(read_f32(&uniform.bytes, 32), 1.0);
         assert_eq!(read_f32(&uniform.bytes, 36), 0.5);
         assert_eq!(read_f32(&uniform.bytes, 40), 0.25);
@@ -848,6 +862,18 @@ mod tests {
                     id: "enabled".to_owned(),
                     value: ShaderUniformValue::Bool(true),
                 },
+                ShaderUniformBinding {
+                    id: "iterations".to_owned(),
+                    value: ShaderUniformValue::I32(8),
+                },
+                ShaderUniformBinding {
+                    id: "seed".to_owned(),
+                    value: ShaderUniformValue::U32(42),
+                },
+                ShaderUniformBinding {
+                    id: "tint".to_owned(),
+                    value: ShaderUniformValue::ColorRgba([1.0, 0.5, 0.25, 0.8]),
+                },
             ],
             fallback_clear_color: [0.0, 0.0, 0.0, 1.0],
         };
@@ -857,6 +883,9 @@ mod tests {
 
         assert!(source.contains("speed: f32"));
         assert!(source.contains("enabled: u32"));
+        assert!(source.contains("iterations: i32"));
+        assert!(source.contains("seed: u32"));
+        assert!(source.contains("tint: vec4<f32>"));
         assert!(source.contains("fn sk_bool(value: u32) -> bool"));
         assert!(source.contains("fn vs_main"));
         assert!(source.contains("fn fs_main"));
@@ -865,6 +894,52 @@ mod tests {
             generated.source_map.user_source_start_line
         );
         assert!(generated.source_map.user_source_start_line > 1);
+    }
+
+    #[test]
+    fn generated_shader_response_reports_clear_color_without_shader_source() {
+        let document = preview_document_with_nodes(vec![clear_color_node()]);
+
+        let response = generated_shader_response_from_preview_document(&document);
+
+        assert!(!response.ok);
+        assert_eq!(response.node_id, None);
+        assert_eq!(response.language, None);
+        assert_eq!(response.source, None);
+        assert_eq!(response.source_map, None);
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(
+            response.diagnostics[0].severity,
+            ShaderDiagnosticSeverity::Info
+        );
+        assert_eq!(
+            response.diagnostics[0].phase,
+            ShaderDiagnosticPhase::WgslGeneration
+        );
+        assert_eq!(response.diagnostics[0].code, "no-generated-shader");
+    }
+
+    #[test]
+    fn generated_shader_response_reports_scene_build_diagnostics() {
+        let document = preview_document_with_nodes(vec![render_output_node()]);
+
+        let response = generated_shader_response_from_preview_document(&document);
+
+        assert!(!response.ok);
+        assert_eq!(response.node_id, None);
+        assert_eq!(response.language, None);
+        assert_eq!(response.source, None);
+        assert_eq!(response.source_map, None);
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(
+            response.diagnostics[0].severity,
+            ShaderDiagnosticSeverity::Error
+        );
+        assert_eq!(
+            response.diagnostics[0].phase,
+            ShaderDiagnosticPhase::RenderPipeline
+        );
+        assert_eq!(response.diagnostics[0].code, "render-output-without-input");
     }
 
     #[test]
@@ -894,6 +969,54 @@ mod tests {
 
         assert!(error.contains("shader validation failed"));
         assert!(error.contains("missingField"));
+    }
+
+    fn preview_document_with_nodes(nodes: Vec<GraphNode>) -> PreviewDocument {
+        let graph = GraphDocument {
+            schema: "skenion.graph".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: "render-response-graph".to_owned(),
+            revision: "1".to_owned(),
+            nodes,
+            edges: Vec::new(),
+        };
+        let control_state = ControlState::from_graph(&graph);
+        PreviewDocument {
+            schema: PREVIEW_DOCUMENT_SCHEMA.to_owned(),
+            schema_version: PREVIEW_DOCUMENT_SCHEMA_VERSION.to_owned(),
+            plan: ExecutionPlan {
+                graph_id: graph.id.clone(),
+                graph_revision: graph.revision.clone(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                groups: Vec::new(),
+            },
+            graph,
+            control_state,
+            session_revision: 1,
+        }
+    }
+
+    fn clear_color_node() -> GraphNode {
+        let mut params = serde_json::Map::new();
+        params.insert("color".to_owned(), json!([0.25, 0.5, 0.75, 1.0]));
+        GraphNode {
+            id: "clear_1".to_owned(),
+            kind: RENDER_CLEAR_COLOR_KIND.to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: Vec::new(),
+        }
+    }
+
+    fn render_output_node() -> GraphNode {
+        GraphNode {
+            id: "output_1".to_owned(),
+            kind: RENDER_OUTPUT_KIND.to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params: serde_json::Map::new(),
+            ports: Vec::new(),
+        }
     }
 
     fn headless_test_device() -> Option<(wgpu::Device, wgpu::SurfaceConfiguration)> {

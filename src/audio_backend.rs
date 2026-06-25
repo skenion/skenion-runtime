@@ -106,3 +106,26 @@ pub fn start_default_audio_output_backend(
         },
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_audio_backend_config_uses_realtime_block_size() {
+        assert_eq!(AudioBackendConfig::default().block_size, 64);
+    }
+
+    #[test]
+    fn audio_backend_errors_describe_device_and_format_failures() {
+        assert_eq!(
+            AudioBackendError::NoDefaultOutputDevice.to_string(),
+            "no default audio output device is available"
+        );
+        assert!(
+            AudioBackendError::UnsupportedSampleFormat(cpal::SampleFormat::I16)
+                .to_string()
+                .contains("I16")
+        );
+    }
+}

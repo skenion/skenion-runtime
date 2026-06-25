@@ -225,6 +225,8 @@ pub fn type_label(data_type: &DataType) -> String {
 mod tests {
     use serde_json::{Value, json};
 
+    use crate::{Edge, GraphNode, PortRef};
+
     use super::*;
 
     #[test]
@@ -382,5 +384,304 @@ mod tests {
 
         assert_eq!(inverse.base_revision, "2");
         assert_eq!(inverse.ops.len(), 1);
+    }
+
+    #[test]
+    fn graph_validation_reports_schema_and_duplicate_node_errors() {
+        let mut graph = patch_graph();
+        graph.schema_version = "9.9.9".to_owned();
+        graph.nodes.push(patch_node("node"));
+
+        let report = validate_graph_document(&graph).unwrap_err();
+        let messages = report
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("graph schemaVersion must be 0.1.0"))
+        );
+        assert!(messages.contains(&"duplicate node id: node"));
+        assert!(report.to_string().contains("; "));
+    }
+
+    #[test]
+    fn graph_patch_application_handles_node_and_edge_mutations() {
+        let graph = patch_graph();
+        let node_to_target = patch_edge("node", "target");
+        let node_to_extra = patch_edge("node", "extra");
+        let mut replacement = patch_node("target");
+        replacement
+            .params
+            .insert("label".to_owned(), Value::String("replaced".to_owned()));
+        let patch = patch_with_ops(
+            "1",
+            vec![
+                GraphPatchOperation::AddNode {
+                    node: patch_node("extra"),
+                },
+                GraphPatchOperation::AddEdge {
+                    edge: node_to_target.clone(),
+                },
+                GraphPatchOperation::RemoveEdge {
+                    edge: node_to_target,
+                },
+                GraphPatchOperation::AddEdge {
+                    edge: node_to_extra,
+                },
+                GraphPatchOperation::RemoveNode {
+                    node_id: "extra".to_owned(),
+                },
+                GraphPatchOperation::ReplaceNode {
+                    node_id: "target".to_owned(),
+                    node: replacement,
+                },
+                GraphPatchOperation::SetNodeParam {
+                    node_id: "node".to_owned(),
+                    key: "enabled".to_owned(),
+                    value: Value::Bool(true),
+                },
+            ],
+        );
+
+        let patched = apply_graph_patch(&graph, &patch, None).unwrap();
+
+        assert_eq!(patched.revision, "1");
+        assert_eq!(patched.nodes.len(), 2);
+        assert!(patched.edges.is_empty());
+        assert_eq!(patched.nodes[0].params["enabled"], Value::Bool(true));
+        assert_eq!(
+            patched.nodes[1].params["label"],
+            Value::String("replaced".to_owned())
+        );
+    }
+
+    #[test]
+    fn graph_patch_application_reports_structured_error_cases() {
+        let graph = patch_graph();
+        let existing_edge = patch_edge("node", "target");
+        let mut graph_with_edge = graph.clone();
+        graph_with_edge.edges.push(existing_edge.clone());
+
+        assert_apply_error(
+            &graph,
+            patch_with_ops("0", Vec::new()),
+            "base revision mismatch",
+        );
+        assert_apply_error(
+            &graph,
+            patch_with_ops(
+                "1",
+                vec![GraphPatchOperation::SetNodeParam {
+                    node_id: "missing".to_owned(),
+                    key: "value".to_owned(),
+                    value: Value::Bool(true),
+                }],
+            ),
+            "missing node: missing",
+        );
+        assert_apply_error(
+            &graph,
+            patch_with_ops(
+                "1",
+                vec![GraphPatchOperation::AddNode {
+                    node: patch_node("node"),
+                }],
+            ),
+            "duplicate node: node",
+        );
+        assert_apply_error(
+            &graph,
+            patch_with_ops(
+                "1",
+                vec![GraphPatchOperation::RemoveNode {
+                    node_id: "missing".to_owned(),
+                }],
+            ),
+            "missing node: missing",
+        );
+        assert_apply_error(
+            &graph,
+            patch_with_ops(
+                "1",
+                vec![GraphPatchOperation::ReplaceNode {
+                    node_id: "missing".to_owned(),
+                    node: patch_node("replacement"),
+                }],
+            ),
+            "missing node: missing",
+        );
+        assert_apply_error(
+            &graph_with_edge,
+            patch_with_ops(
+                "1",
+                vec![GraphPatchOperation::AddEdge {
+                    edge: existing_edge,
+                }],
+            ),
+            "duplicate edge",
+        );
+        assert_apply_error(
+            &graph,
+            patch_with_ops(
+                "1",
+                vec![GraphPatchOperation::RemoveEdge {
+                    edge: patch_edge("node", "target"),
+                }],
+            ),
+            "missing edge",
+        );
+    }
+
+    #[test]
+    fn graph_patch_inversion_handles_all_operation_shapes_and_missing_nodes() {
+        let graph = patch_graph();
+        let added_edge = patch_edge("node", "target");
+        let removed_edge = patch_edge("target", "node");
+        let mut replacement = patch_node("node");
+        replacement
+            .params
+            .insert("value".to_owned(), Value::String("new".to_owned()));
+        let patch = patch_with_ops(
+            "1",
+            vec![
+                GraphPatchOperation::SetNodeParam {
+                    node_id: "node".to_owned(),
+                    key: "missingKey".to_owned(),
+                    value: Value::Bool(true),
+                },
+                GraphPatchOperation::AddNode {
+                    node: patch_node("extra"),
+                },
+                GraphPatchOperation::RemoveNode {
+                    node_id: "target".to_owned(),
+                },
+                GraphPatchOperation::ReplaceNode {
+                    node_id: "node".to_owned(),
+                    node: replacement,
+                },
+                GraphPatchOperation::AddEdge {
+                    edge: added_edge.clone(),
+                },
+                GraphPatchOperation::RemoveEdge {
+                    edge: removed_edge.clone(),
+                },
+            ],
+        );
+
+        let inverse = invert_graph_patch(&graph, &patch).unwrap();
+
+        assert_eq!(inverse.id, "patch-inverse");
+        assert_eq!(inverse.base_revision, "2");
+        assert_eq!(inverse.ops.len(), 6);
+        assert_eq!(
+            inverse.ops[0],
+            GraphPatchOperation::AddEdge { edge: removed_edge }
+        );
+        assert_eq!(
+            inverse.ops[1],
+            GraphPatchOperation::RemoveEdge { edge: added_edge }
+        );
+        assert_eq!(
+            inverse.ops[4],
+            GraphPatchOperation::RemoveNode {
+                node_id: "extra".to_owned()
+            }
+        );
+        assert_eq!(
+            inverse.ops[5],
+            GraphPatchOperation::SetNodeParam {
+                node_id: "node".to_owned(),
+                key: "missingKey".to_owned(),
+                value: Value::Null
+            }
+        );
+
+        assert_invert_error(
+            &graph,
+            GraphPatchOperation::SetNodeParam {
+                node_id: "missing".to_owned(),
+                key: "value".to_owned(),
+                value: Value::Bool(true),
+            },
+            "missing node: missing",
+        );
+        assert_invert_error(
+            &graph,
+            GraphPatchOperation::RemoveNode {
+                node_id: "missing".to_owned(),
+            },
+            "missing node: missing",
+        );
+        assert_invert_error(
+            &graph,
+            GraphPatchOperation::ReplaceNode {
+                node_id: "missing".to_owned(),
+                node: patch_node("replacement"),
+            },
+            "missing node: missing",
+        );
+    }
+
+    fn assert_apply_error(graph: &GraphDocument, patch: GraphPatch, expected: &str) {
+        let error = apply_graph_patch(graph, &patch, None).unwrap_err();
+        assert!(
+            error.message.contains(expected),
+            "expected {expected:?}, received {:?}",
+            error.message
+        );
+    }
+
+    fn assert_invert_error(graph: &GraphDocument, op: GraphPatchOperation, expected_message: &str) {
+        let patch = patch_with_ops("1", vec![op]);
+        let error = invert_graph_patch(graph, &patch).unwrap_err();
+        assert_eq!(error.message, expected_message);
+    }
+
+    fn patch_graph() -> GraphDocument {
+        GraphDocument {
+            schema: "skenion.graph".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: "patch-graph".to_owned(),
+            revision: "1".to_owned(),
+            nodes: vec![patch_node("node"), patch_node("target")],
+            edges: Vec::new(),
+        }
+    }
+
+    fn patch_node(id: &str) -> GraphNode {
+        GraphNode {
+            id: id.to_owned(),
+            kind: "core.wrapper".to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params: serde_json::Map::new(),
+            ports: Vec::new(),
+        }
+    }
+
+    fn patch_edge(from_node: &str, to_node: &str) -> Edge {
+        Edge {
+            from: PortRef {
+                node: from_node.to_owned(),
+                port: "out".to_owned(),
+            },
+            to: PortRef {
+                node: to_node.to_owned(),
+                port: "in".to_owned(),
+            },
+        }
+    }
+
+    fn patch_with_ops(base_revision: &str, ops: Vec<GraphPatchOperation>) -> GraphPatch {
+        GraphPatch {
+            schema: "skenion.graph.patch".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            id: "patch".to_owned(),
+            base_revision: base_revision.to_owned(),
+            ops,
+        }
     }
 }
