@@ -105,6 +105,15 @@ worker, then run the gate again until the slice passes or a real blocker is
 recorded in the issue. The manager may only make trivial documentation,
 context, issue, or status corrections directly.
 
+Worker and reviewer reports must be brief by default. Routine PASS reports,
+progress summaries, and commit-readiness notes should use only: PASS/FAIL,
+blocking findings, non-blocking follow-ups that change the next action,
+verification summary, and next action. Do not include long code-line tours,
+exhaustive source references, or repeated evidence in ordinary reports.
+File/line references are required for bugs, FAIL reviews, CI failures, security
+or data-loss risks, and explicit audit requests; otherwise keep them minimal.
+The goal is fast decision-making, not transcript-sized reports.
+
 Default code quality requirements:
 
 - Write code that is easy to read before it is clever.
