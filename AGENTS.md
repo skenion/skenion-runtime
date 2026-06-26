@@ -25,6 +25,18 @@ session/collaboration lock becomes poisoned, restart the watched process before
 continuing validation. Do not treat `/health` alone as sufficient after a panic;
 also verify a session or feature-specific endpoint.
 
+## Generated Dependency Metadata
+
+Lockfiles and package manifests are repo-owned dependency metadata. This
+includes `Cargo.lock`, generated package version constants, and comparable
+dependency outputs.
+
+If a build, test, generator, or package manager in this repo updates those files
+for a legitimate reason, include and commit that churn with the Runtime slice.
+Do not revert dependency metadata merely because it is generated. If the change
+is in another repo or outside the assigned write-set, leave it alone and report
+it only if it blocks verification.
+
 ## Strict v0 Runtime Policy
 
 Skenion v0 does not support legacy, deprecated, or import-only compatibility
