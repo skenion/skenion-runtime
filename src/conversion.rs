@@ -26,7 +26,7 @@ pub fn convert_control_value_to_data_kind(
         "number.float" => numeric_to_float(value, representation.unwrap_or("f32")),
         "number.int" => numeric_to_int(value, representation.unwrap_or("i32")),
         "number.uint" => numeric_to_uint(value, representation.unwrap_or("u32")),
-        "boolean" => match value {
+        "bool" => match value {
             ControlValue::Bool { value } => Some(ControlValue::bool(*value)),
             _ => None,
         },
@@ -81,6 +81,7 @@ fn numeric_as_f64(value: &ControlValue) -> Option<f64> {
         ControlValue::Float { value, .. } => Some(*value),
         ControlValue::Int { value, .. } => Some(*value as f64),
         ControlValue::Uint { value, .. } => Some(*value as f64),
+        ControlValue::Bool { value } => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
     }
 }
@@ -181,6 +182,24 @@ mod tests {
                 value: 12,
             })
         );
+        assert_eq!(
+            convert_control_value_to_stored(&ControlValue::bool(true), &ControlValue::float(0.0)),
+            Some(ControlValue::float(1.0))
+        );
+        assert_eq!(
+            convert_control_value_to_stored(&ControlValue::bool(false), &i8_target),
+            Some(ControlValue::Int {
+                representation: "i8".to_owned(),
+                value: 0,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_stored(&ControlValue::bool(true), &u8_target),
+            Some(ControlValue::Uint {
+                representation: "u8".to_owned(),
+                value: 1,
+            })
+        );
     }
 
     #[test]
@@ -223,6 +242,10 @@ mod tests {
                 representation: "f64".to_owned(),
                 value: 7.0,
             })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::bool(true), "number.float", None),
+            Some(ControlValue::float(1.0))
         );
         assert_eq!(
             convert_control_value_to_data_kind(
@@ -294,7 +317,15 @@ mod tests {
             })
         );
         assert_eq!(
-            convert_control_value_to_data_kind(&ControlValue::bool(true), "boolean", None),
+            convert_control_value_to_data_kind(&ControlValue::bool(false), "number.int", None),
+            Some(ControlValue::int(0))
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::bool(true), "number.uint", None),
+            Some(ControlValue::uint(1))
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::bool(true), "bool", None),
             Some(ControlValue::bool(true))
         );
         assert_eq!(
@@ -332,7 +363,7 @@ mod tests {
             None
         );
         assert_eq!(
-            convert_control_value_to_data_kind(&ControlValue::float(1.0), "boolean", None),
+            convert_control_value_to_data_kind(&ControlValue::float(1.0), "bool", None),
             None
         );
         assert_eq!(

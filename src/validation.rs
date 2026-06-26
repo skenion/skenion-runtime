@@ -239,9 +239,9 @@ mod tests {
           "displayName": "Wrapper",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "bool" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -259,7 +259,7 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "bool" } }
               ]
             }
           ],
@@ -267,8 +267,8 @@ mod tests {
         }))
         .unwrap();
         let boolean_value = DataType {
-            flow: crate::DataFlow::Value,
-            data_kind: "boolean".to_owned(),
+            flow: crate::DataFlow::Control,
+            data_kind: "bool".to_owned(),
             unit: None,
             range: None,
             shape: None,
@@ -284,7 +284,7 @@ mod tests {
         assert!(validate_node_definition(&definition).is_ok());
         assert!(validate_graph_document(&graph).is_ok());
         assert!(compatible_data_types(&boolean_value, &boolean_value));
-        assert_eq!(type_label(&boolean_value), "value<boolean>");
+        assert_eq!(type_label(&boolean_value), "control<bool>");
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
           "displayName": "Invalid",
           "category": "Core",
           "ports": [],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -324,7 +324,7 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": { "value": 0.5 },
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "bool" } }
               ]
             }
           ],
@@ -362,7 +362,7 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": { "value": 0.5 },
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "bool" } }
               ]
             }
           ],

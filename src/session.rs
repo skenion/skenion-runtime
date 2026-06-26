@@ -1805,7 +1805,7 @@ fn lower_execution_model_for_execution(
 ) -> crate::ExecutionModel {
     match model {
         skenion_contracts::ExecutionModelV01::Event => crate::ExecutionModel::Event,
-        skenion_contracts::ExecutionModelV01::Value => crate::ExecutionModel::Value,
+        skenion_contracts::ExecutionModelV01::Control => crate::ExecutionModel::Control,
         skenion_contracts::ExecutionModelV01::Frame => crate::ExecutionModel::Frame,
         skenion_contracts::ExecutionModelV01::AudioBlock => crate::ExecutionModel::AudioBlock,
         skenion_contracts::ExecutionModelV01::VideoFrame => crate::ExecutionModel::VideoFrame,
@@ -2568,7 +2568,7 @@ fn lower_port_for_execution(port: &PortSpecCurrent) -> Port {
 }
 
 fn data_type_from_port_spec(port: &PortSpecCurrent) -> DataType {
-    let data_kind = normalize_port_type(&port.port_type);
+    let (canonical_flow, data_kind) = current_port_type_parts(&port.port_type);
     let format = match data_kind.as_str() {
         "number.float" => Some(StringOrStrings::One("f32".to_owned())),
         "gpu.texture2d" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
@@ -2576,21 +2576,19 @@ fn data_type_from_port_spec(port: &PortSpecCurrent) -> DataType {
     };
     let color_space = (data_kind == "gpu.texture2d").then(|| "srgb".to_owned());
     DataType {
-        flow: match port.rate {
+        flow: canonical_flow.unwrap_or_else(|| match port.rate {
             Some(PortRateCurrent::Event) => DataFlow::Event,
             Some(PortRateCurrent::Audio) => DataFlow::Signal,
             Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
             Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
             | None => {
-                if port.port_type == "message.any" {
-                    DataFlow::Event
-                } else if data_kind == "gpu.texture2d" {
+                if data_kind == "gpu.texture2d" {
                     DataFlow::Resource
                 } else {
-                    DataFlow::Value
+                    DataFlow::Control
                 }
             }
-        },
+        }),
         data_kind,
         unit: None,
         range: None,
@@ -2605,13 +2603,18 @@ fn data_type_from_port_spec(port: &PortSpecCurrent) -> DataType {
     }
 }
 
-fn normalize_port_type(port_type: &str) -> String {
+fn current_port_type_parts(port_type: &str) -> (Option<DataFlow>, String) {
     match port_type {
-        "value.number" => "number.float".to_owned(),
-        other => other
-            .strip_prefix("value.")
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| other.to_owned()),
+        "control.message.any" => (Some(DataFlow::Control), "message.any".to_owned()),
+        "control.number.float" => (Some(DataFlow::Control), "number.float".to_owned()),
+        "control.number.int" => (Some(DataFlow::Control), "number.int".to_owned()),
+        "control.number.uint" => (Some(DataFlow::Control), "number.uint".to_owned()),
+        "control.bool" => (Some(DataFlow::Control), "bool".to_owned()),
+        "control.string" => (Some(DataFlow::Control), "string".to_owned()),
+        "control.color" => (Some(DataFlow::Control), "color".to_owned()),
+        "event.bang" => (Some(DataFlow::Event), "event.bang".to_owned()),
+        "gpu.texture2d" => (Some(DataFlow::Resource), "gpu.texture2d".to_owned()),
+        other => (None, other.to_owned()),
     }
 }
 
@@ -3214,7 +3217,7 @@ mod tests {
             session
                 .control_state_response()
                 .channels
-                .get("number.float:speed"),
+                .get("control.number.float:speed"),
             Some(&ControlMessage::from_value(ControlValue::float(1.5)))
         );
     }
@@ -3357,8 +3360,11 @@ mod tests {
         );
         let before = session.snapshot();
 
-        let response =
-            session.apply_control_event(control_request("value_1", "in", ControlValue::bool(true)));
+        let response = session.apply_control_event(control_request(
+            "value_1",
+            "in",
+            ControlValue::color([0.0, 0.0, 0.0, 1.0]),
+        ));
 
         assert!(!response.ok);
         assert!(response.emitted.is_empty());
@@ -3925,7 +3931,17 @@ mod tests {
         moved.x += 24.0;
 
         let mut invalid_graph = session.graph().expect("loaded graph");
-        invalid_graph.edges[0].to.port = "in".to_owned();
+        let target_node = invalid_graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "target_1")
+            .expect("sample graph should include target node");
+        let cold_port = target_node
+            .ports
+            .iter_mut()
+            .find(|port| port.id == "cold")
+            .expect("sample target should include cold inlet");
+        cold_port.data_type.data_kind = "bool".to_owned();
         session.graph = Some(invalid_graph);
 
         let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3962,14 +3978,14 @@ mod tests {
             response.diagnostics.iter().any(|diagnostic| {
                 diagnostic.code.as_deref() == Some("session.plan.invalid-project")
                     && diagnostic.message.contains(
-                        "incompatible edge value_1:value value<number.float> -> target_1:in event<message.any>",
+                        "incompatible edge value_1:value control.number.float -> target_1:cold control.bool",
                     )
             })
         );
         assert!(
             response.snapshot.diagnostics.iter().any(|diagnostic| {
                 diagnostic.message.contains(
-                    "incompatible edge value_1:value value<number.float> -> target_1:in event<message.any>",
+                    "incompatible edge value_1:value control.number.float -> target_1:cold control.bool",
                 )
             })
         );
@@ -5230,8 +5246,8 @@ mod tests {
                 skenion_contracts::ExecutionModelV01::Event,
             ),
             (
-                crate::ExecutionModel::Value,
-                skenion_contracts::ExecutionModelV01::Value,
+                crate::ExecutionModel::Control,
+                skenion_contracts::ExecutionModelV01::Control,
             ),
             (
                 crate::ExecutionModel::Frame,
@@ -5798,8 +5814,14 @@ mod tests {
     fn paste_graph_fragment_converts_current_port_rates_for_lowered_execution_nodes() {
         let cases = [
             (
-                json!({ "id": "event", "direction": "input", "type": "message.any", "rate": "event", "triggerMode": "trigger" }),
+                json!({ "id": "event", "direction": "input", "type": "event.bang", "rate": "event", "triggerMode": "trigger" }),
                 crate::DataFlow::Event,
+                "event.bang",
+                Some(crate::PortActivation::Trigger),
+            ),
+            (
+                json!({ "id": "message", "direction": "input", "type": "control.message.any", "rate": "control", "triggerMode": "trigger" }),
+                crate::DataFlow::Control,
                 "message.any",
                 Some(crate::PortActivation::Trigger),
             ),
@@ -5822,14 +5844,14 @@ mod tests {
                 None,
             ),
             (
-                json!({ "id": "render", "direction": "input", "type": "value.number", "rate": "render", "triggerMode": "passive" }),
-                crate::DataFlow::Value,
+                json!({ "id": "render", "direction": "input", "type": "control.number.float", "rate": "render", "triggerMode": "passive" }),
+                crate::DataFlow::Control,
                 "number.float",
                 Some(crate::PortActivation::Latched),
             ),
             (
-                json!({ "id": "gpu", "direction": "input", "type": "value.color", "rate": "gpu", "triggerMode": "latched" }),
-                crate::DataFlow::Value,
+                json!({ "id": "gpu", "direction": "input", "type": "control.color", "rate": "gpu", "triggerMode": "latched" }),
+                crate::DataFlow::Control,
                 "color",
                 Some(crate::PortActivation::Latched),
             ),
@@ -5840,8 +5862,8 @@ mod tests {
                 None,
             ),
             (
-                json!({ "id": "default", "direction": "input", "type": "message.any" }),
-                crate::DataFlow::Event,
+                json!({ "id": "default", "direction": "input", "type": "control.message.any" }),
+                crate::DataFlow::Control,
                 "message.any",
                 None,
             ),
@@ -6191,7 +6213,7 @@ mod tests {
                 "id": "edge_value_target",
                 "source": { "nodeId": "value_1", "portId": "value" },
                 "target": { "nodeId": "target_1", "portId": "cold" },
-                "resolvedType": "number.float"
+                "resolvedType": "control.number.float"
               }
             ]
           },
@@ -6201,13 +6223,13 @@ mod tests {
               "schemaVersion": "0.1.0",
               "id": "core.float",
               "version": "0.1.0",
-              "displayName": "Float Value",
-              "category": "Values",
+              "displayName": "Float",
+              "category": "Typed Controls",
               "ports": value_f32_ports_current_json(),
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": []
+              "capabilities": ["control.number.float.v0.1"]
             }
           ],
           "viewState": {
@@ -6275,7 +6297,7 @@ mod tests {
                 "displayName": "Debug Sink",
                 "category": "Debug",
                 "ports": [],
-                "execution": { "model": "value" },
+                "execution": { "model": "control" },
                 "state": { "persistent": false },
                 "permissions": [],
                 "capabilities": []
@@ -6291,25 +6313,39 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": "message.any",
-            "rate": "event",
+            "type": "control.message.any",
+            "rate": "control",
             "required": false,
-            "triggerMode": "trigger"
+            "triggerMode": "trigger",
+            "accepts": [
+              "control.number.float",
+              "control.number.int",
+              "control.number.uint",
+              "control.bool",
+              "event.bang"
+            ],
+            "messageSelectors": {
+              "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+              "silent": ["set"],
+              "trigger": ["bang", "float", "int", "uint", "bool"],
+              "store": ["set", "float", "int", "uint", "bool"],
+              "emit": ["bang", "float", "int", "uint", "bool"]
+            }
           },
           {
             "id": "cold",
             "direction": "input",
             "label": "Cold",
-            "type": "number.float",
+            "type": "control.number.float",
             "rate": "control",
             "required": false,
-            "triggerMode": "latched"
+            "triggerMode": "passive"
           },
           {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": "number.float",
+            "type": "control.number.float",
             "rate": "control"
           }
         ])

@@ -678,7 +678,7 @@ mod tests {
         manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
         let mut control_state = ControlState::default();
         control_state.channels.insert(
-            "number.float:speed".to_owned(),
+            "control.number.float:speed".to_owned(),
             crate::ControlMessage::from_value(crate::ControlValue::float(0.8)),
         );
         let snapshot = PreviewControlStateSnapshot::new(1, 3, &control_state);
@@ -1251,7 +1251,7 @@ mod tests {
                 node_id: "value_1".to_owned(),
                 kind: "core.float".to_owned(),
                 kind_version: "0.1.0".to_owned(),
-                execution_model: ExecutionModel::Value,
+                execution_model: ExecutionModel::Control,
                 order: 0,
             }],
             edges: vec![PlanEdge {
@@ -1262,7 +1262,7 @@ mod tests {
                 metadata: None,
             }],
             groups: vec![ExecutionGroup {
-                execution_model: ExecutionModel::Value,
+                execution_model: ExecutionModel::Control,
                 node_ids: vec!["value_1".to_owned()],
             }],
         }

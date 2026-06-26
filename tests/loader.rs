@@ -60,11 +60,11 @@ fn valid_definition_current() -> Value {
         {
           "id": "out",
           "direction": "output",
-          "type": "value.number",
+          "type": "control.number.float",
           "rate": "control"
         }
       ],
-      "execution": { "model": "value" },
+      "execution": { "model": "control" },
       "state": { "persistent": false },
       "permissions": [],
       "capabilities": []
@@ -88,7 +88,7 @@ fn valid_project_request_current() -> Value {
               {
                 "id": "out",
                 "direction": "output",
-                "type": "value.number",
+                "type": "control.number.float",
                 "rate": "control"
               }
             ]
@@ -160,7 +160,7 @@ fn current_project_request_plans_value_number_graph() {
         .expect("source should expose value output");
 
     assert_eq!(project.graph.schema_version, "0.1.0");
-    assert_eq!(source_port.port_type, "value.number");
+    assert_eq!(source_port.port_type, "control.number.float");
 
     validate_project_request_current(&project)
         .expect("canonical current 0.1 project should validate");

@@ -6,7 +6,7 @@ use crate::{
     GraphDocumentCurrent, GraphNodeCurrent, GraphValidationResultCurrent, MergePolicyCurrent,
     NodeDefinitionCurrent, PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode,
     PortDirectionCurrent, PortRateCurrent, PortSpecCurrent, ProjectDocumentCurrent,
-    RuntimeDiagnostic, StringOrStrings, ViewState, compatible_data_types, type_label,
+    RuntimeDiagnostic, StringOrStrings, ViewState, compatible_data_types,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -1249,10 +1249,10 @@ fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<Ru
                     "incompatible edge {}:{} {} -> {}:{} {}",
                     edge.source.node_id,
                     edge.source.port_id,
-                    type_label(&source_type),
+                    source.port_type,
                     edge.target.node_id,
                     edge.target.port_id,
-                    type_label(&target_type)
+                    target.port_type
                 ),
                 edge,
             ));
@@ -1284,7 +1284,7 @@ fn edge_diagnostic(
 }
 
 fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
-    let data_kind = normalize_current_port_type(&port.port_type);
+    let (canonical_flow, data_kind) = current_port_type_parts(&port.port_type);
     let format = match data_kind.as_str() {
         "number.float" => Some(StringOrStrings::One("f32".to_owned())),
         "gpu.texture2d" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
@@ -1292,21 +1292,19 @@ fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
     };
     let color_space = (data_kind == "gpu.texture2d").then(|| "srgb".to_owned());
     DataType {
-        flow: match port.rate {
+        flow: canonical_flow.unwrap_or_else(|| match port.rate {
             Some(PortRateCurrent::Event) => DataFlow::Event,
             Some(PortRateCurrent::Audio) => DataFlow::Signal,
             Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
             Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
             | None => {
-                if port.port_type == "message.any" {
-                    DataFlow::Event
-                } else if data_kind == "gpu.texture2d" {
+                if data_kind == "gpu.texture2d" {
                     DataFlow::Resource
                 } else {
-                    DataFlow::Value
+                    DataFlow::Control
                 }
             }
-        },
+        }),
         data_kind,
         unit: None,
         range: None,
@@ -1321,13 +1319,18 @@ fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
     }
 }
 
-fn normalize_current_port_type(port_type: &str) -> String {
+fn current_port_type_parts(port_type: &str) -> (Option<DataFlow>, String) {
     match port_type {
-        "value.number" => "number.float".to_owned(),
-        other => other
-            .strip_prefix("value.")
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| other.to_owned()),
+        "control.message.any" => (Some(DataFlow::Control), "message.any".to_owned()),
+        "control.number.float" => (Some(DataFlow::Control), "number.float".to_owned()),
+        "control.number.int" => (Some(DataFlow::Control), "number.int".to_owned()),
+        "control.number.uint" => (Some(DataFlow::Control), "number.uint".to_owned()),
+        "control.bool" => (Some(DataFlow::Control), "bool".to_owned()),
+        "control.string" => (Some(DataFlow::Control), "string".to_owned()),
+        "control.color" => (Some(DataFlow::Control), "color".to_owned()),
+        "event.bang" => (Some(DataFlow::Event), "event.bang".to_owned()),
+        "gpu.texture2d" => (Some(DataFlow::Resource), "gpu.texture2d".to_owned()),
+        other => (None, other.to_owned()),
     }
 }
 
@@ -1441,7 +1444,7 @@ fn fan_out_policy_label(policy: Option<&FanOutPolicyCurrent>) -> String {
 fn map_execution_model_current(model: &ExecutionModelCurrent) -> ExecutionModel {
     match model {
         ExecutionModelCurrent::Event => ExecutionModel::Event,
-        ExecutionModelCurrent::Value => ExecutionModel::Value,
+        ExecutionModelCurrent::Control => ExecutionModel::Control,
         ExecutionModelCurrent::Frame => ExecutionModel::Frame,
         ExecutionModelCurrent::AudioBlock => ExecutionModel::AudioBlock,
         ExecutionModelCurrent::VideoFrame => ExecutionModel::VideoFrame,
@@ -2409,7 +2412,7 @@ mod tests {
         let mut mismatch = render_graph();
         mismatch.nodes[0].ports.clear();
         mismatch.nodes[1].ports[0].direction = PortDirectionCurrent::Output;
-        mismatch.nodes[1].ports[0].port_type = "value.number".to_owned();
+        mismatch.nodes[1].ports[0].port_type = "control.number.float".to_owned();
         mismatch.nodes[1].ports.push(PortSpecCurrent {
             id: "extra".to_owned(),
             direction: PortDirectionCurrent::Input,
@@ -2422,6 +2425,7 @@ mod tests {
             merge_policy: None,
             fan_out_policy: None,
             trigger_mode: None,
+            message_selectors: None,
             default_value: None,
             latch: None,
             required: None,
@@ -2445,21 +2449,21 @@ mod tests {
         );
         assert!(messages.contains("missing manifest port"));
         assert!(messages.contains("direction differs from definition"));
-        assert!(messages.contains("type value.number"));
+        assert!(messages.contains("type control.number.float"));
         assert!(messages.contains("missing source port"));
         assert!(messages.contains("missing manifest port: output.extra"));
 
         let mut incompatible = render_graph();
-        incompatible.nodes[1].ports[0].port_type = "message.any".to_owned();
+        incompatible.nodes[1].ports[0].port_type = "control.message.any".to_owned();
         incompatible.nodes[1].ports[0].rate = Some(PortRateCurrent::Event);
         let incompatible_result =
             validate_project_current(&incompatible, &[clear_definition(), output_definition()])
                 .expect_err("incompatible edge type should fail");
         assert!(incompatible_result.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("graph.edge-incompatible-type")
-                && diagnostic
-                    .message
-                    .contains("incompatible edge clear:out value<render.frame> -> output:in event<message.any>")
+                && diagnostic.message.contains(
+                    "incompatible edge clear:out render.frame -> output:in control.message.any",
+                )
         }));
     }
 
@@ -2503,7 +2507,7 @@ mod tests {
 
         for (model, expected) in [
             (ExecutionModelCurrent::Event, ExecutionModel::Event),
-            (ExecutionModelCurrent::Value, ExecutionModel::Value),
+            (ExecutionModelCurrent::Control, ExecutionModel::Control),
             (ExecutionModelCurrent::Frame, ExecutionModel::Frame),
             (
                 ExecutionModelCurrent::AudioBlock,

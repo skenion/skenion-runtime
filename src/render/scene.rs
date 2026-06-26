@@ -468,7 +468,7 @@ fn shader_uniform_value(
                 || ShaderUniformValue::U32(default_u32(&uniform.default)),
                 ShaderUniformValue::U32,
             ),
-        "boolean" => connected
+        "bool" => connected
             .as_ref()
             .and_then(ControlValue::as_bool)
             .map_or_else(
@@ -1017,7 +1017,7 @@ mod tests {
         let uniform: crate::ShaderUniform = serde_json::from_value(json!({
             "id": "unknown",
             "label": "Unknown",
-            "type": { "flow": "value", "dataKind": "unknown.kind" },
+            "type": { "flow": "control", "dataKind": "unknown.kind" },
             "required": false
         }))
         .expect("uniform should parse");
@@ -1604,8 +1604,7 @@ mod tests {
                     "direction": "input",
                     "label": "In",
                     "type": {
-                        "flow": "event",
-                        "dataKind": "message.any"
+                        "flow": "control", "dataKind": "message.any"
                     },
                     "required": false,
                     "activation": "trigger"
@@ -1616,7 +1615,7 @@ mod tests {
                     "direction": "input",
                     "label": "Cold",
                     "type": {
-                        "flow": "value",
+                        "flow": "control",
                         "dataKind": "number.float"
                     },
                     "required": false,
@@ -1628,7 +1627,7 @@ mod tests {
                     "direction": "output",
                     "label": "Value",
                     "type": {
-                        "flow": "value",
+                        "flow": "control",
                         "dataKind": "number.float"
                     }
                 }))
@@ -1651,7 +1650,7 @@ mod tests {
                     "direction": "output",
                     "label": "Value",
                     "type": {
-                        "flow": "value",
+                        "flow": "control",
                         "dataKind": "number.int"
                     }
                 }))
@@ -1674,8 +1673,8 @@ mod tests {
                     "direction": "output",
                     "label": "Value",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "boolean"
+                        "flow": "control",
+                        "dataKind": "bool"
                     }
                 }))
                 .expect("valid bool value port"),
@@ -1697,7 +1696,7 @@ mod tests {
                     "direction": "output",
                     "label": "Value",
                     "type": {
-                        "flow": "value",
+                        "flow": "control",
                         "dataKind": "number.uint"
                     }
                 }))
@@ -1720,8 +1719,7 @@ mod tests {
                     "direction": "input",
                     "label": "In",
                     "type": {
-                        "flow": "event",
-                        "dataKind": "message.any"
+                        "flow": "control", "dataKind": "message.any"
                     },
                     "required": false,
                     "activation": "trigger"
@@ -1732,7 +1730,7 @@ mod tests {
                     "direction": "input",
                     "label": "Cold",
                     "type": {
-                        "flow": "value",
+                        "flow": "control",
                         "dataKind": "color"
                     },
                     "required": false,
@@ -1744,7 +1742,7 @@ mod tests {
                     "direction": "output",
                     "label": "Color",
                     "type": {
-                        "flow": "value",
+                        "flow": "control",
                         "dataKind": "color"
                     }
                 }))
@@ -1859,7 +1857,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
     fn typed_shader_source() -> &'static str {
         r#"// @skenion.uniform iterations number.int default=8
-// @skenion.uniform enabled boolean default=true
+// @skenion.uniform enabled bool default=true
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
   let enabled_value = select(0.0, 1.0, skenion.enabled);

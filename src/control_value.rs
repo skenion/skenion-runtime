@@ -143,12 +143,14 @@ impl ControlValue {
 
     pub fn kind_label(&self) -> String {
         match self {
-            Self::Float { representation, .. } => format!("number.float/{representation}"),
-            Self::Int { representation, .. } => format!("number.int/{representation}"),
-            Self::Uint { representation, .. } => format!("number.uint/{representation}"),
-            Self::Bool { .. } => "boolean".to_owned(),
-            Self::String { .. } => "string".to_owned(),
-            Self::Color { representation, .. } => format!("color/{representation}"),
+            Self::Float { representation, .. } => {
+                format!("control.number.float/{representation}")
+            }
+            Self::Int { representation, .. } => format!("control.number.int/{representation}"),
+            Self::Uint { representation, .. } => format!("control.number.uint/{representation}"),
+            Self::Bool { .. } => "control.bool".to_owned(),
+            Self::String { .. } => "control.string".to_owned(),
+            Self::Color { representation, .. } => format!("control.color/{representation}"),
         }
     }
 
@@ -814,14 +816,23 @@ mod tests {
 
     #[test]
     fn reports_kind_labels_for_diagnostics() {
-        assert_eq!(ControlValue::float(1.0).kind_label(), "number.float/f32");
-        assert_eq!(ControlValue::int(1).kind_label(), "number.int/i32");
-        assert_eq!(ControlValue::uint(1).kind_label(), "number.uint/u32");
-        assert_eq!(ControlValue::bool(true).kind_label(), "boolean");
-        assert_eq!(ControlValue::string("x".to_owned()).kind_label(), "string");
+        assert_eq!(
+            ControlValue::float(1.0).kind_label(),
+            "control.number.float/f32"
+        );
+        assert_eq!(ControlValue::int(1).kind_label(), "control.number.int/i32");
+        assert_eq!(
+            ControlValue::uint(1).kind_label(),
+            "control.number.uint/u32"
+        );
+        assert_eq!(ControlValue::bool(true).kind_label(), "control.bool");
+        assert_eq!(
+            ControlValue::string("x".to_owned()).kind_label(),
+            "control.string"
+        );
         assert_eq!(
             ControlValue::color([0.0, 0.0, 0.0, 1.0]).kind_label(),
-            "color/rgba32f"
+            "control.color/rgba32f"
         );
         assert_eq!(ControlMessage::bang().selector, "bang");
     }

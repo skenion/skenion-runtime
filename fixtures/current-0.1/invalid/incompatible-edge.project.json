@@ -6,17 +6,47 @@
     "revision": "1",
     "nodes": [
       {
-        "id": "value",
-        "kind": "core.value",
+        "id": "float_1",
+        "kind": "core.float",
         "kindVersion": "0.1.0",
         "params": {
           "value": 0.5
         },
         "ports": [
           {
-            "id": "out",
+            "id": "in",
+            "direction": "input",
+            "type": "control.message.any",
+            "rate": "control",
+            "required": false,
+            "triggerMode": "trigger",
+            "accepts": [
+              "control.number.float",
+              "control.number.int",
+              "control.number.uint",
+              "control.bool",
+              "event.bang"
+            ],
+            "messageSelectors": {
+              "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+              "silent": ["set"],
+              "trigger": ["bang", "float", "int", "uint", "bool"],
+              "store": ["set", "float", "int", "uint", "bool"],
+              "emit": ["bang", "float", "int", "uint", "bool"]
+            }
+          },
+          {
+            "id": "cold",
+            "direction": "input",
+            "type": "control.number.float",
+            "rate": "control",
+            "required": false,
+            "triggerMode": "passive"
+          },
+          {
+            "id": "value",
             "direction": "output",
-            "type": "value.number",
+            "type": "control.number.float",
             "rate": "control"
           }
         ]
@@ -41,8 +71,8 @@
       {
         "id": "edge_value_output",
         "source": {
-          "nodeId": "value",
-          "portId": "out"
+          "nodeId": "float_1",
+          "portId": "value"
         },
         "target": {
           "nodeId": "output",
@@ -55,26 +85,56 @@
     {
       "schema": "skenion.node.definition",
       "schemaVersion": "0.1.0",
-      "id": "core.value",
+      "id": "core.float",
       "version": "0.1.0",
-      "displayName": "Value",
-      "category": "Core",
+      "displayName": "Float",
+      "category": "Typed Controls",
       "ports": [
         {
-          "id": "out",
+          "id": "in",
+          "direction": "input",
+          "type": "control.message.any",
+          "rate": "control",
+          "required": false,
+          "triggerMode": "trigger",
+          "accepts": [
+            "control.number.float",
+            "control.number.int",
+            "control.number.uint",
+            "control.bool",
+            "event.bang"
+          ],
+          "messageSelectors": {
+            "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+            "silent": ["set"],
+            "trigger": ["bang", "float", "int", "uint", "bool"],
+            "store": ["set", "float", "int", "uint", "bool"],
+            "emit": ["bang", "float", "int", "uint", "bool"]
+          }
+        },
+        {
+          "id": "cold",
+          "direction": "input",
+          "type": "control.number.float",
+          "rate": "control",
+          "required": false,
+          "triggerMode": "passive"
+        },
+        {
+          "id": "value",
           "direction": "output",
-          "type": "value.number",
+          "type": "control.number.float",
           "rate": "control"
         }
       ],
       "execution": {
-        "model": "value"
+        "model": "control"
       },
       "state": {
         "persistent": false
       },
       "permissions": [],
-      "capabilities": ["value.number.v0.1"]
+      "capabilities": ["control.number.float.v0.1"]
     },
     {
       "schema": "skenion.node.definition",

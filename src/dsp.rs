@@ -2576,7 +2576,7 @@ mod tests {
           "displayName": id,
           "category": "Audio",
           "ports": [
-            { "id": input_port, "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+            { "id": input_port, "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
             { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ],
           "execution": { "model": "audio_block" },
@@ -2595,7 +2595,7 @@ mod tests {
           "displayName": "sig~",
           "category": "Audio",
           "ports": [
-            { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+            { "id": "value", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
             { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ],
           "execution": { "model": "audio_block" },
@@ -2654,8 +2654,8 @@ mod tests {
           "category": "Audio",
           "ports": [
             { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "trigger", "direction": "input", "type": { "flow": "event", "dataKind": "message.any" }, "activation": "trigger" },
-            { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "trigger", "direction": "input", "type": { "flow": "control", "dataKind": "message.any" }, "activation": "trigger" },
+            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2729,9 +2729,9 @@ mod tests {
           "displayName": "Float",
           "category": "Core",
           "ports": [
-            { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -2749,7 +2749,7 @@ mod tests {
           "ports": [
             { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -2785,7 +2785,7 @@ mod tests {
           "displayName": "sig~",
           "category": "Audio",
           "ports": [
-            { "id": "value", "direction": "input", "type": "value.number" },
+            { "id": "value", "direction": "input", "type": "control.number.float" },
             { "id": "out", "direction": "output", "type": "signal.audio", "rate": "audio" }
           ],
           "execution": { "model": "audio_block" },
@@ -2805,8 +2805,19 @@ mod tests {
           "category": "Audio",
           "ports": [
             { "id": "signal", "direction": "input", "type": "signal.audio", "rate": "audio" },
-            { "id": "trigger", "direction": "input", "type": "message.any", "rate": "event", "triggerMode": "trigger" },
-            { "id": "value", "direction": "output", "type": "value.number" }
+            {
+              "id": "trigger",
+              "direction": "input",
+              "type": "control.message.any",
+              "rate": "event",
+              "triggerMode": "trigger",
+              "accepts": ["event.bang"],
+              "messageSelectors": {
+                "accepted": ["bang"],
+                "trigger": ["bang"]
+              }
+            },
+            { "id": "value", "direction": "output", "type": "control.number.float" }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2841,7 +2852,7 @@ mod tests {
           "kindVersion": "0.1.0",
           "params": { "value": value },
           "ports": [
-            { "id": "value", "direction": "input", "type": "value.number" },
+            { "id": "value", "direction": "input", "type": "control.number.float" },
             { "id": "out", "direction": "output", "type": "signal.audio", "rate": "audio" }
           ]
         })
@@ -2855,8 +2866,19 @@ mod tests {
           "params": {},
           "ports": [
             { "id": "signal", "direction": "input", "type": "signal.audio", "rate": "audio" },
-            { "id": "trigger", "direction": "input", "type": "message.any", "rate": "event", "triggerMode": "trigger" },
-            { "id": "value", "direction": "output", "type": "value.number" }
+            {
+              "id": "trigger",
+              "direction": "input",
+              "type": "control.message.any",
+              "rate": "event",
+              "triggerMode": "trigger",
+              "accepts": ["event.bang"],
+              "messageSelectors": {
+                "accepted": ["bang"],
+                "trigger": ["bang"]
+              }
+            },
+            { "id": "value", "direction": "output", "type": "control.number.float" }
           ]
         })
     }
@@ -2881,7 +2903,7 @@ mod tests {
           "kindVersion": "0.1.0",
           "params": { "value": value },
           "ports": [
-            { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
           ]
         })
     }
@@ -2893,7 +2915,7 @@ mod tests {
           "kindVersion": "0.1.0",
           "params": { "frequency": 440.0 },
           "ports": [
-            { "id": "frequency", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+            { "id": "frequency", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
             { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ]
         })
@@ -2906,7 +2928,7 @@ mod tests {
           "kindVersion": "0.1.0",
           "params": { "value": value },
           "ports": [
-            { "id": "value", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
+            { "id": "value", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
             { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
           ]
         })
@@ -2947,8 +2969,8 @@ mod tests {
           "params": {},
           "ports": [
             { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "trigger", "direction": "input", "type": { "flow": "event", "dataKind": "message.any" }, "activation": "trigger" },
-            { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "trigger", "direction": "input", "type": { "flow": "control", "dataKind": "message.any" }, "activation": "trigger" },
+            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
           ]
         })
     }

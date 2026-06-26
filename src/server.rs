@@ -4512,7 +4512,7 @@ mod tests {
     async fn invalid_session_load_returns_diagnostics_and_keeps_runtime_healthy() {
         let app = runtime_router();
         let mut invalid = sample_project_document_current();
-        invalid["graph"]["edges"][0]["target"]["portId"] = json!("in");
+        invalid["graph"]["nodes"][1]["ports"][1]["type"] = json!("control.bool");
 
         let response = post_json_with(app.clone(), "/v0/sessions/default/load", invalid).await;
 
@@ -4528,7 +4528,7 @@ mod tests {
                     .as_str()
                     .unwrap()
                     .contains(
-                        "incompatible edge value_1:value value<number.float> -> target_1:in event<message.any>",
+                        "edge edge_value_target cannot connect value_1:value control.number.float to target_1:cold control.bool",
                     ))
         );
 
@@ -4543,7 +4543,7 @@ mod tests {
         let logs = get_json_with(app, "/v0/runtime/logs").await;
         assert!(logs["events"].as_array().unwrap().iter().any(|event| {
             event["message"].as_str().unwrap().contains(
-                "incompatible edge value_1:value value<number.float> -> target_1:in event<message.any>",
+                "edge edge_value_target cannot connect value_1:value control.number.float to target_1:cold control.bool",
             )
         }));
     }
@@ -6202,8 +6202,8 @@ mod tests {
         assert_eq!(port_read["ok"], true);
         assert_eq!(port_read["value"]["value"]["id"], json!("value"));
 
-        let wrong_type = post_json_with(
-            app,
+        let bool_value = post_json_with(
+            app.clone(),
             "/v0/sessions/default/control/event",
             json!({
                 "nodeId": "value_1",
@@ -6212,13 +6212,18 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(wrong_type["ok"], false);
-        assert_eq!(wrong_type["emitted"], json!([]));
-        assert!(
-            wrong_type["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("expects number.float")
+        assert_eq!(bool_value["ok"], true);
+        assert_eq!(
+            bool_value["emitted"][0]["message"],
+            json!({
+                "selector": "float",
+                "atoms": [{ "type": "float", "representation": "f32", "value": 1.0 }]
+            })
+        );
+        let state = get_json_with(app, "/v0/sessions/default/control/state").await;
+        assert_eq!(
+            state["values"]["value_1"],
+            json!({ "type": "float", "representation": "f32", "value": 1.0 })
         );
     }
 
@@ -7016,13 +7021,13 @@ mod tests {
               "schemaVersion": "0.1.0",
               "id": "core.float",
               "version": "0.1.0",
-              "displayName": "Float Value",
-              "category": "Values",
+              "displayName": "Float",
+              "category": "Typed Controls",
               "ports": value_f32_ports_json(),
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": []
+              "capabilities": ["control.number.float.v0.1"]
             }
           ]
         })
@@ -7060,7 +7065,7 @@ mod tests {
                 "id": "edge_value_target",
                 "source": { "nodeId": "value_1", "portId": "value" },
                 "target": { "nodeId": "target_1", "portId": "cold" },
-                "resolvedType": "number.float"
+                "resolvedType": "control.number.float"
               }
             ]
           },
@@ -7081,13 +7086,13 @@ mod tests {
               "schemaVersion": "0.1.0",
               "id": "core.float",
               "version": "0.1.0",
-              "displayName": "Float Value",
-              "category": "Values",
+              "displayName": "Float",
+              "category": "Typed Controls",
               "ports": value_f32_ports_current_json(),
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": []
+              "capabilities": ["control.number.float.v0.1"]
             }
           ]
         })
@@ -7112,7 +7117,7 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": { "flow": "event", "dataKind": "message.any" },
+            "type": { "flow": "control", "dataKind": "message.any" },
             "required": false,
             "activation": "trigger"
           },
@@ -7120,7 +7125,7 @@ mod tests {
             "id": "cold",
             "direction": "input",
             "label": "Cold",
-            "type": { "flow": "value", "dataKind": "number.float" },
+            "type": { "flow": "control", "dataKind": "number.float" },
             "required": false,
             "activation": "latched"
           },
@@ -7128,7 +7133,7 @@ mod tests {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.float" }
+            "type": { "flow": "control", "dataKind": "number.float" }
           }
         ])
     }
@@ -7154,7 +7159,7 @@ mod tests {
                     "id": "speed",
                     "direction": "input",
                     "label": "Speed",
-                    "type": "number.float",
+                    "type": "control.number.float",
                     "rate": "control",
                     "required": false,
                     "defaultValue": 0.5,
@@ -7185,7 +7190,7 @@ mod tests {
                   "id": "speed",
                   "direction": "input",
                   "label": "Speed",
-                  "type": "number.float",
+                  "type": "control.number.float",
                   "rate": "control",
                   "required": false,
                   "defaultValue": 0.5,
@@ -7480,22 +7485,22 @@ mod tests {
             "nodes": [
               {
                 "id": "a",
-                "kind": "core.value-transform",
+                "kind": "core.float-transform",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
-                  { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+                  { "id": "in", "direction": "input", "type": "control.number.float", "rate": "control" },
+                  { "id": "out", "direction": "output", "type": "control.number.float", "rate": "control" }
                 ]
               },
               {
                 "id": "b",
-                "kind": "core.value-transform",
+                "kind": "core.float-transform",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
-                  { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+                  { "id": "in", "direction": "input", "type": "control.number.float", "rate": "control" },
+                  { "id": "out", "direction": "output", "type": "control.number.float", "rate": "control" }
                 ]
               }
             ],
@@ -7516,18 +7521,18 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.value-transform",
+              "id": "core.float-transform",
               "version": "0.1.0",
               "displayName": "Value Transform",
               "category": "Core",
               "ports": [
-                { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
-                { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+                { "id": "in", "direction": "input", "type": "control.number.float", "rate": "control" },
+                { "id": "out", "direction": "output", "type": "control.number.float", "rate": "control" }
               ],
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["value.number.v0.1"]
+              "capabilities": ["control.number.float.v0.1"]
             }
           ]
         })
@@ -7875,25 +7880,39 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": "message.any",
-            "rate": "event",
+            "type": "control.message.any",
+            "rate": "control",
             "required": false,
-            "triggerMode": "trigger"
+            "triggerMode": "trigger",
+            "accepts": [
+              "control.number.float",
+              "control.number.int",
+              "control.number.uint",
+              "control.bool",
+              "event.bang"
+            ],
+            "messageSelectors": {
+              "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+              "silent": ["set"],
+              "trigger": ["bang", "float", "int", "uint", "bool"],
+              "store": ["set", "float", "int", "uint", "bool"],
+              "emit": ["bang", "float", "int", "uint", "bool"]
+            }
           },
           {
             "id": "cold",
             "direction": "input",
             "label": "Cold",
-            "type": "number.float",
+            "type": "control.number.float",
             "rate": "control",
             "required": false,
-            "triggerMode": "latched"
+            "triggerMode": "passive"
           },
           {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": "number.float",
+            "type": "control.number.float",
             "rate": "control"
           }
         ])

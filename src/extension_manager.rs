@@ -1305,7 +1305,7 @@ mod tests {
                     "displayName": "Bad",
                     "category": "Example",
                     "ports": [],
-                    "execution": { "model": "value" },
+                    "execution": { "model": "control" },
                     "state": { "persistent": false },
                     "permissions": [],
                     "capabilities": []
@@ -1487,9 +1487,9 @@ mod tests {
         let package_dir = temp_dir("core-package");
         fs::create_dir_all(package_dir.join("help")).unwrap();
         fs::create_dir_all(package_dir.join("tests")).unwrap();
-        fs::write(package_dir.join("help/value.md"), "# Value").unwrap();
-        fs::write(package_dir.join("tests/value.input.json"), "{}").unwrap();
-        fs::write(package_dir.join("tests/value.expected.json"), "{}").unwrap();
+        fs::write(package_dir.join("help/float.md"), "# Float").unwrap();
+        fs::write(package_dir.join("tests/float.input.json"), "{}").unwrap();
+        fs::write(package_dir.join("tests/float.expected.json"), "{}").unwrap();
         write_manifest(
             &package_dir,
             r#"{
@@ -1504,31 +1504,66 @@ mod tests {
                   {
                     "schema": "skenion.node.definition",
                     "schemaVersion": "0.1.0",
-                    "id": "core.value",
+                    "id": "core.float",
                     "version": "0.1.0",
-                    "displayName": "Value",
-                    "category": "Core",
+                    "displayName": "Float",
+                    "category": "Typed Controls",
                     "ports": [
-                      { "id": "out", "direction": "output", "type": "number.float", "rate": "control" }
+                      {
+                        "id": "in",
+                        "direction": "input",
+                        "type": "control.message.any",
+                        "rate": "control",
+                        "required": false,
+                        "triggerMode": "trigger",
+                        "accepts": [
+                          "control.number.float",
+                          "control.number.int",
+                          "control.number.uint",
+                          "control.bool",
+                          "event.bang"
+                        ],
+                        "messageSelectors": {
+                          "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+                          "silent": ["set"],
+                          "trigger": ["bang", "float", "int", "uint", "bool"],
+                          "store": ["set", "float", "int", "uint", "bool"],
+                          "emit": ["bang", "float", "int", "uint", "bool"]
+                        }
+                      },
+                      {
+                        "id": "cold",
+                        "direction": "input",
+                        "type": "control.number.float",
+                        "rate": "control",
+                        "required": false,
+                        "triggerMode": "passive"
+                      },
+                      {
+                        "id": "value",
+                        "direction": "output",
+                        "type": "control.number.float",
+                        "rate": "control"
+                      }
                     ],
-                    "execution": { "model": "value" },
+                    "execution": { "model": "control" },
                     "state": { "persistent": false },
                     "permissions": [],
-                    "capabilities": ["value.number.v0.1"]
+                    "capabilities": ["control.number.float.v0.1"]
                   }
                 ],
                 "help": [
-                  { "nodeId": "core.value", "markdownPath": "help/value.md" }
+                  { "nodeId": "core.float", "markdownPath": "help/float.md" }
                 ]
               },
               "permissions": [],
               "tests": [
                 {
-                  "id": "value-baseline",
+                  "id": "float-baseline",
                   "kind": "node",
-                  "target": "core.value",
-                  "fixturePath": "tests/value.input.json",
-                  "expectedPath": "tests/value.expected.json"
+                  "target": "core.float",
+                  "fixturePath": "tests/float.input.json",
+                  "expectedPath": "tests/float.expected.json"
                 }
               ]
             }"#,
@@ -1543,9 +1578,9 @@ mod tests {
             response.extensions[0].status,
             RuntimeExtensionStatus::Loaded
         );
-        assert_eq!(response.extensions[0].provided_nodes, vec!["core.value"]);
-        assert_eq!(response.extensions[0].provided_help, vec!["core.value"]);
-        assert_eq!(response.extensions[0].test_ids, vec!["value-baseline"]);
+        assert_eq!(response.extensions[0].provided_nodes, vec!["core.float"]);
+        assert_eq!(response.extensions[0].provided_help, vec!["core.float"]);
+        assert_eq!(response.extensions[0].test_ids, vec!["float-baseline"]);
     }
 
     #[test]

@@ -223,9 +223,9 @@ mod tests {
           "displayName": "Node",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -278,7 +278,7 @@ mod tests {
           "displayName": "Invalid",
           "category": "Core",
           "ports": [],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
