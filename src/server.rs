@@ -28,21 +28,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use skenion_contracts::{
     CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
-    PackageRegistryListResponseV01, RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata,
-    RuntimeCollaborationChange, RuntimeCollaborationConflict, RuntimeCollaborationNack,
-    RuntimeCollaborationNackReason, RuntimeCollaborationOperationBatch,
-    RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationDiagnostic,
-    RuntimeCollaborationOperationEnvelope, RuntimeCollaborationOperationPayload,
-    RuntimeCollaborationOperationResult, RuntimeCollaborationOperationStatus,
-    RuntimeCollaborationPresenceEnvelope, RuntimeCollaborationRebase,
-    RuntimeCollaborationRebaseStrategy, RuntimeCollaborationSelectionEnvelope,
-    RuntimeCollaborationServerClock, RuntimeCollaborationUndoRedoAction,
-    RuntimeSessionInfoResponse, validate_runtime_collaboration_operation_batch,
-    validate_runtime_collaboration_operation_batch_result,
-    validate_runtime_collaboration_operation_envelope,
-    validate_runtime_collaboration_operation_result,
-    validate_runtime_collaboration_presence_envelope,
-    validate_runtime_collaboration_selection_envelope,
 };
 use tokio_stream::{
     Stream, StreamExt,
@@ -52,33 +37,48 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     CURRENT_SCHEMA_VERSION, DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse,
-    NodeDefinition, NodeDefinitionCurrent, NodeRegistry, PreviewDocument, ProjectDocumentCurrent,
-    ProjectRequestCurrent, RunProjectRequestCurrent, RuntimeControlEventRequest,
-    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeExtensionManager,
-    RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
-    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope,
-    RuntimePackageManager, RuntimePackageRegistrySnapshot, RuntimePatchResponse,
-    RuntimePreviewStartRequest, RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic,
-    ShaderDiagnosticPhase, ShaderDiagnosticSource, build_execution_plan_request_current,
-    build_execution_plan_run_request_current, collaboration_broadcast_event_after_high_water,
-    collaboration_event, generated_shader_response_from_preview_document,
-    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
+    NodeDefinition, NodeDefinitionCurrent, NodeRegistry, PackageRegistryListResponseV01,
+    PreviewDocument, ProjectDocumentCurrent, ProjectRequestCurrent, RunProjectRequestCurrent,
+    RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata, RuntimeCollaborationChange,
+    RuntimeCollaborationConflict, RuntimeCollaborationNack, RuntimeCollaborationNackReason,
+    RuntimeCollaborationOperationBatch, RuntimeCollaborationOperationBatchResult,
+    RuntimeCollaborationOperationDiagnostic, RuntimeCollaborationOperationEnvelope,
+    RuntimeCollaborationOperationPayload, RuntimeCollaborationOperationResult,
+    RuntimeCollaborationOperationStatus, RuntimeCollaborationPresenceEnvelope,
+    RuntimeCollaborationRebase, RuntimeCollaborationRebaseStrategy,
+    RuntimeCollaborationSelectionEnvelope, RuntimeCollaborationServerClock,
+    RuntimeCollaborationUndoRedoAction, RuntimeControlEventRequest, RuntimeControlEventResponse,
+    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
+    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeExtensionRegistrySnapshot,
+    RuntimeIoDeviceListResponse, RuntimeIoDeviceManager, RuntimeLogSnapshotResponse,
+    RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope, RuntimePackageManager,
+    RuntimePackageRegistrySnapshot, RuntimePatchResponse, RuntimePreviewStartRequest,
+    RuntimeSessionEventKind, RuntimeSessionInfoResponse, RuntimeTelemetrySnapshot,
+    SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource,
+    build_execution_plan_request_current, build_execution_plan_run_request_current,
+    collaboration_broadcast_event_after_high_water, collaboration_event,
+    generated_shader_response_from_preview_document, project_document_payload_schema_diagnostics,
+    project_document_validation_diagnostics_current,
     realtime::handle_runtime_realtime_socket,
     run_dummy_execution,
     runtime_time::created_at_now,
     schema_version_diagnostic,
     session_registry::{
-        RuntimeSessionEventKind, RuntimeSessionRecord, RuntimeSessionRegistry, SessionEventsQuery,
-        capture_session_replay, event_cursor_from_headers, publish_session_event,
-        session_broadcast_event_after_high_water, session_event, session_snapshot_event,
+        RuntimeSessionRecord, RuntimeSessionRegistry, SessionEventsQuery, capture_session_replay,
+        event_cursor_from_headers, publish_session_event, session_broadcast_event_after_high_water,
+        session_event, session_snapshot_event,
     },
     sidecar::{
         RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
         RuntimeSidecarStartupResponse, runtime_connection_profile, sidecar_health_response,
         sidecar_shutdown_response, sidecar_startup_response,
     },
-    validate_project_request_current,
+    validate_project_request_current, validate_runtime_collaboration_operation_batch,
+    validate_runtime_collaboration_operation_batch_result,
+    validate_runtime_collaboration_operation_envelope,
+    validate_runtime_collaboration_operation_result,
+    validate_runtime_collaboration_presence_envelope,
+    validate_runtime_collaboration_selection_envelope,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -2802,6 +2802,13 @@ mod tests {
         sync::Arc,
     };
 
+    use crate::{
+        RuntimeCollaborationEventEnvelope, RuntimeCollaborationEventKind,
+        RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationResult,
+        validate_runtime_collaboration_event_envelope,
+        validate_runtime_collaboration_operation_batch_result,
+        validate_runtime_collaboration_operation_result, validate_runtime_session_event,
+    };
     use axum::{
         body::{Body, to_bytes},
         http::{
@@ -2812,13 +2819,6 @@ mod tests {
         },
     };
     use serde_json::{Value, json};
-    use skenion_contracts::{
-        RuntimeCollaborationEventEnvelope, RuntimeCollaborationEventKind,
-        RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationResult,
-        validate_runtime_collaboration_event_envelope,
-        validate_runtime_collaboration_operation_batch_result,
-        validate_runtime_collaboration_operation_result, validate_runtime_session_event,
-    };
     use tower::ServiceExt;
 
     use crate::{
@@ -4459,8 +4459,8 @@ mod tests {
         );
         let info = serde_json::from_value::<RuntimeSessionInfoResponse>(info)
             .expect("session info should match contract shape");
-        skenion_contracts::validate_runtime_session_info_response(&info)
-            .expect("session info should validate against contracts");
+        crate::validate_runtime_session_info_response(&info)
+            .expect("session info should validate against runtime transport");
     }
 
     #[tokio::test]

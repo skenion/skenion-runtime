@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use skenion_contracts::{
     CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
-    RuntimeConnectionProfile, RuntimeConnectionProfileMode, RuntimeEndpointMetadata,
-    RuntimeEndpointProtocol, RuntimeOwnershipMode, RuntimeProcessMetadata,
 };
 
-use crate::{DiagnosticSeverity, RUNTIME_API_VERSION, RuntimeDiagnostic};
+use crate::{
+    DiagnosticSeverity, RUNTIME_API_VERSION, RuntimeConnectionProfile,
+    RuntimeConnectionProfileMode, RuntimeDiagnostic, RuntimeEndpointMetadata,
+    RuntimeEndpointProtocol, RuntimeOwnershipMode, RuntimeProcessMetadata,
+};
 
 #[derive(Debug, Clone)]
 pub struct RuntimeEndpointConfig {

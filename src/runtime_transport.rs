@@ -1,0 +1,1792 @@
+use std::{collections::BTreeMap, error::Error, fmt};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use skenion_contracts::{
+    CanvasNodeViewV01, EdgeSpecV01, GraphNodeV01, GraphTargetRef, InterfaceDiagnosticDetailV01,
+    InterfaceIncidentEdgePolicyV01, PasteGraphFragmentRequest, ProjectDocumentV01,
+    validate_paste_graph_fragment_request, validate_project_document_v01,
+};
+
+use crate::{project_current::is_payload_identity_node_kind_current, server::RuntimeDiagnostic};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeValidationError {
+    pub message: String,
+}
+
+impl RuntimeValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeValidationReport {
+    errors: Vec<RuntimeValidationError>,
+}
+
+impl RuntimeValidationReport {
+    fn new(errors: Vec<RuntimeValidationError>) -> Self {
+        Self { errors }
+    }
+
+    pub fn errors(&self) -> &[RuntimeValidationError] {
+        &self.errors
+    }
+}
+
+impl fmt::Display for RuntimeValidationReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            self.errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    }
+}
+
+impl Error for RuntimeValidationReport {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeOperationAttribution {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeOperationEnvelope {
+    pub schema: String,
+    pub schema_version: String,
+    pub id: String,
+    pub kind: String,
+    pub request: PasteGraphFragmentRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<RuntimeOperationAttribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct IdRemapResult {
+    pub node_id_map: BTreeMap<String, String>,
+    pub edge_id_map: BTreeMap<String, String>,
+    pub omitted_edge_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeOperationDiagnostic {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<GraphTargetRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicates: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edges: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_policy: Option<InterfaceIncidentEdgePolicyV01>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_detail: Option<InterfaceDiagnosticDetailV01>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteGraphFragmentResponse {
+    pub schema: String,
+    pub schema_version: String,
+    pub ok: bool,
+    pub applied: bool,
+    pub conflict: bool,
+    pub target: GraphTargetRef,
+    pub revision_before: String,
+    pub revision_after: Option<String>,
+    pub history_entry_id: Option<String>,
+    pub id_remap: IdRemapResult,
+    pub diagnostics: Vec<RuntimeOperationDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationCausalMetadata {
+    pub base_revision: String,
+    pub base_sequence: u64,
+    pub vector: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_operation_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeCollaborationAuthSubjectKind {
+    Anonymous,
+    User,
+    Service,
+    Deferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationAuthSubject {
+    pub kind: RuntimeCollaborationAuthSubjectKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationParticipant {
+    pub participant_id: String,
+    pub session_id: String,
+    pub joined_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_subject: Option<RuntimeCollaborationAuthSubject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationCanvasPosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "op", rename_all_fields = "camelCase")]
+pub enum RuntimeCollaborationChange {
+    #[serde(rename = "node.add")]
+    NodeAdd {
+        change_id: String,
+        node: Box<GraphNodeV01>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        view: Option<RuntimeCollaborationCanvasPosition>,
+    },
+    #[serde(rename = "node.move")]
+    NodeMove {
+        change_id: String,
+        node_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<RuntimeCollaborationCanvasPosition>,
+        to: RuntimeCollaborationCanvasPosition,
+    },
+    #[serde(rename = "node.delete")]
+    NodeDelete {
+        change_id: String,
+        node_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tombstone_id: Option<String>,
+    },
+    #[serde(rename = "edge.connect")]
+    EdgeConnect {
+        change_id: String,
+        edge: Box<EdgeSpecV01>,
+    },
+    #[serde(rename = "edge.disconnect")]
+    EdgeDisconnect { change_id: String, edge_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeCollaborationUndoRedoAction {
+    Undo,
+    Redo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeCollaborationUndoScopeKind {
+    Participant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationUndoScope {
+    pub kind: RuntimeCollaborationUndoScopeKind,
+    pub participant_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuntimeCollaborationOperationPayload {
+    ChangeSet {
+        target: GraphTargetRef,
+        changes: Vec<RuntimeCollaborationChange>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        undo_group_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    PasteGraphFragment {
+        request: Box<PasteGraphFragmentRequest>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        undo_group_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    UndoRedo {
+        action: RuntimeCollaborationUndoRedoAction,
+        scope: RuntimeCollaborationUndoScope,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject_operation_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        undo_group_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_operations: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationOperationEnvelope {
+    pub schema: String,
+    pub schema_version: String,
+    pub operation_id: String,
+    pub session_id: String,
+    pub participant_id: String,
+    pub idempotency_key: String,
+    pub causal: RuntimeCollaborationCausalMetadata,
+    pub payload: RuntimeCollaborationOperationPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_subject: Option<RuntimeCollaborationAuthSubject>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub submitted_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationOperationBatch {
+    pub schema: String,
+    pub schema_version: String,
+    pub session_id: String,
+    pub operations: Vec<RuntimeCollaborationOperationEnvelope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submitted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationOperationDiagnostic {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationServerClock {
+    pub revision: String,
+    pub sequence: u64,
+    pub vector: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationAck {
+    pub sequence: u64,
+    pub revision: String,
+    pub server_clock: RuntimeCollaborationServerClock,
+    pub applied_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeCollaborationNackReason {
+    BaseRevisionMismatch,
+    CausalityGap,
+    DuplicateIdempotencyKey,
+    InvalidOperation,
+    ParticipantExpired,
+    UnsupportedOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationNack {
+    pub reason: RuntimeCollaborationNackReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Vec<RuntimeCollaborationOperationDiagnostic>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationConflict {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeCollaborationRebaseStrategy {
+    OtTransform,
+    CrdtMerge,
+    ServerReject,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationRebase {
+    pub from: RuntimeCollaborationCausalMetadata,
+    pub to: RuntimeCollaborationCausalMetadata,
+    pub strategy: RuntimeCollaborationRebaseStrategy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transformed_payload: Option<RuntimeCollaborationOperationPayload>,
+    pub conflicts: Vec<RuntimeCollaborationConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeCollaborationOperationStatus {
+    Accepted,
+    Duplicate,
+    Rejected,
+    Rebased,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationOperationResult {
+    pub schema: String,
+    pub schema_version: String,
+    pub session_id: String,
+    pub operation_id: String,
+    pub participant_id: String,
+    pub idempotency_key: String,
+    pub status: RuntimeCollaborationOperationStatus,
+    pub causal: RuntimeCollaborationCausalMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ack: Option<RuntimeCollaborationAck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nack: Option<RuntimeCollaborationNack>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebase: Option<RuntimeCollaborationRebase>,
+    pub diagnostics: Vec<RuntimeCollaborationOperationDiagnostic>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationOperationBatchResult {
+    pub schema: String,
+    pub schema_version: String,
+    pub session_id: String,
+    pub results: Vec<RuntimeCollaborationOperationResult>,
+    pub diagnostics: Vec<RuntimeCollaborationOperationDiagnostic>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeCollaborationPresenceState {
+    Joined,
+    Active,
+    Idle,
+    Away,
+    Left,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationPresence {
+    pub state: RuntimeCollaborationPresenceState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_window_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationPresenceEnvelope {
+    pub schema: String,
+    pub schema_version: String,
+    pub session_id: String,
+    pub participant_id: String,
+    pub presence: RuntimeCollaborationPresence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_subject: Option<RuntimeCollaborationAuthSubject>,
+    pub updated_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationPortEndpoint {
+    pub node_id: String,
+    pub port_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationTextPosition {
+    pub node_id: String,
+    pub field: String,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuntimeCollaborationSelectionRange {
+    Nodes {
+        node_ids: Vec<String>,
+    },
+    Edges {
+        edge_ids: Vec<String>,
+    },
+    Ports {
+        endpoints: Vec<RuntimeCollaborationPortEndpoint>,
+    },
+    Text {
+        anchor: RuntimeCollaborationTextPosition,
+        focus: RuntimeCollaborationTextPosition,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationSelection {
+    pub ranges: Vec<RuntimeCollaborationSelectionRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_range_index: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuntimeCollaborationCursor {
+    Canvas {
+        x: f64,
+        y: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_window_id: Option<String>,
+    },
+    Node {
+        node_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_window_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationSelectionEnvelope {
+    pub schema: String,
+    pub schema_version: String,
+    pub session_id: String,
+    pub participant_id: String,
+    pub target: GraphTargetRef,
+    pub selection: RuntimeCollaborationSelection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<RuntimeCollaborationCursor>,
+    pub updated_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuntimeCollaborationEventPayload {
+    OperationResult {
+        result: Box<RuntimeCollaborationOperationResult>,
+    },
+    Presence {
+        presence: Box<RuntimeCollaborationPresenceEnvelope>,
+    },
+    Selection {
+        selection: Box<RuntimeCollaborationSelectionEnvelope>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeCollaborationEventKind {
+    OperationResult,
+    Presence,
+    Selection,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCollaborationEventEnvelope {
+    pub schema: String,
+    pub schema_version: String,
+    pub event_id: String,
+    pub session_id: String,
+    pub sequence: u64,
+    pub causal: RuntimeCollaborationCausalMetadata,
+    pub kind: RuntimeCollaborationEventKind,
+    pub payload: RuntimeCollaborationEventPayload,
+    pub replay: RuntimeEventReplayMetadata,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeSessionEventKind {
+    Snapshot,
+    Load,
+    Clear,
+    Mutate,
+    Undo,
+    Redo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeSessionLifecycleState {
+    Initializing,
+    Ready,
+    Closing,
+    Closed,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeConnectionProfileMode {
+    LocalManaged,
+    LocalShared,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeOwnershipMode {
+    OwnedChild,
+    External,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeEndpointProtocol {
+    Http,
+    Https,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEndpointMetadata {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_url: Option<String>,
+    pub protocol: RuntimeEndpointProtocol,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeProcessMetadata {
+    pub owned_by_host: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeConnectionProfile {
+    pub mode: RuntimeConnectionProfileMode,
+    pub ownership: RuntimeOwnershipMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub endpoint: RuntimeEndpointMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<RuntimeProcessMetadata>,
+}
+
+pub type RuntimeTransportProjectSnapshot = ProjectDocumentV01;
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTransportSessionSnapshot {
+    pub session_revision: u64,
+    pub view_revision: u64,
+    pub control_revision: u64,
+    pub project: Option<RuntimeTransportProjectSnapshot>,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub plan: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTransportMutationRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<RuntimeOperationEnvelope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_patch: Option<RuntimeTransportViewPatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RuntimeTransportViewPatch {
+    pub base_view_revision: u64,
+    pub ops: Vec<RuntimeTransportViewPatchOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, tag = "op")]
+pub enum RuntimeTransportViewPatchOperation {
+    #[serde(rename = "setNodeView")]
+    SetNodeView {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        view: CanvasNodeViewV01,
+    },
+    #[serde(rename = "moveNodeView")]
+    MoveNodeView {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<CanvasNodeViewV01>,
+        to: CanvasNodeViewV01,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeTransportHistoryEntryKind {
+    Apply,
+    Undo,
+    Redo,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTransportHistoryEntry {
+    pub id: String,
+    pub sequence: u64,
+    pub kind: RuntimeTransportHistoryEntryKind,
+    pub mutation: RuntimeTransportMutationRequest,
+    pub inverse_mutation: RuntimeTransportMutationRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTransportHistory {
+    pub schema: String,
+    pub schema_version: String,
+    pub entries: Vec<RuntimeTransportHistoryEntry>,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub undo_depth: u64,
+    pub redo_depth: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEventReplayWindow {
+    pub cursor_kind: String,
+    pub current_cursor: String,
+    pub earliest_sequence: u64,
+    pub latest_sequence: u64,
+    pub replay_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overflow: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSessionCapabilitySet {
+    pub session_addressing: bool,
+    pub event_replay: bool,
+    pub multi_window: bool,
+    pub profiles: Vec<RuntimeConnectionProfileMode>,
+    pub auth_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSessionInfoResponse {
+    pub schema: String,
+    pub schema_version: String,
+    pub ok: bool,
+    pub session_id: String,
+    pub lifecycle: RuntimeSessionLifecycleState,
+    pub snapshot: RuntimeTransportSessionSnapshot,
+    pub profile: RuntimeConnectionProfile,
+    pub capabilities: RuntimeSessionCapabilitySet,
+    pub event_replay: RuntimeEventReplayWindow,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeEventReplayGapReason {
+    RetentionOverflow,
+    StreamReset,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEventReplayGap {
+    pub expected_sequence: u64,
+    pub actual_sequence: u64,
+    pub reason: RuntimeEventReplayGapReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEventReplayMetadata {
+    pub cursor: String,
+    pub previous_cursor: Option<String>,
+    pub replayed: bool,
+    pub gap: Option<RuntimeEventReplayGap>,
+    pub overflow: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSessionEvent {
+    pub schema: String,
+    pub schema_version: String,
+    pub id: String,
+    pub session_id: String,
+    pub sequence: u64,
+    pub session_revision: u64,
+    pub kind: RuntimeSessionEventKind,
+    pub snapshot: RuntimeTransportSessionSnapshot,
+    pub history: RuntimeTransportHistory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<RuntimeTransportHistoryEntry>,
+    pub replay: RuntimeEventReplayMetadata,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub created_at: String,
+}
+
+pub fn validate_runtime_operation_envelope(
+    envelope: &RuntimeOperationEnvelope,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if envelope.schema != "skenion.runtime.operation" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.operation, found {}",
+            envelope.schema
+        )));
+    }
+    if envelope.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            envelope.schema_version
+        )));
+    }
+    if envelope.id.is_empty() {
+        errors.push(RuntimeValidationError::new(
+            "runtime operation id must not be empty",
+        ));
+    }
+    if envelope.kind != "pasteGraphFragment" {
+        errors.push(RuntimeValidationError::new(format!(
+            "unsupported runtime operation kind: {}",
+            envelope.kind
+        )));
+    }
+    if !paste_request_contains_payload_identity(&envelope.request)
+        && let Err(report) = validate_paste_graph_fragment_request(&envelope.request)
+    {
+        errors.extend(runtime_errors_from_contract_report(report.to_string()));
+    }
+
+    finish_validation(errors)
+}
+
+pub fn validate_paste_graph_fragment_response(
+    response: &PasteGraphFragmentResponse,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if response.schema != "skenion.runtime.paste-graph-fragment.response" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.paste-graph-fragment.response, found {}",
+            response.schema
+        )));
+    }
+    if response.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            response.schema_version
+        )));
+    }
+    if response.applied && !response.ok {
+        errors.push(RuntimeValidationError::new(
+            "paste response cannot be applied when ok is false",
+        ));
+    }
+    if response.applied && response.revision_after.is_none() {
+        errors.push(RuntimeValidationError::new(
+            "applied paste response must include revisionAfter",
+        ));
+    }
+    for diagnostic in &response.diagnostics {
+        if matches!(
+            diagnostic.code.as_str(),
+            "interface-drift" | "invalid-incident-edge"
+        ) && diagnostic.interface_detail.is_none()
+        {
+            errors.push(RuntimeValidationError::new(format!(
+                "runtime operation diagnostic {} requires interfaceDetail",
+                diagnostic.code
+            )));
+        }
+        if let Some(detail) = &diagnostic.interface_detail
+            && detail.recovery_actions.is_empty()
+        {
+            errors.push(RuntimeValidationError::new(format!(
+                "runtime operation diagnostic {} interfaceDetail requires recoveryActions",
+                diagnostic.code
+            )));
+        }
+    }
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_collaboration_operation_envelope(
+    envelope: &RuntimeCollaborationOperationEnvelope,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if envelope.schema != "skenion.runtime.collaboration.operation" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.collaboration.operation, found {}",
+            envelope.schema
+        )));
+    }
+    if envelope.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            envelope.schema_version
+        )));
+    }
+    errors.extend(validate_runtime_collaboration_operation_envelope_semantics(
+        envelope,
+    ));
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_collaboration_operation_batch(
+    batch: &RuntimeCollaborationOperationBatch,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if batch.schema != "skenion.runtime.collaboration.operation-batch" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.collaboration.operation-batch, found {}",
+            batch.schema
+        )));
+    }
+    if batch.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            batch.schema_version
+        )));
+    }
+    errors.extend(duplicate_errors(
+        batch
+            .operations
+            .iter()
+            .map(|operation| operation.idempotency_key.as_str())
+            .collect(),
+        "collaboration idempotency key",
+    ));
+    for operation in &batch.operations {
+        if operation.session_id != batch.session_id {
+            errors.push(RuntimeValidationError::new(
+                "collaboration batch operation sessionId must match batch sessionId",
+            ));
+        }
+        errors.extend(validate_runtime_collaboration_operation_envelope_semantics(
+            operation,
+        ));
+    }
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_collaboration_operation_result(
+    result: &RuntimeCollaborationOperationResult,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if result.schema != "skenion.runtime.collaboration.operation-result" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.collaboration.operation-result, found {}",
+            result.schema
+        )));
+    }
+    if result.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            result.schema_version
+        )));
+    }
+
+    errors.extend(validate_runtime_collaboration_causality(
+        &result.causal,
+        "operation result causal",
+    ));
+
+    let has_ack = result.ack.is_some();
+    let has_nack = result.nack.is_some();
+    let has_rebase = result.rebase.is_some();
+
+    let status_requires_ack = matches!(
+        result.status,
+        RuntimeCollaborationOperationStatus::Accepted
+            | RuntimeCollaborationOperationStatus::Rebased
+    );
+    if status_requires_ack && !has_ack {
+        errors.push(RuntimeValidationError::new(
+            "accepted or rebased collaboration result must include ack",
+        ));
+    }
+    if result.status == RuntimeCollaborationOperationStatus::Accepted && has_nack {
+        errors.push(RuntimeValidationError::new(
+            "accepted collaboration result must not include nack or rebase",
+        ));
+    }
+    if result.status == RuntimeCollaborationOperationStatus::Accepted && has_rebase {
+        errors.push(RuntimeValidationError::new(
+            "accepted collaboration result must not include nack or rebase",
+        ));
+    }
+
+    let status_requires_nack = matches!(
+        result.status,
+        RuntimeCollaborationOperationStatus::Duplicate
+            | RuntimeCollaborationOperationStatus::Rejected
+    );
+    if status_requires_nack && !has_nack {
+        errors.push(RuntimeValidationError::new(
+            "duplicate or rejected collaboration result must include nack",
+        ));
+    }
+    let has_duplicate_idempotency_nack = match result.nack.as_ref() {
+        Some(nack) => nack.reason == RuntimeCollaborationNackReason::DuplicateIdempotencyKey,
+        None => false,
+    };
+    if result.status == RuntimeCollaborationOperationStatus::Duplicate
+        && !has_duplicate_idempotency_nack
+    {
+        errors.push(RuntimeValidationError::new(
+            "duplicate collaboration result nack reason must be duplicate-idempotency-key",
+        ));
+    }
+    if result.status == RuntimeCollaborationOperationStatus::Rebased && !has_rebase {
+        errors.push(RuntimeValidationError::new(
+            "rebased collaboration result must include rebase metadata",
+        ));
+    }
+    if let Some(rebase) = &result.rebase {
+        errors.extend(validate_runtime_collaboration_causality(
+            &rebase.from,
+            "rebase from causal",
+        ));
+        errors.extend(validate_runtime_collaboration_causality(
+            &rebase.to,
+            "rebase to causal",
+        ));
+    }
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_collaboration_operation_batch_result(
+    result: &RuntimeCollaborationOperationBatchResult,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if result.schema != "skenion.runtime.collaboration.operation-batch-result" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.collaboration.operation-batch-result, found {}",
+            result.schema
+        )));
+    }
+    if result.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            result.schema_version
+        )));
+    }
+    if result.results.is_empty() {
+        errors.push(RuntimeValidationError::new(
+            "collaboration batch result must include at least one operation result",
+        ));
+    }
+    errors.extend(duplicate_errors(
+        result
+            .results
+            .iter()
+            .map(|operation_result| operation_result.idempotency_key.as_str())
+            .collect(),
+        "collaboration batch result idempotency key",
+    ));
+    for operation_result in &result.results {
+        if operation_result.session_id != result.session_id {
+            errors.push(RuntimeValidationError::new(
+                "collaboration batch result operation sessionId must match batch result sessionId",
+            ));
+        }
+        if let Err(report) = validate_runtime_collaboration_operation_result(operation_result) {
+            errors.extend(report.errors().iter().cloned());
+        }
+    }
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_collaboration_presence_envelope(
+    presence: &RuntimeCollaborationPresenceEnvelope,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if presence.schema != "skenion.runtime.collaboration.presence" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.collaboration.presence, found {}",
+            presence.schema
+        )));
+    }
+    if presence.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            presence.schema_version
+        )));
+    }
+    errors.extend(validate_runtime_collaboration_auth_separation(
+        &presence.participant_id,
+        presence.auth_subject.as_ref(),
+        "presence",
+    ));
+    errors.extend(validate_runtime_collaboration_expiry(
+        &presence.updated_at,
+        &presence.expires_at,
+        "presence",
+    ));
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_collaboration_selection_envelope(
+    selection: &RuntimeCollaborationSelectionEnvelope,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if selection.schema != "skenion.runtime.collaboration.selection" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.collaboration.selection, found {}",
+            selection.schema
+        )));
+    }
+    if selection.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            selection.schema_version
+        )));
+    }
+    errors.extend(validate_runtime_collaboration_expiry(
+        &selection.updated_at,
+        &selection.expires_at,
+        "selection",
+    ));
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_collaboration_event_envelope(
+    event: &RuntimeCollaborationEventEnvelope,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if event.schema != "skenion.runtime.collaboration.event" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.collaboration.event, found {}",
+            event.schema
+        )));
+    }
+    if event.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            event.schema_version
+        )));
+    }
+    errors.extend(validate_runtime_collaboration_causality(
+        &event.causal,
+        "collaboration event causal",
+    ));
+    if event.kind != runtime_collaboration_event_payload_kind(&event.payload) {
+        errors.push(RuntimeValidationError::new(
+            "collaboration event kind must match payload kind",
+        ));
+    }
+    match &event.replay.gap {
+        Some(gap) if gap.expected_sequence >= gap.actual_sequence => {
+            errors.push(RuntimeValidationError::new(
+                "collaboration event replay gap expectedSequence must be less than actualSequence",
+            ));
+        }
+        _ => {}
+    }
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_session_info_response(
+    response: &RuntimeSessionInfoResponse,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if response.schema != "skenion.runtime.session.info" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.session.info, found {}",
+            response.schema
+        )));
+    }
+    if response.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            response.schema_version
+        )));
+    }
+    if response.session_id.is_empty() {
+        errors.push(RuntimeValidationError::new("sessionId must not be empty"));
+    }
+    errors.extend(runtime_session_snapshot_errors(&response.snapshot));
+    errors.extend(runtime_diagnostic_errors(
+        "session info",
+        &response.diagnostics,
+    ));
+    errors.extend(runtime_profile_errors(&response.profile));
+    if response.capabilities.auth_policy != "deferred" {
+        errors.push(RuntimeValidationError::new(
+            "runtime session authPolicy must be deferred",
+        ));
+    }
+    if response.event_replay.cursor_kind != "sequence" {
+        errors.push(RuntimeValidationError::new(
+            "runtime eventReplay cursorKind must be sequence",
+        ));
+    }
+    if response.event_replay.current_cursor.is_empty() {
+        errors.push(RuntimeValidationError::new(
+            "runtime eventReplay currentCursor must not be empty",
+        ));
+    }
+    if response.event_replay.earliest_sequence == 0 {
+        errors.push(RuntimeValidationError::new(
+            "runtime eventReplay earliestSequence must be at least 1",
+        ));
+    }
+    if matches!(
+        (&response.profile.mode, &response.profile.ownership),
+        (
+            RuntimeConnectionProfileMode::LocalManaged,
+            RuntimeOwnershipMode::OwnedChild
+        ) | (
+            RuntimeConnectionProfileMode::LocalShared,
+            RuntimeOwnershipMode::External
+        ) | (
+            RuntimeConnectionProfileMode::Remote,
+            RuntimeOwnershipMode::Remote
+        )
+    ) {
+    } else {
+        errors.push(RuntimeValidationError::new(
+            "runtime profile ownership must match local-managed, local-shared, or remote mode",
+        ));
+    }
+
+    finish_validation(errors)
+}
+
+pub fn validate_runtime_session_event(
+    event: &RuntimeSessionEvent,
+) -> Result<(), RuntimeValidationReport> {
+    let mut errors = Vec::new();
+    if event.schema != "skenion.runtime.session.event" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schema skenion.runtime.session.event, found {}",
+            event.schema
+        )));
+    }
+    if event.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected schemaVersion 0.1.0, found {}",
+            event.schema_version
+        )));
+    }
+    if event.session_id.is_empty() {
+        errors.push(RuntimeValidationError::new("sessionId must not be empty"));
+    }
+    if event.id.is_empty() {
+        errors.push(RuntimeValidationError::new("event id must not be empty"));
+    }
+    if event.sequence == 0 {
+        errors.push(RuntimeValidationError::new("sequence must be at least 1"));
+    }
+    if event.created_at.is_empty() {
+        errors.push(RuntimeValidationError::new("createdAt must not be empty"));
+    }
+    errors.extend(runtime_session_snapshot_errors(&event.snapshot));
+    errors.extend(runtime_diagnostic_errors("event", &event.diagnostics));
+    errors.extend(runtime_history_errors(&event.history));
+    if let Some(mutation) = &event.mutation {
+        errors.extend(runtime_history_entry_errors(mutation, "mutation"));
+    }
+    if event.replay.cursor.is_empty() {
+        errors.push(RuntimeValidationError::new(
+            "replay cursor must not be empty",
+        ));
+    }
+    if event
+        .replay
+        .previous_cursor
+        .as_ref()
+        .is_some_and(String::is_empty)
+    {
+        errors.push(RuntimeValidationError::new(
+            "replay previousCursor must not be empty",
+        ));
+    }
+    if let Some(gap) = &event.replay.gap {
+        if gap.expected_sequence == 0 || gap.actual_sequence == 0 {
+            errors.push(RuntimeValidationError::new(
+                "replay gap sequences must be at least 1",
+            ));
+        }
+        if gap.expected_sequence >= gap.actual_sequence {
+            errors.push(RuntimeValidationError::new(
+                "replay gap expectedSequence must be less than actualSequence",
+            ));
+        }
+    }
+    if event.session_revision != event.snapshot.session_revision {
+        errors.push(RuntimeValidationError::new(
+            "event sessionRevision must match snapshot.sessionRevision",
+        ));
+    }
+
+    finish_validation(errors)
+}
+
+fn validate_runtime_collaboration_causality(
+    causal: &RuntimeCollaborationCausalMetadata,
+    label: &str,
+) -> Vec<RuntimeValidationError> {
+    let max_vector = causal.vector.values().copied().max().unwrap_or(0);
+    if causal.base_sequence < max_vector {
+        vec![RuntimeValidationError::new(format!(
+            "{label} baseSequence must be greater than or equal to the causal vector maximum"
+        ))]
+    } else {
+        Vec::new()
+    }
+}
+
+fn validate_runtime_collaboration_auth_separation(
+    participant_id: &str,
+    auth_subject: Option<&RuntimeCollaborationAuthSubject>,
+    label: &str,
+) -> Vec<RuntimeValidationError> {
+    let Some(subject) = auth_subject else {
+        return Vec::new();
+    };
+    let Some(subject_id) = subject.subject_id.as_deref() else {
+        return Vec::new();
+    };
+
+    if subject_id == participant_id {
+        vec![RuntimeValidationError::new(format!(
+            "{label} participantId must not mirror auth subject id"
+        ))]
+    } else {
+        Vec::new()
+    }
+}
+
+fn validate_runtime_collaboration_expiry(
+    updated_at: &str,
+    expires_at: &str,
+    label: &str,
+) -> Vec<RuntimeValidationError> {
+    if expires_at <= updated_at {
+        vec![RuntimeValidationError::new(format!(
+            "{label} expiresAt must be later than updatedAt"
+        ))]
+    } else {
+        Vec::new()
+    }
+}
+
+fn validate_runtime_collaboration_payload(
+    payload: &RuntimeCollaborationOperationPayload,
+    participant_id: &str,
+) -> Vec<RuntimeValidationError> {
+    match payload {
+        RuntimeCollaborationOperationPayload::ChangeSet { changes, .. } => duplicate_errors(
+            changes
+                .iter()
+                .map(runtime_collaboration_change_id)
+                .collect(),
+            "collaboration change id",
+        ),
+        RuntimeCollaborationOperationPayload::PasteGraphFragment { request, .. } => {
+            if paste_request_contains_payload_identity(request) {
+                return Vec::new();
+            }
+            match validate_paste_graph_fragment_request(request) {
+                Ok(_) => Vec::new(),
+                Err(report) => runtime_errors_from_contract_report(report.to_string()),
+            }
+        }
+        RuntimeCollaborationOperationPayload::UndoRedo { scope, .. } => {
+            if scope.participant_id != participant_id {
+                vec![RuntimeValidationError::new(
+                    "undoRedo scope participantId must match operation participantId",
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn validate_runtime_collaboration_operation_envelope_semantics(
+    envelope: &RuntimeCollaborationOperationEnvelope,
+) -> Vec<RuntimeValidationError> {
+    let mut errors = Vec::new();
+    errors.extend(validate_runtime_collaboration_causality(
+        &envelope.causal,
+        "operation causal",
+    ));
+    errors.extend(validate_runtime_collaboration_auth_separation(
+        &envelope.participant_id,
+        envelope.auth_subject.as_ref(),
+        "operation",
+    ));
+    errors.extend(validate_runtime_collaboration_payload(
+        &envelope.payload,
+        &envelope.participant_id,
+    ));
+
+    if !envelope
+        .causal
+        .vector
+        .contains_key(&envelope.participant_id)
+    {
+        errors.push(RuntimeValidationError::new(
+            "operation causal vector must include participantId",
+        ));
+    }
+
+    errors
+}
+
+fn runtime_collaboration_change_id(change: &RuntimeCollaborationChange) -> &str {
+    match change {
+        RuntimeCollaborationChange::NodeAdd { change_id, .. } => change_id,
+        RuntimeCollaborationChange::NodeMove { change_id, .. } => change_id,
+        RuntimeCollaborationChange::NodeDelete { change_id, .. } => change_id,
+        RuntimeCollaborationChange::EdgeConnect { change_id, .. } => change_id,
+        RuntimeCollaborationChange::EdgeDisconnect { change_id, .. } => change_id,
+    }
+}
+
+fn paste_request_contains_payload_identity(request: &PasteGraphFragmentRequest) -> bool {
+    request
+        .fragment
+        .nodes
+        .iter()
+        .any(|node| is_payload_identity_node_kind_current(&node.kind))
+}
+
+fn runtime_collaboration_event_payload_kind(
+    payload: &RuntimeCollaborationEventPayload,
+) -> RuntimeCollaborationEventKind {
+    match payload {
+        RuntimeCollaborationEventPayload::OperationResult { .. } => {
+            RuntimeCollaborationEventKind::OperationResult
+        }
+        RuntimeCollaborationEventPayload::Presence { .. } => {
+            RuntimeCollaborationEventKind::Presence
+        }
+        RuntimeCollaborationEventPayload::Selection { .. } => {
+            RuntimeCollaborationEventKind::Selection
+        }
+    }
+}
+
+fn runtime_profile_errors(profile: &RuntimeConnectionProfile) -> Vec<RuntimeValidationError> {
+    let mut errors = Vec::new();
+    if profile.endpoint.url.is_empty() {
+        errors.push(RuntimeValidationError::new(
+            "endpoint url must not be empty",
+        ));
+    }
+    if profile
+        .endpoint
+        .canonical_url
+        .as_ref()
+        .is_some_and(String::is_empty)
+    {
+        errors.push(RuntimeValidationError::new(
+            "endpoint canonicalUrl must not be empty",
+        ));
+    }
+    if profile.endpoint.host.as_ref().is_some_and(String::is_empty) {
+        errors.push(RuntimeValidationError::new(
+            "endpoint host must not be empty",
+        ));
+    }
+    if let Some(process) = &profile.process {
+        if process.pid == Some(0) {
+            errors.push(RuntimeValidationError::new(
+                "process pid must be at least 1",
+            ));
+        }
+        if process
+            .executable_path
+            .as_ref()
+            .is_some_and(String::is_empty)
+        {
+            errors.push(RuntimeValidationError::new(
+                "process executablePath must not be empty",
+            ));
+        }
+        if process
+            .working_directory
+            .as_ref()
+            .is_some_and(String::is_empty)
+        {
+            errors.push(RuntimeValidationError::new(
+                "process workingDirectory must not be empty",
+            ));
+        }
+        if process
+            .owner_window_id
+            .as_ref()
+            .is_some_and(String::is_empty)
+        {
+            errors.push(RuntimeValidationError::new(
+                "process ownerWindowId must not be empty",
+            ));
+        }
+        if process.platform.as_ref().is_some_and(String::is_empty) {
+            errors.push(RuntimeValidationError::new(
+                "process platform must not be empty",
+            ));
+        }
+        if process.arch.as_ref().is_some_and(String::is_empty) {
+            errors.push(RuntimeValidationError::new(
+                "process arch must not be empty",
+            ));
+        }
+    }
+    errors
+}
+
+fn runtime_session_snapshot_errors(
+    snapshot: &RuntimeTransportSessionSnapshot,
+) -> Vec<RuntimeValidationError> {
+    let mut errors = Vec::new();
+    errors.extend(runtime_diagnostic_errors("snapshot", &snapshot.diagnostics));
+    if snapshot.plan.as_ref().is_some_and(|plan| !plan.is_object()) {
+        errors.push(RuntimeValidationError::new(
+            "snapshot plan must be an object or null",
+        ));
+    }
+    if let Some(project) = &snapshot.project
+        && let Err(report) = validate_project_document_v01(project)
+    {
+        errors.extend(report.errors().iter().map(|error| {
+            RuntimeValidationError::new(format!("snapshot project {}", error.message))
+        }));
+    }
+    errors
+}
+
+fn runtime_diagnostic_errors(
+    label: &str,
+    diagnostics: &[RuntimeDiagnostic],
+) -> Vec<RuntimeValidationError> {
+    let mut errors = Vec::new();
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.is_empty())
+    {
+        errors.push(RuntimeValidationError::new(format!(
+            "{label} diagnostics must include non-empty message"
+        )));
+    }
+    errors
+}
+
+fn runtime_history_errors(history: &RuntimeTransportHistory) -> Vec<RuntimeValidationError> {
+    let mut errors = Vec::new();
+    if history.schema != "skenion.runtime.history" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected history schema skenion.runtime.history, found {}",
+            history.schema
+        )));
+    }
+    if history.schema_version != "0.1.0" {
+        errors.push(RuntimeValidationError::new(format!(
+            "expected history schemaVersion 0.1.0, found {}",
+            history.schema_version
+        )));
+    }
+    for entry in &history.entries {
+        errors.extend(runtime_history_entry_errors(entry, "history entry"));
+    }
+    errors
+}
+
+fn runtime_history_entry_errors(
+    entry: &RuntimeTransportHistoryEntry,
+    label: &str,
+) -> Vec<RuntimeValidationError> {
+    let mut errors = Vec::new();
+    if entry.id.is_empty() {
+        errors.push(RuntimeValidationError::new(format!(
+            "{label} id must not be empty"
+        )));
+    }
+    if entry.sequence == 0 {
+        errors.push(RuntimeValidationError::new(format!(
+            "{label} sequence must be at least 1"
+        )));
+    }
+    if entry.created_at.is_empty() {
+        errors.push(RuntimeValidationError::new(format!(
+            "{label} createdAt must not be empty"
+        )));
+    }
+    if entry
+        .subject_event_id
+        .as_ref()
+        .is_some_and(String::is_empty)
+    {
+        errors.push(RuntimeValidationError::new(format!(
+            "{label} subjectEventId must not be empty"
+        )));
+    }
+    if entry.client_id.as_ref().is_some_and(String::is_empty) {
+        errors.push(RuntimeValidationError::new(format!(
+            "{label} clientId must not be empty"
+        )));
+    }
+    errors.extend(runtime_mutation_request_errors(
+        &entry.mutation,
+        &format!("{label} mutation"),
+    ));
+    errors.extend(runtime_mutation_request_errors(
+        &entry.inverse_mutation,
+        &format!("{label} inverseMutation"),
+    ));
+    errors
+}
+
+fn runtime_mutation_request_errors(
+    mutation: &RuntimeTransportMutationRequest,
+    label: &str,
+) -> Vec<RuntimeValidationError> {
+    let mut errors = Vec::new();
+    if let Some(operation) = &mutation.operation
+        && let Err(report) = validate_runtime_operation_envelope(operation)
+    {
+        errors.extend(report.errors().iter().map(|error| {
+            RuntimeValidationError::new(format!("{label} operation {}", error.message))
+        }));
+    }
+    if let Some(view_patch) = &mutation.view_patch {
+        for operation in &view_patch.ops {
+            match operation {
+                RuntimeTransportViewPatchOperation::SetNodeView { node_id, .. }
+                | RuntimeTransportViewPatchOperation::MoveNodeView { node_id, .. } => {
+                    if node_id.is_empty() {
+                        errors.push(RuntimeValidationError::new(format!(
+                            "{label} viewPatch operation nodeId must not be empty"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    if mutation.client_id.as_ref().is_some_and(String::is_empty) {
+        errors.push(RuntimeValidationError::new(format!(
+            "{label} clientId must not be empty"
+        )));
+    }
+    errors
+}
+
+fn duplicate_errors(values: Vec<&str>, label: &str) -> Vec<RuntimeValidationError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut errors = Vec::new();
+
+    for value in values {
+        if !seen.insert(value) {
+            errors.push(RuntimeValidationError::new(format!(
+                "duplicate {label}: {value}"
+            )));
+        }
+    }
+
+    errors
+}
+
+fn runtime_errors_from_contract_report(text: String) -> Vec<RuntimeValidationError> {
+    text.split("; ")
+        .map(|message| RuntimeValidationError::new(message.to_owned()))
+        .collect()
+}
+
+fn finish_validation(errors: Vec<RuntimeValidationError>) -> Result<(), RuntimeValidationReport> {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(RuntimeValidationReport::new(errors))
+    }
+}

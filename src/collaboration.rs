@@ -4,14 +4,14 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use axum::response::sse::Event;
-use skenion_contracts::{
+use crate::{
     RuntimeCollaborationEventEnvelope, RuntimeCollaborationEventKind,
     RuntimeCollaborationEventPayload, RuntimeCollaborationOperationResult,
     RuntimeCollaborationPresenceEnvelope, RuntimeCollaborationSelectionEnvelope,
     RuntimeEventReplayGap, RuntimeEventReplayGapReason, RuntimeEventReplayMetadata,
     validate_runtime_collaboration_event_envelope,
 };
+use axum::response::sse::Event;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -483,10 +483,8 @@ fn collaboration_gap_event(
     event
 }
 
-fn collaboration_event_causal(
-    sequence: u64,
-) -> skenion_contracts::RuntimeCollaborationCausalMetadata {
-    skenion_contracts::RuntimeCollaborationCausalMetadata {
+fn collaboration_event_causal(sequence: u64) -> crate::RuntimeCollaborationCausalMetadata {
+    crate::RuntimeCollaborationCausalMetadata {
         base_revision: sequence.to_string(),
         base_sequence: sequence,
         vector: BTreeMap::from([("runtime".to_owned(), sequence)]),
@@ -496,7 +494,7 @@ fn collaboration_event_causal(
 
 #[cfg(test)]
 mod tests {
-    use skenion_contracts::{
+    use crate::{
         GraphTargetRef, PatchPath, RuntimeCollaborationCursor, RuntimeCollaborationOperationStatus,
         RuntimeCollaborationPresence, RuntimeCollaborationPresenceEnvelope,
         RuntimeCollaborationPresenceState, RuntimeCollaborationSelection,

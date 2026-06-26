@@ -21,7 +21,7 @@ use crate::{
     build_execution_plan, build_execution_plan_request_current,
     project_current::is_payload_identity_node_kind_current,
     project_document_validation_diagnostics_current, read_graph_param, read_graph_port,
-    run_dummy_execution, server::registry_from_nodes,
+    run_dummy_execution, server::registry_from_nodes, validate_project_request_current,
 };
 const UNRESOLVED_OBJECT_NODE_KIND: &str = "core.unresolved-object";
 
@@ -335,7 +335,11 @@ impl RuntimeSession {
     ) -> RuntimeSessionResponse {
         let document = project_document_from_request_current(&request);
         if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
-            let diagnostics = project_document_validation_diagnostics_current(&document, &report);
+            let mut diagnostics =
+                project_document_validation_diagnostics_current(&document, &report);
+            if let Err(runtime_diagnostics) = validate_project_request_current(&request) {
+                diagnostics.extend(runtime_diagnostics);
+            }
             return self.response(false, diagnostics, None);
         }
 
@@ -467,7 +471,7 @@ impl RuntimeSession {
         envelope: RuntimeOperationEnvelope,
     ) -> PasteGraphFragmentResponse {
         let target = envelope.request.target.clone();
-        if let Err(report) = skenion_contracts::validate_runtime_operation_envelope(&envelope) {
+        if let Err(report) = crate::validate_runtime_operation_envelope(&envelope) {
             return self.reject_paste_response(
                 target,
                 false,

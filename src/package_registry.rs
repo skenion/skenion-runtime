@@ -6,13 +6,13 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use skenion_contracts::{
-    PackageChecksumAlgorithmV01, PackageChecksumV01, PackageDiagnosticSeverityV01,
-    PackageDiagnosticV01, PackageManifestV01, PackageProvidedRefV01, PackageProvidesV01,
-    PackageRegistryEntryV01, PackageRegistryListResponseV01, PackageRootKindV01, PackageSourceV01,
+    PackageChecksumAlgorithmV01, PackageChecksumV01, PackageContractsSupportV01,
+    PackageDiagnosticSeverityV01, PackageDiagnosticV01, PackageManifestV01, PackageProvidedRefV01,
+    PackageProvidesV01, PackageRootKindV01, PackageSourceV01, PackageTargetTripleV01,
     PackageTrustV01, SKENION_PACKAGE_MANIFEST_FILE_NAME, validate_package_manifest_v01,
 };
 
@@ -23,6 +23,36 @@ pub const SKENION_PACKAGE_PATH_ENV: &str = "SKENION_PACKAGE_PATH";
 const PACKAGE_REGISTRY_SOURCE: &str = "runtime-package-registry";
 const PACKAGE_REGISTRY_ACTION: &str = "scan";
 const PACKAGE_REGISTRY_EVENT: &str = "package-registry-load";
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageRegistryEntryV01 {
+    pub package_id: String,
+    pub version: String,
+    pub category: skenion_contracts::PackageCategoryV01,
+    pub source: PackageSourceV01,
+    pub root: PackageRootKindV01,
+    pub trust: PackageTrustV01,
+    pub contracts: PackageContractsSupportV01,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_abi_range: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<PackageTargetTripleV01>,
+    pub manifest_path: String,
+    pub manifest_checksum: PackageChecksumV01,
+    pub provides: PackageProvidesV01,
+    pub diagnostics: Vec<PackageDiagnosticV01>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageRegistryListResponseV01 {
+    pub ok: bool,
+    pub packages: Vec<PackageRegistryEntryV01>,
+    pub diagnostics: Vec<PackageDiagnosticV01>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
