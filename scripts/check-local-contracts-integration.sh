@@ -35,6 +35,8 @@ Environment:
 With no cargo arguments, runs:
   cargo test --all-targets --all-features
 
+The local Contracts path must be inside a git checkout so the command can
+record branch and commit evidence for the release-ineligible integration run.
 The helper restores Cargo.lock after Cargo resolves the temporary local patch.
 EOF
 }
@@ -50,6 +52,7 @@ die() {
 }
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required."
+command -v git >/dev/null 2>&1 || die "git is required to record local Contracts commit evidence."
 
 if [[ -n "${CARGO:-}" ]]; then
   cargo_bin="${CARGO}"
@@ -105,7 +108,6 @@ metadata_json="${tmpdir}/cargo-metadata.json"
 python3 - "${runtime_manifest}" "${contracts_rust_path}" "${validation_json}" <<'PY'
 import json
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -269,26 +271,28 @@ if actual_line != expected_line:
         f"{expected_line}, but {contracts_path} declares {actual_line}."
     )
 
-git_evidence = None
-if shutil.which("git"):
-    commit = subprocess.run(
-        ["git", "-C", str(contracts_path), "rev-parse", "--verify", "HEAD"],
-        check=False,
-        capture_output=True,
-        text=True,
+commit = subprocess.run(
+    ["git", "-C", str(contracts_path), "rev-parse", "--verify", "HEAD"],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+if commit.returncode != 0:
+    fail(
+        "local skenion-contracts path must be inside a git checkout so "
+        "Runtime can record local-source commit evidence."
     )
-    branch = subprocess.run(
-        ["git", "-C", str(contracts_path), "branch", "--show-current"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if commit.returncode == 0:
-        branch_name = branch.stdout.strip() if branch.returncode == 0 else ""
-        git_evidence = {
-            "commit": commit.stdout.strip(),
-            "branch": branch_name or "detached",
-        }
+branch = subprocess.run(
+    ["git", "-C", str(contracts_path), "branch", "--show-current"],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+branch_name = branch.stdout.strip() if branch.returncode == 0 else ""
+git_evidence = {
+    "commit": commit.stdout.strip(),
+    "branch": branch_name or "detached",
+}
 
 validation = {
     "runtime_manifest": str(runtime_manifest),

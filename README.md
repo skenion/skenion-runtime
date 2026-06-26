@@ -56,9 +56,11 @@ The helper defaults to `../skenion-contracts/packages/rust`, falls back to the
 historical `../Skenion-contracts/packages/rust` checkout name when needed, or
 accepts `SKENION_CONTRACTS_RUST_PATH=/path/to/skenion-contracts/packages/rust`.
 It verifies that Runtime's declared `skenion-contracts` version and Contracts
-line match the local crate, then runs Cargo with a temporary
-`[patch.crates-io]` config. Extra arguments replace the default
-`cargo test --all-targets --all-features` command, for example:
+line match the local crate, records the local Contracts branch and commit, then
+runs Cargo with a temporary `[patch.crates-io]` config. It refuses non-Git local
+sources because this mode is path/commit-evidence based and release-ineligible.
+Extra arguments replace the default `cargo test --all-targets --all-features`
+command, for example:
 
 ```sh
 scripts/check-local-contracts-integration.sh check --all-targets --all-features
