@@ -4075,28 +4075,27 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|diagnostic| diagnostic["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("ambiguous-algebraic-loop"))
+                .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
         );
 
         let plan = post_json("/v0/plan", sample_ambiguous_loop_project_current()).await;
         assert_eq!(plan["ok"], false);
         assert!(
-            plan["diagnostics"][0]["message"]
-                .as_str()
+            plan["diagnostics"]
+                .as_array()
                 .unwrap()
-                .contains("ambiguous-algebraic-loop")
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
         );
 
         let run = post_json("/v0/run", sample_ambiguous_loop_project_current()).await;
         assert_eq!(run["ok"], false);
         assert!(
-            run["diagnostics"][0]["message"]
-                .as_str()
+            run["diagnostics"]
+                .as_array()
                 .unwrap()
-                .contains("ambiguous-algebraic-loop")
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
         );
     }
 

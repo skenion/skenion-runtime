@@ -238,6 +238,16 @@ fn validate_patch_library_current(
                     }),
             );
         }
+
+        for node in &patch.graph.nodes {
+            if is_payload_identity_node_kind_current(&node.kind) {
+                diagnostics.push(payload_identity_node_kind_diagnostic_current(
+                    Some(&patch.id),
+                    &patch.graph,
+                    node,
+                ));
+            }
+        }
     }
 
     if diagnostics.is_empty() {
@@ -791,6 +801,11 @@ pub fn validate_project_current(
     let mut registry: HashMap<(&str, &str), &NodeDefinitionCurrent> = HashMap::new();
 
     for definition in nodes {
+        if is_payload_identity_node_kind_current(&definition.id) {
+            diagnostics.push(payload_identity_node_definition_diagnostic_current(
+                definition,
+            ));
+        }
         if let Err(report) = skenion_contracts::validate_node_definition_v01(definition) {
             diagnostics.extend(report.errors().iter().map(|error| {
                 contract_validation_diagnostic(
@@ -808,42 +823,43 @@ pub fn validate_project_current(
         );
     }
 
-    let graph_analysis = match skenion_contracts::validate_graph_document_v01(graph) {
-        Ok(analysis) => analysis,
-        Err(report) => {
-            diagnostics.extend(report.errors().iter().map(|error| {
-                contract_validation_diagnostic(
-                    "graph",
-                    "graph.invalid-contract",
-                    error.message.clone(),
-                    &graph.schema_version,
-                    json!({ "graphId": graph.id }),
-                )
-            }));
-            skenion_contracts::analyze_graph_document_v01(graph)
-        }
-    };
+    let graph_analysis = skenion_contracts::analyze_graph_document_v01(graph);
+    let graph_analysis_error_messages = graph_analysis
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+        .collect::<HashSet<_>>();
+    if let Err(report) = skenion_contracts::validate_graph_document_v01(graph) {
+        diagnostics.extend(
+            report
+                .errors()
+                .iter()
+                .filter(|error| !graph_analysis_error_messages.contains(error.message.as_str()))
+                .map(|error| {
+                    contract_validation_diagnostic(
+                        "graph",
+                        "graph.invalid-contract",
+                        error.message.clone(),
+                        &graph.schema_version,
+                        json!({ "graphId": graph.id }),
+                    )
+                }),
+        );
+    }
     diagnostics.extend(
         graph_analysis
             .diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic.severity == "warning")
-            .map(|diagnostic| {
-                let message = format!("{}: {}", diagnostic.code, diagnostic.message);
-                RuntimeDiagnostic::structured_warning(
-                    diagnostic.code.clone(),
-                    message,
-                    json!({
-                        "surface": "graph",
-                        "graphId": graph.id,
-                        "nodes": diagnostic.nodes,
-                        "edges": diagnostic.edges,
-                    }),
-                )
-            }),
+            .map(|diagnostic| graph_analysis_diagnostic_current(graph, diagnostic)),
     );
 
     for node in &graph.nodes {
+        if is_payload_identity_node_kind_current(&node.kind) {
+            diagnostics.push(payload_identity_node_kind_diagnostic_current(
+                None, graph, node,
+            ));
+        }
         match registry.get(&(node.kind.as_str(), node.kind_version.as_str())) {
             Some(definition) => validate_node_snapshot_current(node, definition, &mut diagnostics),
             None => diagnostics.push(RuntimeDiagnostic::structured_error(
@@ -871,6 +887,107 @@ pub fn validate_project_current(
     } else {
         Ok((diagnostics, graph_analysis))
     }
+}
+
+pub(crate) fn is_payload_identity_node_kind_current(kind: &str) -> bool {
+    matches!(
+        kind,
+        "value"
+            | "data"
+            | "payload"
+            | "bool"
+            | "string"
+            | "core.bool"
+            | "core.string"
+            | "control.message.any"
+            | "event.bang"
+            | "asset.video"
+            | "asset.image"
+            | "asset.audio"
+            | "gpu.texture2d"
+    ) || kind.starts_with("value.")
+        || kind.starts_with("data.")
+        || kind.starts_with("payload.")
+        || kind.starts_with("control.")
+}
+
+fn payload_identity_node_kind_diagnostic_current(
+    patch_id: Option<&str>,
+    graph: &GraphDocumentCurrent,
+    node: &GraphNodeCurrent,
+) -> RuntimeDiagnostic {
+    let mut details = json!({
+        "surface": "graph-node",
+        "graphId": graph.id,
+        "nodeId": node.id,
+        "kind": node.kind,
+        "kindVersion": node.kind_version,
+    });
+    if let Some(patch_id) = patch_id {
+        details["patchId"] = json!(patch_id);
+    }
+
+    RuntimeDiagnostic::structured_error(
+        "graph.payload-node-kind",
+        format!(
+            "node {} uses payload identity {} as an executable kind",
+            node.id, node.kind
+        ),
+        details,
+    )
+}
+
+fn payload_identity_node_definition_diagnostic_current(
+    definition: &NodeDefinitionCurrent,
+) -> RuntimeDiagnostic {
+    RuntimeDiagnostic::structured_error(
+        "node-definition.payload-identity-id",
+        format!("payload identity node definition id: {}", definition.id),
+        json!({
+            "surface": "node-definition",
+            "nodeDefinitionId": definition.id,
+            "version": definition.version,
+        }),
+    )
+}
+
+fn graph_analysis_diagnostic_current(
+    graph: &GraphDocumentCurrent,
+    diagnostic: &skenion_contracts::GraphValidationDiagnosticV01,
+) -> RuntimeDiagnostic {
+    let code = graph_analysis_runtime_code_current(&diagnostic.code);
+    let details = json!({
+        "surface": "graph",
+        "graphId": graph.id,
+        "nodes": diagnostic.nodes,
+        "edges": diagnostic.edges,
+    });
+
+    match diagnostic.severity.as_str() {
+        "warning" => {
+            RuntimeDiagnostic::structured_warning(code, diagnostic.message.clone(), details)
+        }
+        "info" => RuntimeDiagnostic {
+            severity: crate::DiagnosticSeverity::Info,
+            message: diagnostic.message.clone(),
+            code: Some(code),
+            details: Some(details),
+        },
+        _ => RuntimeDiagnostic::structured_error(code, diagnostic.message.clone(), details),
+    }
+}
+
+fn graph_analysis_runtime_code_current(code: &str) -> String {
+    match code {
+        "missing-source-port" => "graph.edge-missing-source-port",
+        "missing-target-port" => "graph.edge-missing-target-port",
+        "invalid-source-direction" => "graph.edge-source-direction",
+        "invalid-target-direction" => "graph.edge-target-direction",
+        "incompatible-type" => "graph.edge-incompatible-type",
+        "payload-node-kind" => "graph.payload-node-kind",
+        other => return format!("graph.{other}"),
+    }
+    .to_owned()
 }
 
 fn contract_validation_diagnostic(
@@ -1461,7 +1578,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        DiagnosticSeverity, FeedbackBoundaryCurrent, PortDirectionCurrent, PortSpecCurrent,
+        DiagnosticSeverity, FanOutPolicyCurrent, FeedbackBoundaryCurrent, PortDirectionCurrent,
+        PortRateCurrent, PortSpecCurrent,
     };
 
     fn graph(value: Value) -> GraphDocumentCurrent {
@@ -1782,8 +1900,10 @@ mod tests {
         graph.edges[0].feedback.as_mut().unwrap().boundary = FeedbackBoundaryCurrent::SameTurn;
         let (_plan, diagnostics) = build_execution_plan_current(&graph, &[definition])
             .expect("risky feedback should plan");
-        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Warning);
-        assert!(diagnostics[0].message.contains("risky-feedback"));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.code.as_deref() == Some("graph.risky-feedback")
+        }));
     }
 
     #[test]
@@ -2343,6 +2463,196 @@ mod tests {
         let planning_diagnostics = build_execution_plan_request_current(&request)
             .expect_err("patch graph schema mismatch should fail request planning");
         assert_patch_graph_schema_diagnostic(&planning_diagnostics, expected_code, schema_version);
+    }
+
+    #[test]
+    fn rejects_payload_identity_node_kinds_and_definition_ids() {
+        for payload_identity in [
+            "core.bool",
+            "core.string",
+            "bool",
+            "string",
+            "value.number",
+            "control.message.any",
+            "event.bang",
+            "asset.video",
+            "gpu.texture2d",
+        ] {
+            let mut graph = render_graph();
+            graph.nodes[0].kind = payload_identity.to_owned();
+            graph.nodes[0].ports.clear();
+            let graph_result =
+                validate_project_current(&graph, &[clear_definition(), output_definition()])
+                    .expect_err("payload identity graph node kind should fail");
+            assert!(
+                graph_result.iter().any(|diagnostic| {
+                    diagnostic.code.as_deref() == Some("graph.payload-node-kind")
+                        && diagnostic.details.as_ref().unwrap()["kind"] == payload_identity
+                }),
+                "{payload_identity}: {graph_result:#?}"
+            );
+
+            let mut definition = clear_definition();
+            definition.id = payload_identity.to_owned();
+            let definition_result =
+                validate_project_current(&render_graph(), &[definition, output_definition()])
+                    .expect_err("payload identity definition id should fail");
+            assert!(
+                definition_result.iter().any(|diagnostic| {
+                    diagnostic.code.as_deref() == Some("node-definition.payload-identity-id")
+                        && diagnostic.details.as_ref().unwrap()["nodeDefinitionId"]
+                            == payload_identity
+                }),
+                "{payload_identity}: {definition_result:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_behavior_object_identities_that_still_exist() {
+        let behavior_ids = [
+            "core.float",
+            "core.int",
+            "core.uint",
+            "core.bang",
+            "core.message",
+        ];
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "behavior-identities",
+          "revision": "1",
+          "nodes": behavior_ids
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| json!({
+              "id": format!("node_{index}"),
+              "kind": kind,
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": []
+            }))
+            .collect::<Vec<_>>(),
+          "edges": []
+        }));
+        let definitions = behavior_ids
+            .iter()
+            .map(|id| {
+                definition(json!({
+                  "schema": "skenion.node.definition",
+                  "schemaVersion": "0.1.0",
+                  "id": id,
+                  "version": "0.1.0",
+                  "displayName": id,
+                  "category": "Core",
+                  "ports": [],
+                  "execution": { "model": "control" },
+                  "state": { "persistent": false },
+                  "permissions": [],
+                  "capabilities": []
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        let (diagnostics, _) =
+            validate_project_current(&graph, &definitions).expect("behavior ids should validate");
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn surfaces_selector_and_connection_policy_diagnostics_with_specific_codes() {
+        let mut selector_graph = render_graph();
+        selector_graph.nodes[1].ports[0].port_type = "control.message.any".to_owned();
+        selector_graph.nodes[1].ports[0].rate = Some(PortRateCurrent::Control);
+        selector_graph.nodes[1].ports[0].message_selectors = None;
+        let mut selector_output_definition = output_definition();
+        selector_output_definition.ports[0] = selector_graph.nodes[1].ports[0].clone();
+        let selector_result = validate_project_current(
+            &selector_graph,
+            &[clear_definition(), selector_output_definition],
+        )
+        .expect_err("selector-aware input port should fail without selector policy");
+        assert!(
+            selector_result.iter().any(|diagnostic| {
+                diagnostic.code.as_deref() == Some("graph.message-selector-policy")
+                    && diagnostic
+                        .message
+                        .contains("selector-aware input port requires messageSelectors")
+            }),
+            "{selector_result:#?}"
+        );
+
+        let mut fan_in_graph = render_graph();
+        let mut clear_two = fan_in_graph.nodes[0].clone();
+        clear_two.id = "clear_two".to_owned();
+        fan_in_graph.nodes.push(clear_two);
+        fan_in_graph.edges.push(EdgeSpecCurrent {
+            id: "edge_clear_two_output".to_owned(),
+            source: EdgeEndpointCurrent {
+                node_id: "clear_two".to_owned(),
+                port_id: "out".to_owned(),
+            },
+            target: EdgeEndpointCurrent {
+                node_id: "output".to_owned(),
+                port_id: "in".to_owned(),
+            },
+            resolved_type: Some("render.frame".to_owned()),
+            order: None,
+            enabled: None,
+            adapter: None,
+            feedback: None,
+            style_override: None,
+            label: None,
+            description: None,
+        });
+        let fan_in_result =
+            validate_project_current(&fan_in_graph, &[clear_definition(), output_definition()])
+                .expect_err("default input fan-in should fail");
+        assert!(
+            fan_in_result
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.fan-in-cardinality")),
+            "{fan_in_result:#?}"
+        );
+
+        let mut fan_out_graph = render_graph();
+        fan_out_graph.nodes[0].ports[0].fan_out_policy = Some(FanOutPolicyCurrent::Forbid);
+        let mut output_two = fan_out_graph.nodes[1].clone();
+        output_two.id = "output_two".to_owned();
+        fan_out_graph.nodes.push(output_two);
+        fan_out_graph.edges.push(EdgeSpecCurrent {
+            id: "edge_clear_output_two".to_owned(),
+            source: EdgeEndpointCurrent {
+                node_id: "clear".to_owned(),
+                port_id: "out".to_owned(),
+            },
+            target: EdgeEndpointCurrent {
+                node_id: "output_two".to_owned(),
+                port_id: "in".to_owned(),
+            },
+            resolved_type: Some("render.frame".to_owned()),
+            order: None,
+            enabled: None,
+            adapter: None,
+            feedback: None,
+            style_override: None,
+            label: None,
+            description: None,
+        });
+        let mut fan_out_clear_definition = clear_definition();
+        fan_out_clear_definition.ports[0].fan_out_policy = Some(FanOutPolicyCurrent::Forbid);
+        let fan_out_result = validate_project_current(
+            &fan_out_graph,
+            &[fan_out_clear_definition, output_definition()],
+        )
+        .expect_err("forbidden output fan-out should fail");
+        assert!(
+            fan_out_result
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.fan-out-forbidden")),
+            "{fan_out_result:#?}"
+        );
     }
 
     #[test]

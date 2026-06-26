@@ -882,10 +882,10 @@ mod tests {
 
     #[test]
     fn fullscreen_shader_reads_connected_i32_and_bool_uniforms() {
-        let document = document_with_edges(
+        let mut document = document_with_edges(
             vec![
                 i32_node_with_value("iterations_1", 12),
-                bool_node_with_value("enabled_1", false),
+                bool_payload_source_node("enabled_1"),
                 shader_node(json!("wgsl"), json!(typed_shader_source())),
             ],
             vec![
@@ -893,6 +893,10 @@ mod tests {
                 edge("enabled_1", "value", "shader_1", "enabled"),
             ],
         );
+        document
+            .control_state
+            .values
+            .insert("enabled_1".to_owned(), ControlValue::bool(false));
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
 
@@ -1659,14 +1663,12 @@ mod tests {
         }
     }
 
-    fn bool_node_with_value(id: &str, value: bool) -> GraphNode {
-        let mut params = serde_json::Map::new();
-        params.insert("value".to_owned(), json!(value));
+    fn bool_payload_source_node(id: &str) -> GraphNode {
         GraphNode {
             id: id.to_owned(),
-            kind: "core.bool".to_owned(),
+            kind: "core.message".to_owned(),
             kind_version: "0.1.0".to_owned(),
-            params,
+            params: serde_json::Map::new(),
             ports: vec![
                 serde_json::from_value(json!({
                     "id": "value",

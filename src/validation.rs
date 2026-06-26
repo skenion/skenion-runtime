@@ -48,7 +48,21 @@ impl fmt::Display for ValidationReport {
 impl Error for ValidationReport {}
 
 pub fn validate_node_definition(definition: &NodeDefinition) -> Result<(), ValidationReport> {
-    schema_version_check("node definition", &definition.schema_version)
+    let mut errors = Vec::new();
+    if let Err(report) = schema_version_check("node definition", &definition.schema_version) {
+        errors.extend(report.errors);
+    }
+    if is_payload_identity_node_kind(definition.id.as_str()) {
+        errors.push(ValidationError {
+            message: format!("payload identity node definition id: {}", definition.id),
+        });
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationReport::from_errors(errors))
+    }
 }
 
 pub fn validate_graph_document(graph: &GraphDocument) -> Result<(), ValidationReport> {
@@ -62,6 +76,14 @@ pub fn validate_graph_document(graph: &GraphDocument) -> Result<(), ValidationRe
         if !seen.insert(node.id.as_str()) {
             errors.push(ValidationError {
                 message: format!("duplicate node id: {}", node.id),
+            });
+        }
+        if is_payload_identity_node_kind(node.kind.as_str()) {
+            errors.push(ValidationError {
+                message: format!(
+                    "node {} uses payload identity {} as an executable kind",
+                    node.id, node.kind
+                ),
             });
         }
     }
@@ -81,6 +103,28 @@ fn schema_version_check(surface: &str, schema_version: &str) -> Result<(), Valid
             "{surface} schemaVersion must be 0.1.0, received {schema_version}"
         )))
     }
+}
+
+fn is_payload_identity_node_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "value"
+            | "data"
+            | "payload"
+            | "bool"
+            | "string"
+            | "core.bool"
+            | "core.string"
+            | "control.message.any"
+            | "event.bang"
+            | "asset.video"
+            | "asset.image"
+            | "asset.audio"
+            | "gpu.texture2d"
+    ) || kind.starts_with("value.")
+        || kind.starts_with("data.")
+        || kind.starts_with("payload.")
+        || kind.starts_with("control.")
 }
 
 pub fn apply_graph_patch(
@@ -285,6 +329,53 @@ mod tests {
         assert!(validate_graph_document(&graph).is_ok());
         assert!(compatible_data_types(&boolean_value, &boolean_value));
         assert_eq!(type_label(&boolean_value), "control<bool>");
+    }
+
+    #[test]
+    fn rejects_payload_identity_node_kinds_and_definition_ids() {
+        for payload_identity in [
+            "core.bool",
+            "core.string",
+            "bool",
+            "string",
+            "value.number",
+            "control.message.any",
+            "event.bang",
+            "asset.video",
+            "gpu.texture2d",
+        ] {
+            let definition: NodeDefinition = serde_json::from_value(json!({
+                "schema": "skenion.node.definition",
+                "schemaVersion": "0.1.0",
+                "id": payload_identity,
+                "version": "0.1.0",
+                "displayName": "Payload Identity",
+                "category": "Core",
+                "ports": [],
+                "execution": { "model": "control" },
+                "state": { "persistent": false },
+                "permissions": [],
+                "capabilities": []
+            }))
+            .unwrap();
+            let definition_report = validate_node_definition(&definition)
+                .expect_err("payload identity definition id should fail");
+            assert!(
+                definition_report
+                    .to_string()
+                    .contains("payload identity node definition id"),
+                "{payload_identity}: {definition_report}"
+            );
+
+            let mut graph = patch_graph();
+            graph.nodes[0].kind = payload_identity.to_owned();
+            let graph_report = validate_graph_document(&graph)
+                .expect_err("payload identity graph node kind should fail");
+            assert!(
+                graph_report.to_string().contains("uses payload identity"),
+                "{payload_identity}: {graph_report}"
+            );
+        }
     }
 
     #[test]

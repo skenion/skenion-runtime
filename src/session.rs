@@ -19,6 +19,7 @@ use crate::{
     RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic,
     RuntimeOperationDiagnostic, RuntimeOperationEnvelope, StringOrStrings, ViewState,
     build_execution_plan, build_execution_plan_request_current,
+    project_current::is_payload_identity_node_kind_current,
     project_document_validation_diagnostics_current, read_graph_param, read_graph_port,
     run_dummy_execution, server::registry_from_nodes,
 };
@@ -2357,6 +2358,12 @@ fn paste_graph_fragment_into_graph_current(
         .and_then(|options| options.id_conflict_policy)
         .unwrap_or(IdConflictPolicy::Remap);
 
+    let payload_identity_diagnostics =
+        payload_identity_fragment_diagnostics_current(request, &graph.revision);
+    if !payload_identity_diagnostics.is_empty() {
+        return Err((payload_identity_diagnostics, empty_id_remap()));
+    }
+
     let fragment_analysis =
         skenion_contracts::analyze_graph_fragment_v01(&request.fragment, outside_policy);
     if !fragment_analysis.ok {
@@ -2485,6 +2492,35 @@ fn paste_graph_fragment_into_graph_current(
             omitted_edge_ids: fragment_analysis.omitted_edge_ids,
         },
     ))
+}
+
+fn payload_identity_fragment_diagnostics_current(
+    request: &PasteGraphFragmentRequest,
+    graph_revision: &str,
+) -> Vec<RuntimeOperationDiagnostic> {
+    request
+        .fragment
+        .nodes
+        .iter()
+        .filter(|node| is_payload_identity_node_kind_current(&node.kind))
+        .map(|node| RuntimeOperationDiagnostic {
+            severity: "error".to_owned(),
+            code: "paste.fragment.payload-node-kind".to_owned(),
+            message: format!(
+                "node {} uses payload identity {} as an executable kind",
+                node.id, node.kind
+            ),
+            path: None,
+            target: Some(request.target.clone()),
+            expected_revision: None,
+            actual_revision: Some(graph_revision.to_owned()),
+            duplicates: None,
+            nodes: Some(vec![node.id.clone()]),
+            edges: None,
+            interface_policy: None,
+            interface_detail: None,
+        })
+        .collect()
 }
 
 fn remap_edge_current(
@@ -3618,6 +3654,44 @@ mod tests {
     }
 
     #[test]
+    fn payload_identity_session_load_preserves_existing_project() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+
+        let mut invalid = sample_project_current();
+        invalid.graph.nodes[0].kind = "core.bool".to_owned();
+        let response = session.load_project_current(invalid);
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(response.snapshot.loaded());
+        assert_eq!(response.snapshot.graph_revision(), Some("1"));
+        assert_eq!(
+            response.snapshot.session_revision,
+            loaded.snapshot.session_revision
+        );
+        assert!(
+            response
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.payload-node-kind"))
+        );
+        assert_eq!(snapshot.graph_revision(), Some("1"));
+        assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
+        assert!(
+            snapshot
+                .project
+                .as_ref()
+                .unwrap()
+                .graph
+                .nodes
+                .iter()
+                .all(|node| node.kind != "core.bool")
+        );
+    }
+
+    #[test]
     fn registry_invalid_patch_result_does_not_mutate_session() {
         let mut session = RuntimeSession::default();
         load_sample_project(&mut session);
@@ -4368,6 +4442,31 @@ mod tests {
     }
 
     #[test]
+    fn payload_identity_paste_is_rejected_without_mutating_session() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+        let mut operation = paste_operation("1");
+        operation.request.fragment.nodes[0].kind = "core.string".to_owned();
+
+        let response = session.apply_runtime_operation(operation);
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.fragment.payload-node-kind"
+        );
+        assert_eq!(response.revision_after, None);
+        assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
+        assert_eq!(snapshot.graph_revision(), Some("1"));
+        assert!(session.history().entries.is_empty());
+        let graph = session.graph().expect("graph should remain loaded");
+        assert!(!graph.nodes.iter().any(|node| node.id == "pasted_target"));
+    }
+
+    #[test]
     fn paste_graph_fragment_remaps_past_existing_generated_ids() {
         let mut session = RuntimeSession::default();
         load_sample_project(&mut session);
@@ -4677,6 +4776,98 @@ mod tests {
         assert_eq!(warning.code.as_deref(), Some("paste.warning"));
         assert_eq!(info.severity, crate::DiagnosticSeverity::Info);
         assert_eq!(info.code.as_deref(), Some("paste.info"));
+    }
+
+    #[test]
+    fn rejected_collaboration_edge_connect_preserves_session_graph() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+        let target = paste_operation("1").request.target;
+
+        let response = session.apply_collaboration_change_set_current(
+            target,
+            vec![collaboration_change(json!({
+              "op": "edge.connect",
+              "changeId": "connect-output-to-output",
+              "edge": {
+                "id": "edge_invalid_direction",
+                "source": { "nodeId": "value_1", "portId": "value" },
+                "target": { "nodeId": "target_1", "portId": "value" }
+              }
+            }))],
+            None,
+            None,
+            None,
+        );
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(
+            response
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.edge-target-direction"))
+        );
+        assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
+        assert_eq!(snapshot.graph_revision(), Some("1"));
+        assert!(session.history().entries.is_empty());
+        let graph = session.graph().expect("graph should remain loaded");
+        assert!(graph.edges.iter().all(|edge| {
+            !(edge.from.node == "value_1"
+                && edge.from.port == "value"
+                && edge.to.node == "target_1"
+                && edge.to.port == "value")
+        }));
+        assert_eq!(graph.edges.len(), 1);
+    }
+
+    #[test]
+    fn rejected_payload_identity_collaboration_node_add_preserves_session_graph() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+        let target = paste_operation("1").request.target;
+
+        let response = session.apply_collaboration_change_set_current(
+            target,
+            vec![collaboration_change(json!({
+              "op": "node.add",
+              "changeId": "add-payload-identity",
+              "node": {
+                "id": "payload_identity",
+                "kind": "string",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": []
+              }
+            }))],
+            None,
+            None,
+            None,
+        );
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(
+            response
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.payload-node-kind"))
+        );
+        assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
+        assert_eq!(snapshot.graph_revision(), Some("1"));
+        assert!(session.history().entries.is_empty());
+        assert!(
+            session
+                .graph()
+                .unwrap()
+                .nodes
+                .iter()
+                .all(|node| node.id != "payload_identity")
+        );
     }
 
     #[test]
