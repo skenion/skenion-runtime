@@ -12,8 +12,10 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use crate::{
-    ControlValue, RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeDiagnostic,
-    RuntimeSessionRecord, RuntimeSessionSnapshot, runtime_time::created_at_now,
+    ControlValue, GraphTargetRef, PatchPath, RuntimeCollaborationChange,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeDiagnostic,
+    RuntimeMutationRequest, RuntimePatchResponse, RuntimeSessionRecord, RuntimeSessionSnapshot,
+    RuntimeViewPatch, runtime_time::created_at_now,
 };
 
 pub const RUNTIME_REALTIME_SCHEMA: &str = "skenion.runtime.realtime";
@@ -692,6 +694,37 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                     }
                                 }
                             }
+                            "graph.command" => {
+                                let Some(identity) = identity.as_ref() else {
+                                    let diagnostic = runtime_error(&record.id, None, Some(&frame), "realtime.session.not-attached", "send session.hello before client actions", None);
+                                    if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                        break;
+                                    }
+                                    continue;
+                                };
+                                match handle_graph_command(&record, identity, frame) {
+                                    Ok((ack, event, local_event)) => {
+                                        if send_frame(&mut sender, &ack).await.is_err() {
+                                            break;
+                                        }
+                                        if let Some(local_event) = local_event {
+                                            if send_frame(&mut sender, &local_event).await.is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                        if let Some(event) = event {
+                                            record.realtime.publish(event);
+                                        }
+                                    }
+                                    Err(diagnostic) => {
+                                        let diagnostic = runtime_error(&record.id, Some(identity), None, &diagnostic.code, diagnostic.message, diagnostic.details);
+                                        if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             _ => {
                                 let diagnostic = runtime_error(&record.id, identity.as_ref(), Some(&frame), "realtime.frame.unsupported-type", "unsupported Runtime realtime frame type", Some(json!({"type": frame.message_type})));
                                 if send_frame(&mut sender, &diagnostic).await.is_err() {
@@ -768,6 +801,28 @@ struct PresenceUpdatePayload {
     presence: Value,
     #[serde(default)]
     ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphCommandPayload {
+    kind: String,
+    #[serde(default)]
+    base_session_revision: Option<u64>,
+    #[serde(default)]
+    base_graph_revision: Option<String>,
+    #[serde(default)]
+    base_view_revision: Option<u64>,
+    #[serde(default)]
+    target: Option<GraphTargetRef>,
+    #[serde(default)]
+    view_patch: Option<RuntimeViewPatch>,
+    #[serde(default)]
+    changes: Option<Vec<RuntimeCollaborationChange>>,
+    #[serde(default)]
+    surface_path: Option<Value>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 fn handle_presence_update(
@@ -937,6 +992,299 @@ fn handle_control_command(
     );
 
     Ok((ack, event, None))
+}
+
+fn handle_graph_command(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: RuntimeRealtimeEnvelope,
+) -> Result<
+    (
+        RuntimeRealtimeEnvelope,
+        Option<RuntimeRealtimeEnvelope>,
+        Option<RuntimeRealtimeEnvelope>,
+    ),
+    RuntimeRealtimeDiagnostic,
+> {
+    let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
+        sync_required_diagnostic(
+            "realtime.command.idempotency-key-required",
+            "graph.command requires idempotencyKey",
+            None,
+        )
+    })?;
+    if let Some(cached) =
+        record
+            .realtime
+            .cached_command_result(identity, &frame.message_type, &idempotency_key)
+    {
+        let applied_result = cached.emitted_result.clone();
+        return Ok((
+            graph_ack_from_cached(record, identity, &frame, cached),
+            None,
+            applied_result,
+        ));
+    }
+
+    let payload =
+        serde_json::from_value::<GraphCommandPayload>(frame.payload.clone()).map_err(|error| {
+            sync_required_diagnostic(
+                "realtime.graph.invalid-payload",
+                format!("invalid graph.command payload: {error}"),
+                None,
+            )
+        })?;
+    let sequence = record.realtime.next_event_sequence();
+    let cursor = record.realtime.cursor_for(sequence);
+    let response = apply_graph_command(record, identity, &frame, &payload);
+    let ack = graph_ack(
+        record, identity, &frame, &payload, &response, sequence, &cursor, false,
+    );
+    let event = if response.applied {
+        Some(graph_applied_event(
+            record,
+            identity,
+            &frame,
+            &payload,
+            &response,
+            sequence,
+            cursor.clone(),
+        ))
+    } else {
+        None
+    };
+    record.realtime.remember_ack(
+        identity,
+        &frame.message_type,
+        &idempotency_key,
+        &cursor,
+        sequence,
+        ack.payload.clone(),
+        event.clone(),
+    );
+
+    Ok((ack, event, None))
+}
+
+fn apply_graph_command(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    payload: &GraphCommandPayload,
+) -> RuntimePatchResponse {
+    let mut session = record
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    let before = session.snapshot();
+
+    if let Some(base_session_revision) = payload.base_session_revision
+        && base_session_revision != before.session_revision
+    {
+        return graph_command_rejected_response(
+            &session,
+            true,
+            RuntimeDiagnostic::structured_error(
+                "graph.command.session-revision-conflict",
+                format!(
+                    "baseSessionRevision {base_session_revision} does not match session revision {}",
+                    before.session_revision
+                ),
+                json!({
+                    "expectedRevision": base_session_revision,
+                    "actualRevision": before.session_revision,
+                    "commandKind": payload.kind,
+                }),
+            ),
+        );
+    }
+
+    match payload.kind.as_str() {
+        "view.patch" => {
+            let Some(view_patch) = payload.view_patch.clone() else {
+                return graph_command_rejected_response(
+                    &session,
+                    false,
+                    RuntimeDiagnostic::structured_error(
+                        "graph.command.view-patch-required",
+                        "graph.command kind view.patch requires payload.viewPatch",
+                        json!({ "commandKind": payload.kind }),
+                    ),
+                );
+            };
+            if let Some(base_view_revision) = payload.base_view_revision
+                && base_view_revision != view_patch.base_view_revision
+            {
+                return graph_command_rejected_response(
+                    &session,
+                    true,
+                    RuntimeDiagnostic::structured_error(
+                        "graph.command.view-revision-conflict",
+                        format!(
+                            "baseViewRevision {base_view_revision} does not match viewPatch.baseViewRevision {}",
+                            view_patch.base_view_revision
+                        ),
+                        json!({
+                            "expectedRevision": base_view_revision,
+                            "actualRevision": view_patch.base_view_revision,
+                            "commandKind": payload.kind,
+                        }),
+                    ),
+                );
+            }
+            if let Some(base_graph_revision) = payload.base_graph_revision.as_deref() {
+                let actual_graph_revision = before.graph_revision().map(ToOwned::to_owned);
+                if actual_graph_revision.as_deref() != Some(base_graph_revision) {
+                    return graph_command_rejected_response(
+                        &session,
+                        true,
+                        RuntimeDiagnostic::structured_error(
+                            "graph.command.graph-revision-conflict",
+                            format!(
+                                "baseGraphRevision {base_graph_revision} does not match graph revision {}",
+                                actual_graph_revision.as_deref().unwrap_or("none")
+                            ),
+                            json!({
+                                "expectedRevision": base_graph_revision,
+                                "actualRevision": actual_graph_revision,
+                                "commandKind": payload.kind,
+                            }),
+                        ),
+                    );
+                }
+            }
+            if let Some(target) = payload.target.as_ref() {
+                if !matches!(target.path, PatchPath::Root) {
+                    return graph_command_rejected_response(
+                        &session,
+                        false,
+                        RuntimeDiagnostic::structured_error(
+                            "graph.command.view-target-unsupported",
+                            "view.patch realtime commands currently support only the loaded root graph view",
+                            json!({ "target": target, "commandKind": payload.kind }),
+                        ),
+                    );
+                }
+                let actual_target_revision = session.target_revision_current(target);
+                if actual_target_revision.as_deref() != Some(target.base_revision.as_str()) {
+                    return graph_command_rejected_response(
+                        &session,
+                        true,
+                        RuntimeDiagnostic::structured_error(
+                            "graph.command.target-revision-conflict",
+                            format!(
+                                "target baseRevision {} does not match target graph revision {}",
+                                target.base_revision,
+                                actual_target_revision.as_deref().unwrap_or("none")
+                            ),
+                            json!({
+                                "expectedRevision": target.base_revision,
+                                "actualRevision": actual_target_revision,
+                                "target": target,
+                                "commandKind": payload.kind,
+                            }),
+                        ),
+                    );
+                }
+            }
+
+            session.apply_mutation(
+                RuntimeMutationRequest::view_patch(view_patch)
+                    .with_client_id(identity.client_id.clone())
+                    .with_description(
+                        payload.description.clone().unwrap_or_else(|| {
+                            format!("Realtime graph command {}", frame.message_id)
+                        }),
+                    ),
+            )
+        }
+        "collaboration.changeSet" => {
+            let Some(target) = payload.target.clone() else {
+                return graph_command_rejected_response(
+                    &session,
+                    false,
+                    RuntimeDiagnostic::structured_error(
+                        "graph.command.target-required",
+                        "graph.command kind collaboration.changeSet requires payload.target",
+                        json!({ "commandKind": payload.kind }),
+                    ),
+                );
+            };
+            let changes = payload.changes.clone().unwrap_or_default();
+            if changes.is_empty() {
+                return graph_command_rejected_response(
+                    &session,
+                    false,
+                    RuntimeDiagnostic::structured_error(
+                        "graph.command.changes-required",
+                        "graph.command kind collaboration.changeSet requires at least one change",
+                        json!({ "target": target, "commandKind": payload.kind }),
+                    ),
+                );
+            }
+            if let Some(base_graph_revision) = payload.base_graph_revision.as_deref()
+                && base_graph_revision != target.base_revision
+            {
+                return graph_command_rejected_response(
+                    &session,
+                    true,
+                    RuntimeDiagnostic::structured_error(
+                        "graph.command.target-revision-conflict",
+                        format!(
+                            "baseGraphRevision {base_graph_revision} does not match target.baseRevision {}",
+                            target.base_revision
+                        ),
+                        json!({
+                            "expectedRevision": base_graph_revision,
+                            "actualRevision": target.base_revision,
+                            "target": target,
+                            "commandKind": payload.kind,
+                        }),
+                    ),
+                );
+            }
+            session.apply_collaboration_change_set_current(
+                target,
+                changes,
+                None,
+                Some(identity.client_id.clone()),
+                payload
+                    .description
+                    .clone()
+                    .or_else(|| Some(format!("Realtime graph command {}", frame.message_id))),
+            )
+        }
+        _ => graph_command_rejected_response(
+            &session,
+            false,
+            RuntimeDiagnostic::structured_error(
+                "graph.command.kind-unsupported",
+                format!(
+                    "unsupported graph.command kind {}; supported kinds are view.patch and collaboration.changeSet",
+                    payload.kind
+                ),
+                json!({
+                    "kind": payload.kind,
+                    "supportedKinds": ["view.patch", "collaboration.changeSet"],
+                }),
+            ),
+        ),
+    }
+}
+
+fn graph_command_rejected_response(
+    session: &crate::RuntimeSession,
+    conflict: bool,
+    diagnostic: RuntimeDiagnostic,
+) -> RuntimePatchResponse {
+    RuntimePatchResponse {
+        ok: false,
+        applied: false,
+        conflict,
+        snapshot: session.snapshot(),
+        history: session.history(),
+        diagnostics: vec![diagnostic],
+    }
 }
 
 fn apply_control_command(
@@ -1122,6 +1470,116 @@ fn control_ack(
     )
 }
 
+fn graph_ack(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    command: &GraphCommandPayload,
+    response: &RuntimePatchResponse,
+    sequence: u64,
+    event_cursor: &str,
+    cached: bool,
+) -> RuntimeRealtimeEnvelope {
+    graph_ack_with_payload(
+        record,
+        identity,
+        frame,
+        json!({
+            "status": if response.ok { "accepted" } else if response.conflict { "conflict" } else { "rejected" },
+            "accepted": response.ok,
+            "applied": response.applied,
+            "conflict": response.conflict,
+            "cached": cached,
+            "graphSequence": sequence,
+            "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
+            "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
+            "idempotencyKey": frame.idempotency_key,
+            "eventCursor": event_cursor,
+            "kind": command.kind,
+            "target": command.target,
+            "surfacePath": command.surface_path,
+            "baseSessionRevision": command.base_session_revision,
+            "baseGraphRevision": command.base_graph_revision,
+            "baseViewRevision": command.base_view_revision.or_else(|| command.view_patch.as_ref().map(|patch| patch.base_view_revision)),
+            "sessionRevision": response.snapshot.session_revision,
+            "graphRevision": response.snapshot.graph_revision(),
+            "viewRevision": response.snapshot.view_revision,
+            "historySummary": {
+                "latestEntryId": response.history.entries.last().map(|entry| entry.id.clone()),
+                "canUndo": response.history.can_undo,
+                "canRedo": response.history.can_redo,
+                "undoDepth": response.history.undo_depth,
+                "redoDepth": response.history.redo_depth,
+            },
+            "diagnostics": response.diagnostics,
+        }),
+    )
+}
+
+fn graph_ack_from_cached(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    cached: RuntimeRealtimeCachedCommandResult,
+) -> RuntimeRealtimeEnvelope {
+    let mut payload = mark_ack_payload_cached(cached.ack_payload);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("eventCursor".to_owned(), Value::String(cached.event_cursor));
+    }
+    graph_ack_with_payload(record, identity, frame, payload)
+}
+
+fn graph_applied_event(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    command: &GraphCommandPayload,
+    response: &RuntimePatchResponse,
+    sequence: u64,
+    cursor: String,
+) -> RuntimeRealtimeEnvelope {
+    RuntimeRealtimeEnvelope {
+        schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
+        schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
+        message_type: "graph.applied".to_owned(),
+        message_id: format!("{}_graph_{sequence:06}", record.id),
+        session_id: record.id.clone(),
+        connection_id: Some(identity.connection_id.clone()),
+        client_id: Some(identity.client_id.clone()),
+        window_id: Some(identity.window_id.clone()),
+        command_id: frame
+            .command_id
+            .clone()
+            .or_else(|| Some(frame.message_id.clone())),
+        correlation_id: frame
+            .correlation_id
+            .clone()
+            .or_else(|| Some(frame.message_id.clone())),
+        idempotency_key: frame.idempotency_key.clone(),
+        sequence: Some(sequence),
+        cursor: Some(cursor),
+        created_at: Some(created_at_now()),
+        payload: json!({
+            "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
+            "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
+            "idempotencyKey": frame.idempotency_key,
+            "graphSequence": sequence,
+            "kind": command.kind,
+            "target": command.target,
+            "surfacePath": command.surface_path,
+            "baseSessionRevision": command.base_session_revision,
+            "baseGraphRevision": command.base_graph_revision,
+            "baseViewRevision": command.base_view_revision.or_else(|| command.view_patch.as_ref().map(|patch| patch.base_view_revision)),
+            "sessionRevision": response.snapshot.session_revision,
+            "graphRevision": response.snapshot.graph_revision(),
+            "viewRevision": response.snapshot.view_revision,
+            "historyEntryId": response.history.entries.last().map(|entry| entry.id.clone()),
+            "diagnostics": response.diagnostics,
+            "replayed": false,
+        }),
+    }
+}
+
 fn control_ack_from_cached(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
@@ -1151,6 +1609,15 @@ fn control_ack_with_payload(
     payload: Value,
 ) -> RuntimeRealtimeEnvelope {
     ack_with_payload(record, identity, frame, "control.ack", payload)
+}
+
+fn graph_ack_with_payload(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    payload: Value,
+) -> RuntimeRealtimeEnvelope {
+    ack_with_payload(record, identity, frame, "graph.ack", payload)
 }
 
 fn ack_with_payload(
