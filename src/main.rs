@@ -366,7 +366,7 @@ mod tests {
               "nodes": [
                 {
                   "nodeId": "clear_1",
-                  "kind": "render.clear-color",
+                  "kind": "object.core.render.clear-color",
                   "kindVersion": "0.1.0",
                   "executionModel": "gpu_pass",
                   "order": 0

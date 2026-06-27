@@ -127,36 +127,36 @@ pub(crate) fn resolve_object_text_v01(input: &str) -> ObjectTextResolution {
         return resolve_audio_object(input, display_text, class_symbol, creation_args, kind);
     }
 
-    if matches!(class_symbol.as_str(), "p" | "core.subpatch") {
+    if matches!(class_symbol.as_str(), "p" | "object.core.subpatch") {
         return resolve_named_ref_object(
             input,
             display_text,
             class_symbol,
             creation_args,
-            "core.subpatch",
+            "object.core.subpatch",
             "patchRef",
             "subpatch object text requires exactly one patch reference",
         );
     }
 
-    if matches!(class_symbol.as_str(), "inlet" | "core.inlet") {
+    if matches!(class_symbol.as_str(), "inlet" | "object.core.inlet") {
         return resolve_optional_named_ref_object(
             input,
             display_text,
             class_symbol,
             creation_args,
-            "core.inlet",
+            "object.core.inlet",
             "portId",
         );
     }
 
-    if matches!(class_symbol.as_str(), "outlet" | "core.outlet") {
+    if matches!(class_symbol.as_str(), "outlet" | "object.core.outlet") {
         return resolve_optional_named_ref_object(
             input,
             display_text,
             class_symbol,
             creation_args,
-            "core.outlet",
+            "object.core.outlet",
             "portId",
         );
     }
@@ -179,14 +179,12 @@ pub(crate) fn is_payload_identity_kind(kind: &str) -> bool {
             | "payload"
             | "bool"
             | "string"
-            | "core.bool"
-            | "core.string"
-            | "control.message.any"
-            | "event.bang"
-            | "asset.video"
-            | "asset.image"
-            | "asset.audio"
-            | "gpu.texture2d"
+            | "object.core.bool"
+            | "object.core.string"
+            | "value.core.message"
+            | "value.core.bang"
+            | "value.core.string"
+            | "value.core.tensor"
     ) || kind.starts_with("value.")
         || kind.starts_with("data.")
         || kind.starts_with("payload.")
@@ -200,7 +198,7 @@ fn resolve_control_operator(
     creation_args: Vec<ObjectTextAtom>,
     kind: &'static str,
 ) -> ObjectTextResolution {
-    if kind == "core.operator.sqrt" {
+    if kind == "object.core.operator.sqrt" {
         if !creation_args.is_empty() {
             return failure(
                 input,
@@ -270,7 +268,7 @@ fn resolve_control_value(
     kind: &'static str,
 ) -> ObjectTextResolution {
     match kind {
-        "core.bang" => {
+        "object.core.bang" => {
             if !creation_args.is_empty() {
                 return failure(
                     input,
@@ -291,7 +289,7 @@ fn resolve_control_value(
                 bang_ports(),
             )
         }
-        "core.message" | "core.comment" => {
+        "object.core.message" | "object.core.comment" => {
             let text = creation_args
                 .iter()
                 .map(atom_display_text)
@@ -299,7 +297,7 @@ fn resolve_control_value(
                 .join(" ");
             let mut params = Map::new();
             params.insert("text".to_owned(), Value::String(text));
-            let ports = if kind == "core.message" {
+            let ports = if kind == "object.core.message" {
                 message_ports()
             } else {
                 comment_ports()
@@ -314,38 +312,51 @@ fn resolve_control_value(
                 ports,
             )
         }
-        "core.float" => resolve_number_value(
+        "object.core.float" => resolve_number_value(
             input,
             display_text,
             class_symbol,
             creation_args,
-            kind,
-            "control.number.float",
-            numeric_value,
-            |value| json!(value),
+            NumberValueSpec {
+                kind,
+                port_type: "value.core.float32",
+                coerce: numeric_value,
+                to_json: |value| json!(value),
+            },
         ),
-        "core.int" => resolve_number_value(
+        "object.core.int" => resolve_number_value(
             input,
             display_text,
             class_symbol,
             creation_args,
-            kind,
-            "control.number.int",
-            integer_value,
-            |value| json!(value),
+            NumberValueSpec {
+                kind,
+                port_type: "value.core.int32",
+                coerce: integer_value,
+                to_json: |value| json!(value),
+            },
         ),
-        "core.uint" => resolve_number_value(
+        "object.core.uint" => resolve_number_value(
             input,
             display_text,
             class_symbol,
             creation_args,
-            kind,
-            "control.number.uint",
-            unsigned_value,
-            |value| json!(value),
+            NumberValueSpec {
+                kind,
+                port_type: "value.core.uint32",
+                coerce: unsigned_value,
+                to_json: |value| json!(value),
+            },
         ),
         _ => unreachable!("control value resolver received unknown kind"),
     }
+}
+
+struct NumberValueSpec<T> {
+    kind: &'static str,
+    port_type: &'static str,
+    coerce: fn(&ObjectTextAtom) -> Option<T>,
+    to_json: fn(T) -> Value,
 }
 
 fn resolve_number_value<T>(
@@ -353,10 +364,7 @@ fn resolve_number_value<T>(
     display_text: String,
     class_symbol: &str,
     creation_args: Vec<ObjectTextAtom>,
-    kind: &'static str,
-    port_type: &'static str,
-    coerce: fn(&ObjectTextAtom) -> Option<T>,
-    to_json: fn(T) -> Value,
+    spec: NumberValueSpec<T>,
 ) -> ObjectTextResolution {
     if creation_args.len() > 1 {
         return failure(
@@ -370,8 +378,8 @@ fn resolve_number_value<T>(
     }
 
     let value = match creation_args.first() {
-        Some(arg) => match coerce(arg) {
-            Some(value) => to_json(value),
+        Some(arg) => match (spec.coerce)(arg) {
+            Some(value) => (spec.to_json)(value),
             None => {
                 return failure(
                     input,
@@ -392,9 +400,9 @@ fn resolve_number_value<T>(
         display_text,
         class_symbol,
         creation_args,
-        kind,
+        spec.kind,
         params,
-        stored_value_ports(port_type),
+        stored_value_ports(spec.port_type),
     )
 }
 
@@ -406,27 +414,31 @@ fn resolve_audio_object(
     kind: &'static str,
 ) -> ObjectTextResolution {
     match kind {
-        "audio.sig" => resolve_audio_number_param(
+        "object.core.audio.sig" => resolve_audio_number_param(
             input,
             display_text,
             class_symbol,
             creation_args,
-            kind,
-            "value",
-            0.0,
-            audio_sig_ports(),
+            AudioNumberParamSpec {
+                kind,
+                param_key: "value",
+                default_value: 0.0,
+                ports: audio_sig_ports(),
+            },
         ),
-        "audio.osc" => resolve_audio_number_param(
+        "object.core.audio.osc" => resolve_audio_number_param(
             input,
             display_text,
             class_symbol,
             creation_args,
-            kind,
-            "frequency",
-            440.0,
-            audio_osc_ports(),
+            AudioNumberParamSpec {
+                kind,
+                param_key: "frequency",
+                default_value: 440.0,
+                ports: audio_osc_ports(),
+            },
         ),
-        "audio.operator.mul" => {
+        "object.core.audio.operator.mul" => {
             if !creation_args.is_empty() {
                 return failure(
                     input,
@@ -447,7 +459,7 @@ fn resolve_audio_object(
                 audio_binary_ports(),
             )
         }
-        "audio.input" | "audio.output" => {
+        "object.core.audio.input" | "object.core.audio.output" => {
             if !creation_args.is_empty() {
                 return failure(
                     input,
@@ -458,7 +470,7 @@ fn resolve_audio_object(
                     format!("{class_symbol} accepts no creation arguments"),
                 );
             }
-            let ports = if kind == "audio.input" {
+            let ports = if kind == "object.core.audio.input" {
                 audio_input_ports()
             } else {
                 audio_output_ports()
@@ -477,15 +489,19 @@ fn resolve_audio_object(
     }
 }
 
+struct AudioNumberParamSpec {
+    kind: &'static str,
+    param_key: &'static str,
+    default_value: f64,
+    ports: Vec<ObjectTextPort>,
+}
+
 fn resolve_audio_number_param(
     input: &str,
     display_text: String,
     class_symbol: &str,
     creation_args: Vec<ObjectTextAtom>,
-    kind: &'static str,
-    param_key: &'static str,
-    default_value: f64,
-    ports: Vec<ObjectTextPort>,
+    spec: AudioNumberParamSpec,
 ) -> ObjectTextResolution {
     if creation_args.len() > 1 {
         return failure(
@@ -511,18 +527,18 @@ fn resolve_audio_number_param(
                 );
             }
         },
-        None => default_value,
+        None => spec.default_value,
     };
     let mut params = Map::new();
-    insert_number(&mut params, param_key, value);
+    insert_number(&mut params, spec.param_key, value);
     success(
         input,
         display_text,
         class_symbol,
         creation_args,
-        kind,
+        spec.kind,
         params,
-        ports,
+        spec.ports,
     )
 }
 
@@ -751,50 +767,55 @@ fn insert_number(params: &mut Map<String, Value>, key: &str, value: f64) {
 
 fn control_operator_kind(class_symbol: &str) -> Option<&'static str> {
     match class_symbol {
-        "+" | "add" | "core.operator.add" => Some("core.operator.add"),
-        "-" | "sub" | "core.operator.sub" => Some("core.operator.sub"),
-        "*" | "mul" | "core.operator.mul" => Some("core.operator.mul"),
-        "/" | "div" | "core.operator.div" => Some("core.operator.div"),
-        "pow" | "core.operator.pow" => Some("core.operator.pow"),
-        "min" | "core.operator.min" => Some("core.operator.min"),
-        "max" | "core.operator.max" => Some("core.operator.max"),
-        "sqrt" | "core.operator.sqrt" => Some("core.operator.sqrt"),
+        "+" | "add" | "object.core.operator.add" => Some("object.core.operator.add"),
+        "-" | "sub" | "object.core.operator.sub" => Some("object.core.operator.sub"),
+        "*" | "mul" | "object.core.operator.mul" => Some("object.core.operator.mul"),
+        "/" | "div" | "object.core.operator.div" => Some("object.core.operator.div"),
+        "pow" | "object.core.operator.pow" => Some("object.core.operator.pow"),
+        "min" | "object.core.operator.min" => Some("object.core.operator.min"),
+        "max" | "object.core.operator.max" => Some("object.core.operator.max"),
+        "sqrt" | "object.core.operator.sqrt" => Some("object.core.operator.sqrt"),
         _ => None,
     }
 }
 
 fn control_value_kind(class_symbol: &str) -> Option<&'static str> {
     match class_symbol {
-        "f" | "float" | "number" | "core.float" => Some("core.float"),
-        "i" | "int" | "core.int" => Some("core.int"),
-        "u" | "uint" | "core.uint" => Some("core.uint"),
-        "b" | "bang" | "core.bang" => Some("core.bang"),
-        "msg" | "message" | "core.message" => Some("core.message"),
-        "comment" | "core.comment" => Some("core.comment"),
+        "f" | "float" | "number" | "object.core.float" => Some("object.core.float"),
+        "i" | "int" | "object.core.int" => Some("object.core.int"),
+        "u" | "uint" | "object.core.uint" => Some("object.core.uint"),
+        "b" | "bang" | "object.core.bang" => Some("object.core.bang"),
+        "msg" | "message" | "object.core.message" => Some("object.core.message"),
+        "comment" | "object.core.comment" => Some("object.core.comment"),
         _ => None,
     }
 }
 
 fn audio_object_kind(class_symbol: &str) -> Option<&'static str> {
     match class_symbol {
-        "sig~" | "audio.sig" => Some("audio.sig"),
-        "osc~" | "audio.osc" => Some("audio.osc"),
-        "*~" | "audio.operator.mul" => Some("audio.operator.mul"),
-        "adc~" | "audio.input" => Some("audio.input"),
-        "dac~" | "audio.output" => Some("audio.output"),
+        "sig~" | "object.core.audio.sig" => Some("object.core.audio.sig"),
+        "osc~" | "object.core.audio.osc" => Some("object.core.audio.osc"),
+        "*~" | "object.core.audio.operator.mul" => Some("object.core.audio.operator.mul"),
+        "adc~" | "object.core.audio.input" => Some("object.core.audio.input"),
+        "dac~" | "object.core.audio.output" => Some("object.core.audio.output"),
         _ => None,
     }
 }
 
 fn unsupported_first_party_audio_message(class_symbol: &str) -> Option<&'static str> {
     match class_symbol {
-        "+~" | "-~" | "/~" | "audio.operator.add" | "audio.operator.sub" | "audio.operator.div" => {
+        "+~"
+        | "-~"
+        | "/~"
+        | "object.core.audio.operator.add"
+        | "object.core.audio.operator.sub"
+        | "object.core.audio.operator.div" => {
             Some("audio add/sub/div aliases are not executable in the current Runtime substrate")
         }
-        "sqrt~" | "audio.operator.sqrt" => {
+        "sqrt~" | "object.core.audio.operator.sqrt" => {
             Some("audio sqrt is not executable in the current Runtime substrate")
         }
-        "phasor~" | "audio.phasor" => {
+        "phasor~" | "object.core.audio.phasor" => {
             Some("audio phasor is not executable in the current Runtime substrate")
         }
         _ => None,
@@ -830,7 +851,7 @@ fn stored_value_ports(port_type: &str) -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "in",
-            "control.message.any",
+            "value.core.message",
             ObjectTextPortRate::Control,
             ObjectTextPortActivation::Trigger,
         ),
@@ -848,17 +869,17 @@ fn control_operator_ports() -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "in",
-            "control.number.float",
+            "value.core.float32",
             ObjectTextPortRate::Control,
             ObjectTextPortActivation::Trigger,
         ),
         input_port(
             "right",
-            "control.number.float",
+            "value.core.float32",
             ObjectTextPortRate::Control,
             ObjectTextPortActivation::Latched,
         ),
-        output_port("out", "control.number.float", ObjectTextPortRate::Control),
+        output_port("out", "value.core.float32", ObjectTextPortRate::Control),
     ]
 }
 
@@ -866,11 +887,11 @@ fn control_sqrt_ports() -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "in",
-            "control.number.float",
+            "value.core.float32",
             ObjectTextPortRate::Control,
             ObjectTextPortActivation::Trigger,
         ),
-        output_port("out", "control.number.float", ObjectTextPortRate::Control),
+        output_port("out", "value.core.float32", ObjectTextPortRate::Control),
     ]
 }
 
@@ -878,11 +899,11 @@ fn bang_ports() -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "in",
-            "control.message.any",
+            "value.core.message",
             ObjectTextPortRate::Control,
             ObjectTextPortActivation::Trigger,
         ),
-        output_port("out", "event.bang", ObjectTextPortRate::Event),
+        output_port("out", "value.core.bang", ObjectTextPortRate::Event),
     ]
 }
 
@@ -890,18 +911,18 @@ fn message_ports() -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "in",
-            "control.message.any",
+            "value.core.message",
             ObjectTextPortRate::Control,
             ObjectTextPortActivation::Trigger,
         ),
-        output_port("out", "control.message.any", ObjectTextPortRate::Control),
+        output_port("out", "value.core.message", ObjectTextPortRate::Control),
     ]
 }
 
 fn comment_ports() -> Vec<ObjectTextPort> {
     vec![input_port(
         "in",
-        "control.message.any",
+        "value.core.message",
         ObjectTextPortRate::Control,
         ObjectTextPortActivation::Trigger,
     )]
@@ -911,11 +932,11 @@ fn audio_sig_ports() -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "value",
-            "control.number.float",
+            "value.core.float32",
             ObjectTextPortRate::Control,
             ObjectTextPortActivation::Latched,
         ),
-        output_port("out", "signal.audio", ObjectTextPortRate::Audio),
+        output_port("out", "value.core.float32", ObjectTextPortRate::Audio),
     ]
 }
 
@@ -923,11 +944,11 @@ fn audio_osc_ports() -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "frequency",
-            "control.number.float",
+            "value.core.float32",
             ObjectTextPortRate::Control,
             ObjectTextPortActivation::Latched,
         ),
-        output_port("out", "signal.audio", ObjectTextPortRate::Audio),
+        output_port("out", "value.core.float32", ObjectTextPortRate::Audio),
     ]
 }
 
@@ -935,24 +956,24 @@ fn audio_binary_ports() -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "left",
-            "signal.audio",
+            "value.core.float32",
             ObjectTextPortRate::Audio,
             ObjectTextPortActivation::Latched,
         ),
         input_port(
             "right",
-            "signal.audio",
+            "value.core.float32",
             ObjectTextPortRate::Audio,
             ObjectTextPortActivation::Latched,
         ),
-        output_port("out", "signal.audio", ObjectTextPortRate::Audio),
+        output_port("out", "value.core.float32", ObjectTextPortRate::Audio),
     ]
 }
 
 fn audio_input_ports() -> Vec<ObjectTextPort> {
     vec![
-        output_port("left", "signal.audio", ObjectTextPortRate::Audio),
-        output_port("right", "signal.audio", ObjectTextPortRate::Audio),
+        output_port("left", "value.core.float32", ObjectTextPortRate::Audio),
+        output_port("right", "value.core.float32", ObjectTextPortRate::Audio),
     ]
 }
 
@@ -960,13 +981,13 @@ fn audio_output_ports() -> Vec<ObjectTextPort> {
     vec![
         input_port(
             "left",
-            "signal.audio",
+            "value.core.float32",
             ObjectTextPortRate::Audio,
             ObjectTextPortActivation::Latched,
         ),
         input_port(
             "right",
-            "signal.audio",
+            "value.core.float32",
             ObjectTextPortRate::Audio,
             ObjectTextPortActivation::Latched,
         ),
@@ -977,13 +998,27 @@ fn audio_output_ports() -> Vec<ObjectTextPort> {
 mod tests {
     use super::*;
 
+    fn assert_kind(resolution: &ObjectTextResolution, kind: &str) {
+        assert!(resolution.ok(), "{resolution:?}");
+        assert_eq!(resolution.resolved_kind.as_deref(), Some(kind));
+        assert_eq!(resolution.resolved_kind_version.as_deref(), Some("0.1.0"));
+    }
+
+    fn assert_diagnostic(resolution: &ObjectTextResolution, code: &str) {
+        assert_eq!(resolution.resolved_kind, None);
+        assert_eq!(resolution.diagnostics[0].code, code);
+    }
+
     #[test]
     fn resolves_runtime_control_aliases_and_validates_args() {
         let add = resolve_object_text_v01("[+ 1e3]");
         assert!(add.ok());
         assert_eq!(add.display_text, "+ 1e3");
         assert_eq!(add.class_symbol, "+");
-        assert_eq!(add.resolved_kind.as_deref(), Some("core.operator.add"));
+        assert_eq!(
+            add.resolved_kind.as_deref(),
+            Some("object.core.operator.add")
+        );
         assert_eq!(add.resolved_kind_version.as_deref(), Some("0.1.0"));
         assert_eq!(add.params["right"], json!(1000.0));
         assert_eq!(add.instance_ports[0].id, "in");
@@ -993,23 +1028,61 @@ mod tests {
 
         let invalid = resolve_object_text_v01("+ true");
         assert_eq!(invalid.diagnostics[0].code, "object-text.invalid-arg-type");
+
+        for (input, kind, param, value) in [
+            ("- -2", "object.core.operator.sub", "right", json!(-2.0)),
+            ("/ 4", "object.core.operator.div", "right", json!(4.0)),
+            ("* 3", "object.core.operator.mul", "right", json!(3.0)),
+            ("pow 2", "object.core.operator.pow", "right", json!(2.0)),
+            ("max 8", "object.core.operator.max", "right", json!(8.0)),
+            ("min 1", "object.core.operator.min", "right", json!(1.0)),
+        ] {
+            let resolution = resolve_object_text_v01(input);
+            assert_kind(&resolution, kind);
+            assert_eq!(resolution.params[param], value);
+            assert_eq!(resolution.instance_ports.len(), 3);
+        }
+
+        let sqrt = resolve_object_text_v01("sqrt");
+        assert_kind(&sqrt, "object.core.operator.sqrt");
+        assert_eq!(sqrt.instance_ports.len(), 2);
+
+        let default_add = resolve_object_text_v01("object.core.operator.add");
+        assert_kind(&default_add, "object.core.operator.add");
+        assert_eq!(default_add.params["right"], json!(0.0));
+
+        assert_diagnostic(
+            &resolve_object_text_v01("sqrt 1"),
+            "object-text.invalid-arg-count",
+        );
+        assert_diagnostic(
+            &resolve_object_text_v01("+ 1 2"),
+            "object-text.invalid-arg-count",
+        );
+        assert_diagnostic(
+            &resolve_object_text_v01("object.core.operator.mul false"),
+            "object-text.invalid-arg-type",
+        );
     }
 
     #[test]
     fn resolves_runtime_value_audio_and_subpatch_aliases() {
         let float = resolve_object_text_v01("f 0.25");
         assert!(float.ok());
-        assert_eq!(float.resolved_kind.as_deref(), Some("core.float"));
+        assert_eq!(float.resolved_kind.as_deref(), Some("object.core.float"));
         assert_eq!(float.params["value"], json!(0.25));
 
         let osc = resolve_object_text_v01("osc~ 220");
         assert!(osc.ok());
-        assert_eq!(osc.resolved_kind.as_deref(), Some("audio.osc"));
+        assert_eq!(osc.resolved_kind.as_deref(), Some("object.core.audio.osc"));
         assert_eq!(osc.params["frequency"], json!(220.0));
 
         let mul = resolve_object_text_v01("*~");
         assert!(mul.ok());
-        assert_eq!(mul.resolved_kind.as_deref(), Some("audio.operator.mul"));
+        assert_eq!(
+            mul.resolved_kind.as_deref(),
+            Some("object.core.audio.operator.mul")
+        );
         assert_eq!(mul.instance_ports.len(), 3);
 
         let scalar_mul = resolve_object_text_v01("*~ 0.5");
@@ -1024,19 +1097,165 @@ mod tests {
             "object-text.unsupported-first-party"
         );
 
+        for input in [
+            "-~",
+            "/~",
+            "sqrt~",
+            "phasor~",
+            "object.core.audio.operator.add",
+            "object.core.audio.operator.sqrt",
+            "object.core.audio.phasor",
+        ] {
+            assert_diagnostic(
+                &resolve_object_text_v01(input),
+                "object-text.unsupported-first-party",
+            );
+        }
+
+        let sig = resolve_object_text_v01("sig~");
+        assert_kind(&sig, "object.core.audio.sig");
+        assert_eq!(sig.params["value"], json!(0.0));
+
+        let invalid_sig = resolve_object_text_v01("sig~ false");
+        assert_diagnostic(&invalid_sig, "object-text.invalid-arg-type");
+        assert_diagnostic(
+            &resolve_object_text_v01("sig~ 1 2"),
+            "object-text.invalid-arg-count",
+        );
+
+        let osc = resolve_object_text_v01("object.core.audio.osc 220");
+        assert_kind(&osc, "object.core.audio.osc");
+        assert_eq!(osc.params["frequency"], json!(220.0));
+        assert_diagnostic(
+            &resolve_object_text_v01("osc~ nope"),
+            "object-text.invalid-arg-type",
+        );
+
+        let audio_input = resolve_object_text_v01("adc~");
+        assert_kind(&audio_input, "object.core.audio.input");
+        assert_eq!(audio_input.instance_ports[0].id, "left");
+
+        let audio_output = resolve_object_text_v01("dac~");
+        assert_kind(&audio_output, "object.core.audio.output");
+        assert_eq!(audio_output.instance_ports[0].id, "left");
+
+        let invalid_audio_output = resolve_object_text_v01("dac~ 1");
+        assert_diagnostic(&invalid_audio_output, "object-text.invalid-arg-count");
+
         let subpatch = resolve_object_text_v01("p voice");
         assert!(subpatch.ok());
-        assert_eq!(subpatch.resolved_kind.as_deref(), Some("core.subpatch"));
+        assert_eq!(
+            subpatch.resolved_kind.as_deref(),
+            Some("object.core.subpatch")
+        );
         assert_eq!(subpatch.params["patchRef"], json!("voice"));
+    }
+
+    #[test]
+    fn resolves_runtime_value_boxes_and_boundary_aliases() {
+        for (input, kind, value) in [
+            ("float", "object.core.float", json!(0)),
+            ("int -7", "object.core.int", json!(-7)),
+            ("uint 9", "object.core.uint", json!(9)),
+        ] {
+            let resolution = resolve_object_text_v01(input);
+            assert_kind(&resolution, kind);
+            assert_eq!(resolution.params["value"], value);
+            assert_eq!(resolution.instance_ports.len(), 3);
+        }
+
+        assert_diagnostic(
+            &resolve_object_text_v01("int 1.5"),
+            "object-text.invalid-arg-type",
+        );
+        assert_diagnostic(
+            &resolve_object_text_v01("uint -1"),
+            "object-text.invalid-arg-type",
+        );
+        assert_diagnostic(
+            &resolve_object_text_v01("float 1 2"),
+            "object-text.invalid-arg-count",
+        );
+
+        let bang = resolve_object_text_v01("bang");
+        assert_kind(&bang, "object.core.bang");
+        assert!(bang.params.is_empty());
+        assert_eq!(bang.instance_ports[1].port_type, "value.core.bang");
+        assert_diagnostic(
+            &resolve_object_text_v01("object.core.bang 1"),
+            "object-text.invalid-arg-count",
+        );
+
+        let float_alias = resolve_object_text_v01("f 1.5");
+        assert_kind(&float_alias, "object.core.float");
+        assert_eq!(float_alias.params["value"], json!(1.5));
+        assert_diagnostic(
+            &resolve_object_text_v01("float true"),
+            "object-text.invalid-arg-type",
+        );
+
+        let message = resolve_object_text_v01("message set gain");
+        assert_kind(&message, "object.core.message");
+        assert_eq!(message.params["text"], json!("set gain"));
+        let empty_message = resolve_object_text_v01("msg");
+        assert_kind(&empty_message, "object.core.message");
+        assert_eq!(empty_message.params["text"], json!(""));
+
+        let comment = resolve_object_text_v01("comment hello world");
+        assert_kind(&comment, "object.core.comment");
+        assert_eq!(comment.params["text"], json!("hello world"));
+        assert_eq!(comment.instance_ports.len(), 1);
+        let empty_comment = resolve_object_text_v01("object.core.comment");
+        assert_kind(&empty_comment, "object.core.comment");
+        assert_eq!(empty_comment.params["text"], json!(""));
+
+        let inlet = resolve_object_text_v01("inlet left");
+        assert_kind(&inlet, "object.core.inlet");
+        assert_eq!(inlet.params["portId"], json!("left"));
+
+        let anonymous_outlet = resolve_object_text_v01("outlet");
+        assert_kind(&anonymous_outlet, "object.core.outlet");
+        assert!(anonymous_outlet.params.is_empty());
+        let named_outlet = resolve_object_text_v01("object.core.outlet right");
+        assert_kind(&named_outlet, "object.core.outlet");
+        assert_eq!(named_outlet.params["portId"], json!("right"));
+
+        assert_diagnostic(
+            &resolve_object_text_v01("p"),
+            "object-text.invalid-arg-count",
+        );
+        assert_diagnostic(
+            &resolve_object_text_v01("p true"),
+            "object-text.invalid-arg-type",
+        );
+        assert_diagnostic(
+            &resolve_object_text_v01("inlet left right"),
+            "object-text.invalid-arg-count",
+        );
+        assert_diagnostic(
+            &resolve_object_text_v01("outlet 1"),
+            "object-text.invalid-arg-type",
+        );
     }
 
     #[test]
     fn rejects_payload_identities_as_object_text() {
         for input in [
-            "control.number.float",
+            "value",
+            "data",
+            "payload",
+            "value.core.float32",
             "bool",
-            "event.bang",
-            "gpu.texture2d",
+            "string",
+            "object.core.bool",
+            "object.core.string",
+            "value.core.bang",
+            "value.core.message",
+            "value.core.string",
+            "value.core.tensor",
+            "data.vendor.payload",
+            "payload.vendor.frame",
+            "control.float",
         ] {
             let resolution = resolve_object_text_v01(input);
             assert_eq!(resolution.resolved_kind, None);
@@ -1054,5 +1273,8 @@ mod tests {
 
         let invalid = resolve_object_text_v01("[+ 1");
         assert_eq!(invalid.diagnostics[0].code, "object-text.invalid-syntax");
+
+        let empty = resolve_object_text_v01("   ");
+        assert_eq!(empty.diagnostics[0].code, "object-text.empty");
     }
 }

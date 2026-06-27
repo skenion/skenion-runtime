@@ -4014,7 +4014,7 @@ mod tests {
         assert_eq!(plan["plan"]["graphRevision"], "1");
         assert_eq!(
             plan["plan"]["edges"][0]["metadata"]["resolvedType"],
-            "render.frame"
+            "value.core.tensor"
         );
         assert_eq!(
             plan["plan"]["edges"][0]["metadata"]["mergePolicy"],
@@ -4329,7 +4329,7 @@ mod tests {
             "steps": [{ "id": "intro", "title": "Intro" }]
         });
         project["help"] = json!({
-            "topics": ["core.subpatch"]
+            "topics": ["object.core.subpatch"]
         });
         let response = post_json_with(app.clone(), "/v0/sessions/default/load", project).await;
 
@@ -4349,7 +4349,7 @@ mod tests {
         );
         assert_eq!(
             response["snapshot"]["project"]["help"]["topics"][0],
-            "core.subpatch"
+            "object.core.subpatch"
         );
         assert_eq!(
             response["snapshot"]["project"]["patchLibrary"][0]["id"],
@@ -4562,7 +4562,7 @@ mod tests {
     async fn invalid_session_load_returns_diagnostics_and_keeps_runtime_healthy() {
         let app = runtime_router();
         let mut invalid = sample_project_document_current();
-        invalid["graph"]["nodes"][1]["ports"][1]["type"] = json!("control.bool");
+        invalid["graph"]["nodes"][1]["ports"][1]["type"] = json!("value.core.bool");
 
         let response = post_json_with(app.clone(), "/v0/sessions/default/load", invalid).await;
 
@@ -4578,7 +4578,7 @@ mod tests {
                     .as_str()
                     .unwrap()
                     .contains(
-                        "edge edge_value_target cannot connect value_1:value control.number.float to target_1:cold control.bool",
+                        "edge edge_value_target cannot connect value_1:value value.core.float32 to target_1:cold value.core.bool",
                     ))
         );
 
@@ -4593,7 +4593,7 @@ mod tests {
         let logs = get_json_with(app, "/v0/runtime/logs").await;
         assert!(logs["events"].as_array().unwrap().iter().any(|event| {
             event["message"].as_str().unwrap().contains(
-                "edge edge_value_target cannot connect value_1:value control.number.float to target_1:cold control.bool",
+                "edge edge_value_target cannot connect value_1:value value.core.float32 to target_1:cold value.core.bool",
             )
         }));
     }
@@ -5119,7 +5119,7 @@ mod tests {
                           "changeId": "change-add-gain",
                           "node": {
                             "id": "gain",
-                            "kind": "core.float",
+                            "kind": "object.core.float",
                             "kindVersion": "0.1.0",
                             "params": {},
                             "ports": value_f32_ports_current_json()
@@ -5737,7 +5737,7 @@ mod tests {
                   "changeId": "change-add-without-project",
                   "node": {
                     "id": "gain",
-                    "kind": "core.float",
+                    "kind": "object.core.float",
                     "kindVersion": "0.1.0",
                     "params": {},
                     "ports": value_f32_ports_current_json()
@@ -7048,14 +7048,14 @@ mod tests {
                 "nodes": [
                   {
                     "id": "value_1",
-                    "kind": "core.float",
+                    "kind": "object.core.float",
                     "kindVersion": "0.1.0",
                     "params": {},
                     "ports": value_f32_ports_json()
                   },
                   {
                     "id": "target_1",
-                    "kind": "core.float",
+                    "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_json()
@@ -7069,7 +7069,7 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.float",
+              "id": "object.core.float",
               "version": "0.1.0",
               "displayName": "Float",
               "category": "Typed Controls",
@@ -7077,7 +7077,7 @@ mod tests {
               "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["control.number.float.v0.1"]
+              "capabilities": ["value.core.float32.v0.1"]
             }
           ]
         })
@@ -7097,14 +7097,14 @@ mod tests {
             "nodes": [
               {
                 "id": "value_1",
-                "kind": "core.float",
+                "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_current_json()
               },
               {
                 "id": "target_1",
-                "kind": "core.float",
+                "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_current_json()
@@ -7115,7 +7115,7 @@ mod tests {
                 "id": "edge_value_target",
                 "source": { "nodeId": "value_1", "portId": "value" },
                 "target": { "nodeId": "target_1", "portId": "cold" },
-                "resolvedType": "control.number.float"
+                "resolvedType": "value.core.float32"
               }
             ]
           },
@@ -7134,7 +7134,7 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.float",
+              "id": "object.core.float",
               "version": "0.1.0",
               "displayName": "Float",
               "category": "Typed Controls",
@@ -7142,7 +7142,7 @@ mod tests {
               "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["control.number.float.v0.1"]
+              "capabilities": ["value.core.float32.v0.1"]
             }
           ]
         })
@@ -7167,7 +7167,7 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": { "flow": "control", "dataKind": "message.any" },
+            "type": { "flow": "control", "dataKind": "value.core.message" },
             "required": false,
             "activation": "trigger"
           },
@@ -7175,7 +7175,7 @@ mod tests {
             "id": "cold",
             "direction": "input",
             "label": "Cold",
-            "type": { "flow": "control", "dataKind": "number.float" },
+            "type": { "flow": "control", "dataKind": "value.core.float32" },
             "required": false,
             "activation": "latched"
           },
@@ -7183,7 +7183,7 @@ mod tests {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": { "flow": "control", "dataKind": "number.float" }
+            "type": { "flow": "control", "dataKind": "value.core.float32" }
           }
         ])
     }
@@ -7198,18 +7198,18 @@ mod tests {
             "nodes": [
               {
                 "id": "shader_1",
-                "kind": "render.fullscreen-shader",
+                "kind": "object.core.render.fullscreen-shader",
                 "kindVersion": "0.1.0",
                 "params": {
                   "language": "wgsl",
-                  "source": "// @skenion.uniform speed number.float default=0.5\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(skenion.speed, 0.0, 1.0, 1.0); }"
+                  "source": "// @skenion.uniform speed value.core.float32 default=0.5\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(skenion.speed, 0.0, 1.0, 1.0); }"
                 },
                 "ports": [
                   {
                     "id": "speed",
                     "direction": "input",
                     "label": "Speed",
-                    "type": "control.number.float",
+                    "type": "value.core.float32",
                     "rate": "control",
                     "required": false,
                     "defaultValue": 0.5,
@@ -7219,7 +7219,7 @@ mod tests {
                     "id": "out",
                     "direction": "output",
                     "label": "Out",
-                    "type": "gpu.texture2d",
+                    "type": "value.core.tensor",
                     "rate": "resource"
                   }
                 ]
@@ -7231,7 +7231,7 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.fullscreen-shader",
+              "id": "object.core.render.fullscreen-shader",
               "version": "0.1.0",
               "displayName": "Fullscreen Shader",
               "category": "Render",
@@ -7240,7 +7240,7 @@ mod tests {
                   "id": "speed",
                   "direction": "input",
                   "label": "Speed",
-                  "type": "control.number.float",
+                  "type": "value.core.float32",
                   "rate": "control",
                   "required": false,
                   "defaultValue": 0.5,
@@ -7250,7 +7250,7 @@ mod tests {
                   "id": "out",
                   "direction": "output",
                   "label": "Out",
-                  "type": "gpu.texture2d",
+                  "type": "value.core.tensor",
                   "rate": "resource"
                 }
               ],
@@ -7273,28 +7273,28 @@ mod tests {
             "nodes": [
               {
                 "id": "clear_color",
-                "kind": "render.clear-color",
+                "kind": "object.core.render.clear-color",
                 "kindVersion": "0.1.0",
                 "params": { "color": [0.12, 0.2, 0.34, 1] },
                 "ports": [
                   {
                     "id": "out",
                     "direction": "output",
-                    "type": "render.frame",
+                    "type": "value.core.tensor",
                     "rate": "render"
                   }
                 ]
               },
               {
                 "id": "output",
-                "kind": "render.output",
+                "kind": "object.core.render.output",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
                   {
                     "id": "in",
                     "direction": "input",
-                    "type": "render.frame",
+                    "type": "value.core.tensor",
                     "rate": "render",
                     "required": true
                   }
@@ -7306,7 +7306,7 @@ mod tests {
                 "id": "edge_clear_output",
                 "source": { "nodeId": "clear_color", "portId": "out" },
                 "target": { "nodeId": "output", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               }
             ]
           },
@@ -7314,7 +7314,7 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.clear-color",
+              "id": "object.core.render.clear-color",
               "version": "0.1.0",
               "displayName": "Clear Color",
               "category": "Render",
@@ -7322,19 +7322,19 @@ mod tests {
                 {
                   "id": "out",
                   "direction": "output",
-                  "type": "render.frame",
+                  "type": "value.core.tensor",
                   "rate": "render"
                 }
               ],
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["render.frame.v0.1"]
+              "capabilities": ["value.core.tensor.v0.1"]
             },
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.output",
+              "id": "object.core.render.output",
               "version": "0.1.0",
               "displayName": "Render Output",
               "category": "Render",
@@ -7342,7 +7342,7 @@ mod tests {
                 {
                   "id": "in",
                   "direction": "input",
-                  "type": "render.frame",
+                  "type": "value.core.tensor",
                   "rate": "render",
                   "required": true
                 }
@@ -7350,7 +7350,7 @@ mod tests {
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["render.output.v0.1"]
+              "capabilities": ["object.core.render.output.v0.1"]
             }
           ]
         })
@@ -7370,30 +7370,30 @@ mod tests {
             "nodes": [
               {
                 "id": "clear_color",
-                "kind": "render.clear-color",
+                "kind": "object.core.render.clear-color",
                 "kindVersion": "0.1.0",
                 "params": { "color": [0.12, 0.2, 0.34, 1] },
                 "ports": [
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               },
               {
                 "id": "fx",
-                "kind": "core.subpatch",
+                "kind": "object.core.subpatch",
                 "kindVersion": "0.1.0",
                 "params": { "patchRef": "identity" },
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               },
               {
                 "id": "output",
-                "kind": "render.output",
+                "kind": "object.core.render.output",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
                 ]
               }
             ],
@@ -7402,13 +7402,13 @@ mod tests {
                 "id": "edge_clear_fx",
                 "source": { "nodeId": "clear_color", "portId": "out" },
                 "target": { "nodeId": "fx", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               },
               {
                 "id": "edge_fx_output",
                 "source": { "nodeId": "fx", "portId": "out" },
                 "target": { "nodeId": "output", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               }
             ]
           },
@@ -7430,11 +7430,11 @@ mod tests {
                 "nodes": [
                   {
                     "id": "patch_in",
-                    "kind": "core.inlet",
+                    "kind": "object.core.inlet",
                     "kindVersion": "0.1.0",
                     "params": { "portId": "in", "label": "Input" },
                     "ports": [
-                      { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "description": "Frame entering the patch" }
+                      { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "description": "Frame entering the patch" }
                     ]
                   },
                   {
@@ -7443,17 +7443,17 @@ mod tests {
                     "kindVersion": "0.1.0",
                     "params": {},
                     "ports": [
-                      { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                      { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                      { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                      { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                     ]
                   },
                   {
                     "id": "patch_out",
-                    "kind": "core.outlet",
+                    "kind": "object.core.outlet",
                     "kindVersion": "0.1.0",
                     "params": { "portId": "out", "label": "Output" },
                     "ports": [
-                      { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true, "description": "Frame leaving the patch" }
+                      { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true, "description": "Frame leaving the patch" }
                     ]
                   }
                 ],
@@ -7462,13 +7462,13 @@ mod tests {
                     "id": "edge_in_pass",
                     "source": { "nodeId": "patch_in", "portId": "out" },
                     "target": { "nodeId": "pass", "portId": "in" },
-                    "resolvedType": "render.frame"
+                    "resolvedType": "value.core.tensor"
                   },
                   {
                     "id": "edge_pass_out",
                     "source": { "nodeId": "pass", "portId": "out" },
                     "target": { "nodeId": "patch_out", "portId": "in" },
-                    "resolvedType": "render.frame"
+                    "resolvedType": "value.core.tensor"
                   }
                 ]
               }
@@ -7478,32 +7478,32 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.clear-color",
+              "id": "object.core.render.clear-color",
               "version": "0.1.0",
               "displayName": "Clear Color",
               "category": "Render",
               "ports": [
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ],
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["render.frame.v0.1"]
+              "capabilities": ["value.core.tensor.v0.1"]
             },
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.output",
+              "id": "object.core.render.output",
               "version": "0.1.0",
               "displayName": "Render Output",
               "category": "Render",
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
               ],
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["render.output.v0.1"]
+              "capabilities": ["object.core.render.output.v0.1"]
             },
             {
               "schema": "skenion.node.definition",
@@ -7513,8 +7513,8 @@ mod tests {
               "displayName": "Pass",
               "category": "Test",
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ],
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
@@ -7535,22 +7535,22 @@ mod tests {
             "nodes": [
               {
                 "id": "a",
-                "kind": "core.float-transform",
+                "kind": "object.core.float-transform",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "control.number.float", "rate": "control" },
-                  { "id": "out", "direction": "output", "type": "control.number.float", "rate": "control" }
+                  { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
+                  { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
                 ]
               },
               {
                 "id": "b",
-                "kind": "core.float-transform",
+                "kind": "object.core.float-transform",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "control.number.float", "rate": "control" },
-                  { "id": "out", "direction": "output", "type": "control.number.float", "rate": "control" }
+                  { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
+                  { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
                 ]
               }
             ],
@@ -7571,18 +7571,18 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.float-transform",
+              "id": "object.core.float-transform",
               "version": "0.1.0",
               "displayName": "Value Transform",
               "category": "Core",
               "ports": [
-                { "id": "in", "direction": "input", "type": "control.number.float", "rate": "control" },
-                { "id": "out", "direction": "output", "type": "control.number.float", "rate": "control" }
+                { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
+                { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
               ],
               "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["control.number.float.v0.1"]
+              "capabilities": ["value.core.float32.v0.1"]
             }
           ]
         })
@@ -7621,14 +7621,14 @@ mod tests {
                   "nodes": [
                     {
                       "id": "value_1",
-                      "kind": "core.float",
+                      "kind": "object.core.float",
                       "kindVersion": "0.1.0",
                       "params": {},
                       "ports": value_f32_ports_current_json()
                     },
                     {
                       "id": "pasted_target",
-                      "kind": "core.float",
+                      "kind": "object.core.float",
                       "kindVersion": "0.1.0",
                       "params": {},
                       "ports": value_f32_ports_current_json()
@@ -7739,14 +7739,14 @@ mod tests {
                     "nodes": [
                       {
                         "id": "value_1",
-                        "kind": "core.float",
+                        "kind": "object.core.float",
                         "kindVersion": "0.1.0",
                         "params": {},
                         "ports": value_f32_ports_current_json()
                       },
                       {
                         "id": "pasted_target",
-                        "kind": "core.float",
+                        "kind": "object.core.float",
                         "kindVersion": "0.1.0",
                         "params": {},
                         "ports": value_f32_ports_current_json()
@@ -7842,11 +7842,11 @@ mod tests {
     fn render_clear_color_node_current_json(node_id: &str) -> Value {
         json!({
           "id": node_id,
-          "kind": "render.clear-color",
+          "kind": "object.core.render.clear-color",
           "kindVersion": "0.1.0",
           "params": { "color": [0.02, 0.04, 0.08, 1.0] },
           "ports": [
-            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
           ]
         })
     }
@@ -7930,18 +7930,18 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": "control.message.any",
+            "type": "value.core.message",
             "rate": "control",
             "required": false,
             "triggerMode": "trigger",
             "accepts": [
-              "control.number.float",
-              "control.number.int",
-              "control.number.uint",
-              "control.bool",
-              "event.bang"
+              "value.core.float32",
+              "value.core.int32",
+              "value.core.uint32",
+              "value.core.bool",
+              "value.core.bang"
             ],
-            "messageSelectors": {
+            "messageKeys": {
               "accepted": ["bang", "set", "float", "int", "uint", "bool"],
               "silent": ["set"],
               "trigger": ["bang", "float", "int", "uint", "bool"],
@@ -7953,7 +7953,7 @@ mod tests {
             "id": "cold",
             "direction": "input",
             "label": "Cold",
-            "type": "control.number.float",
+            "type": "value.core.float32",
             "rate": "control",
             "required": false,
             "triggerMode": "passive"
@@ -7962,7 +7962,7 @@ mod tests {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": "control.number.float",
+            "type": "value.core.float32",
             "rate": "control"
           }
         ])

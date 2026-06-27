@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skenion_contracts::{
-    CanvasNodeViewV01, EdgeSpecV01, GraphNodeV01, GraphTargetRef, InterfaceDiagnosticDetailV01,
-    InterfaceIncidentEdgePolicyV01, PasteGraphFragmentRequest, ProjectDocumentV01,
-    validate_paste_graph_fragment_request, validate_project_document_v01,
+    CanvasNodeViewV01, EdgeSpecV01, EndpointBindingValueFormatV01, GraphNodeV01, GraphTargetRef,
+    InterfaceDiagnosticDetailV01, InterfaceIncidentEdgePolicyV01, PasteGraphFragmentRequest,
+    ProjectDocumentV01, validate_paste_graph_fragment_request, validate_project_document_v01,
 };
 
 use crate::{project_current::is_payload_identity_node_kind_current, server::RuntimeDiagnostic};
@@ -734,6 +734,7 @@ pub struct RuntimeTransportSessionSnapshot {
     pub view_revision: u64,
     pub control_revision: u64,
     pub project: Option<RuntimeTransportProjectSnapshot>,
+    pub binding_formats: Vec<EndpointBindingValueFormatV01>,
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<Value>,
 }
@@ -1788,5 +1789,711 @@ fn finish_validation(errors: Vec<RuntimeValidationError>) -> Result<(), RuntimeV
         Ok(())
     } else {
         Err(RuntimeValidationReport::new(errors))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DiagnosticSeverity, RuntimeDiagnostic};
+    use serde_json::json;
+    use skenion_contracts::{
+        GraphFragmentOutsideEndpointPolicyV01, GraphFragmentV01, GraphFragmentViewV01,
+        IdConflictPolicy, InterfaceDiagnosticDetailV01, InterfaceIncidentEdgePolicyV01,
+        InterfaceRecoveryActionIdV01, PasteGraphFragmentOptions, PatchPath, PortDirectionV01,
+    };
+
+    #[test]
+    fn runtime_operation_and_paste_response_validation_reports_semantic_errors() {
+        let envelope = RuntimeOperationEnvelope {
+            schema: "wrong.schema".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            id: String::new(),
+            kind: "unsupported".to_owned(),
+            request: paste_request(),
+            attribution: Some(RuntimeOperationAttribution {
+                actor_id: Some("actor_1".to_owned()),
+                client_id: Some("client_1".to_owned()),
+                label: Some("paste".to_owned()),
+            }),
+            correlation_id: Some("correlation_1".to_owned()),
+            created_at: Some("2026-06-27T00:00:00.000Z".to_owned()),
+        };
+
+        let report = validate_runtime_operation_envelope(&envelope).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.operation",
+                "expected schemaVersion 0.1.0",
+                "runtime operation id must not be empty",
+                "unsupported runtime operation kind",
+            ],
+        );
+
+        let response = PasteGraphFragmentResponse {
+            schema: "wrong.response".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            ok: false,
+            applied: true,
+            conflict: false,
+            target: root_target(),
+            revision_before: "1".to_owned(),
+            revision_after: None,
+            history_entry_id: None,
+            id_remap: IdRemapResult {
+                node_id_map: BTreeMap::new(),
+                edge_id_map: BTreeMap::new(),
+                omitted_edge_ids: Vec::new(),
+            },
+            diagnostics: vec![
+                RuntimeOperationDiagnostic {
+                    severity: "error".to_owned(),
+                    code: "interface-drift".to_owned(),
+                    message: "drift".to_owned(),
+                    path: None,
+                    target: None,
+                    expected_revision: None,
+                    actual_revision: None,
+                    duplicates: None,
+                    nodes: None,
+                    edges: None,
+                    interface_policy: Some(InterfaceIncidentEdgePolicyV01::Drop),
+                    interface_detail: None,
+                },
+                RuntimeOperationDiagnostic {
+                    severity: "error".to_owned(),
+                    code: "invalid-incident-edge".to_owned(),
+                    message: "edge".to_owned(),
+                    path: None,
+                    target: None,
+                    expected_revision: None,
+                    actual_revision: None,
+                    duplicates: None,
+                    nodes: None,
+                    edges: None,
+                    interface_policy: Some(InterfaceIncidentEdgePolicyV01::PreserveDiagnostic),
+                    interface_detail: Some(interface_detail(Vec::new())),
+                },
+            ],
+        };
+
+        let report = validate_paste_graph_fragment_response(&response).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.paste-graph-fragment.response",
+                "expected schemaVersion 0.1.0",
+                "paste response cannot be applied when ok is false",
+                "applied paste response must include revisionAfter",
+                "diagnostic interface-drift requires interfaceDetail",
+                "interfaceDetail requires recoveryActions",
+            ],
+        );
+    }
+
+    #[test]
+    fn collaboration_operation_and_batch_validation_reports_semantic_errors() {
+        let operation = RuntimeCollaborationOperationEnvelope {
+            schema: "wrong.operation".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            operation_id: "operation_1".to_owned(),
+            session_id: "other-session".to_owned(),
+            participant_id: "participant_1".to_owned(),
+            idempotency_key: "idem_1".to_owned(),
+            causal: causal_without_participant(),
+            payload: RuntimeCollaborationOperationPayload::ChangeSet {
+                target: root_target(),
+                changes: vec![node_move("dup"), node_move("dup")],
+                undo_group_id: Some("undo_1".to_owned()),
+                description: Some("move".to_owned()),
+            },
+            auth_subject: Some(RuntimeCollaborationAuthSubject {
+                kind: RuntimeCollaborationAuthSubjectKind::User,
+                subject_id: Some("participant_1".to_owned()),
+                issuer: Some("test".to_owned()),
+                display_name: Some("Participant".to_owned()),
+            }),
+            correlation_id: Some("correlation_1".to_owned()),
+            submitted_at: "2026-06-27T00:00:00.000Z".to_owned(),
+        };
+
+        let report = validate_runtime_collaboration_operation_envelope(&operation).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.collaboration.operation",
+                "expected schemaVersion 0.1.0",
+                "operation causal baseSequence must be greater than or equal to the causal vector maximum",
+                "operation participantId must not mirror auth subject id",
+                "duplicate collaboration change id: dup",
+                "operation causal vector must include participantId",
+            ],
+        );
+
+        let batch = RuntimeCollaborationOperationBatch {
+            schema: "wrong.batch".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            session_id: "session_1".to_owned(),
+            operations: vec![operation.clone(), operation],
+            submitted_at: Some("2026-06-27T00:00:00.000Z".to_owned()),
+        };
+
+        let report = validate_runtime_collaboration_operation_batch(&batch).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.collaboration.operation-batch",
+                "expected schemaVersion 0.1.0",
+                "duplicate collaboration idempotency key: idem_1",
+                "collaboration batch operation sessionId must match batch sessionId",
+            ],
+        );
+    }
+
+    #[test]
+    fn collaboration_results_validate_ack_nack_rebase_and_batch_shape() {
+        let mut accepted = operation_result(RuntimeCollaborationOperationStatus::Accepted);
+        accepted.ack = None;
+        accepted.nack = Some(nack(RuntimeCollaborationNackReason::InvalidOperation));
+        accepted.rebase = Some(rebase());
+        accepted.causal = causal_without_participant();
+
+        let report = validate_runtime_collaboration_operation_result(&accepted).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "operation result causal baseSequence must be greater than or equal to the causal vector maximum",
+                "accepted or rebased collaboration result must include ack",
+                "accepted collaboration result must not include nack or rebase",
+            ],
+        );
+
+        let mut duplicate = operation_result(RuntimeCollaborationOperationStatus::Duplicate);
+        duplicate.nack = Some(nack(RuntimeCollaborationNackReason::InvalidOperation));
+
+        let report = validate_runtime_collaboration_operation_result(&duplicate).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &["duplicate collaboration result nack reason must be duplicate-idempotency-key"],
+        );
+
+        let mut rebased = operation_result(RuntimeCollaborationOperationStatus::Rebased);
+        rebased.ack = Some(ack());
+        rebased.rebase = None;
+
+        let report = validate_runtime_collaboration_operation_result(&rebased).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &["rebased collaboration result must include rebase"],
+        );
+
+        let mut mismatched = operation_result(RuntimeCollaborationOperationStatus::Rejected);
+        mismatched.session_id = "other-session".to_owned();
+        mismatched.idempotency_key = "idem_batch".to_owned();
+        mismatched.nack = None;
+
+        let batch = RuntimeCollaborationOperationBatchResult {
+            schema: "wrong.batch-result".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            session_id: "session_1".to_owned(),
+            results: vec![mismatched.clone(), mismatched],
+            diagnostics: Vec::new(),
+            created_at: "2026-06-27T00:00:01.000Z".to_owned(),
+        };
+
+        let report = validate_runtime_collaboration_operation_batch_result(&batch).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.collaboration.operation-batch-result",
+                "expected schemaVersion 0.1.0",
+                "duplicate collaboration batch result idempotency key: idem_batch",
+                "collaboration batch result operation sessionId must match batch result sessionId",
+                "duplicate or rejected collaboration result must include nack",
+            ],
+        );
+    }
+
+    #[test]
+    fn presence_selection_event_session_and_history_validation_report_transport_errors() {
+        let presence = RuntimeCollaborationPresenceEnvelope {
+            schema: "wrong.presence".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            session_id: "session_1".to_owned(),
+            participant_id: "participant_1".to_owned(),
+            presence: RuntimeCollaborationPresence {
+                state: RuntimeCollaborationPresenceState::Active,
+                display_name: Some("Participant".to_owned()),
+                color: Some("#00f".to_owned()),
+                status_text: Some("editing".to_owned()),
+                capabilities: Some(vec!["edit".to_owned()]),
+                connection_id: Some("connection_1".to_owned()),
+                client_window_id: Some("window_1".to_owned()),
+            },
+            auth_subject: Some(RuntimeCollaborationAuthSubject {
+                kind: RuntimeCollaborationAuthSubjectKind::User,
+                subject_id: Some("participant_1".to_owned()),
+                issuer: Some("test".to_owned()),
+                display_name: Some("Participant".to_owned()),
+            }),
+            updated_at: "2026-06-27T00:05:00.000Z".to_owned(),
+            expires_at: "2026-06-27T00:04:00.000Z".to_owned(),
+        };
+
+        let report = validate_runtime_collaboration_presence_envelope(&presence).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.collaboration.presence",
+                "expected schemaVersion 0.1.0",
+                "presence participantId must not mirror auth subject id",
+                "presence expiresAt must be later than updatedAt",
+            ],
+        );
+
+        let selection = RuntimeCollaborationSelectionEnvelope {
+            schema: "wrong.selection".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            session_id: "session_1".to_owned(),
+            participant_id: "participant_1".to_owned(),
+            target: root_target(),
+            selection: RuntimeCollaborationSelection {
+                ranges: vec![RuntimeCollaborationSelectionRange::Ports {
+                    endpoints: vec![RuntimeCollaborationPortEndpoint {
+                        node_id: "node_1".to_owned(),
+                        port_id: "out".to_owned(),
+                    }],
+                }],
+                active_range_index: Some(0),
+            },
+            cursor: Some(RuntimeCollaborationCursor::Node {
+                node_id: "node_1".to_owned(),
+                port_id: Some("out".to_owned()),
+                client_window_id: Some("window_1".to_owned()),
+            }),
+            updated_at: "2026-06-27T00:05:00.000Z".to_owned(),
+            expires_at: "2026-06-27T00:04:00.000Z".to_owned(),
+        };
+
+        let report = validate_runtime_collaboration_selection_envelope(&selection).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.collaboration.selection",
+                "expected schemaVersion 0.1.0",
+                "selection expiresAt must be later than updatedAt",
+            ],
+        );
+
+        let event = RuntimeCollaborationEventEnvelope {
+            schema: "wrong.event".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            event_id: "event_1".to_owned(),
+            session_id: "session_1".to_owned(),
+            sequence: 1,
+            causal: causal_without_participant(),
+            kind: RuntimeCollaborationEventKind::Presence,
+            payload: RuntimeCollaborationEventPayload::Selection {
+                selection: Box::new(selection),
+            },
+            replay: replay_with_bad_gap(),
+            created_at: "2026-06-27T00:00:02.000Z".to_owned(),
+        };
+
+        let report = validate_runtime_collaboration_event_envelope(&event).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.collaboration.event",
+                "expected schemaVersion 0.1.0",
+                "collaboration event causal baseSequence must be greater than or equal to the causal vector maximum",
+                "collaboration event kind must match payload kind",
+                "collaboration event replay gap expectedSequence must be less than actualSequence",
+            ],
+        );
+
+        let session_info = RuntimeSessionInfoResponse {
+            schema: "wrong.session.info".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            ok: true,
+            session_id: String::new(),
+            lifecycle: RuntimeSessionLifecycleState::Ready,
+            snapshot: bad_snapshot(),
+            profile: bad_profile(),
+            capabilities: RuntimeSessionCapabilitySet {
+                session_addressing: true,
+                event_replay: true,
+                multi_window: true,
+                profiles: vec![RuntimeConnectionProfileMode::LocalManaged],
+                auth_policy: "required".to_owned(),
+            },
+            event_replay: RuntimeEventReplayWindow {
+                cursor_kind: "timestamp".to_owned(),
+                current_cursor: String::new(),
+                earliest_sequence: 0,
+                latest_sequence: 0,
+                replay_limit: Some(128),
+                overflow: Some(false),
+            },
+            diagnostics: vec![empty_runtime_diagnostic()],
+        };
+
+        let report = validate_runtime_session_info_response(&session_info).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.session.info",
+                "expected schemaVersion 0.1.0",
+                "sessionId must not be empty",
+                "snapshot diagnostics must include non-empty message",
+                "snapshot plan must be an object or null",
+                "session info diagnostics must include non-empty message",
+                "endpoint url must not be empty",
+                "runtime session authPolicy must be deferred",
+                "runtime eventReplay cursorKind must be sequence",
+                "runtime eventReplay currentCursor must not be empty",
+                "runtime eventReplay earliestSequence must be at least 1",
+                "runtime profile ownership must match",
+            ],
+        );
+
+        let session_event = RuntimeSessionEvent {
+            schema: "wrong.session.event".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            id: String::new(),
+            session_id: String::new(),
+            sequence: 0,
+            session_revision: 99,
+            kind: RuntimeSessionEventKind::Mutate,
+            snapshot: bad_snapshot(),
+            history: bad_history(),
+            mutation: Some(bad_history_entry()),
+            replay: replay_with_bad_gap(),
+            diagnostics: vec![empty_runtime_diagnostic()],
+            created_at: String::new(),
+        };
+
+        let report = validate_runtime_session_event(&session_event).unwrap_err();
+
+        assert_messages_include(
+            &report,
+            &[
+                "expected schema skenion.runtime.session.event",
+                "expected schemaVersion 0.1.0",
+                "sessionId must not be empty",
+                "event id must not be empty",
+                "sequence must be at least 1",
+                "createdAt must not be empty",
+                "event diagnostics must include non-empty message",
+                "expected history schema skenion.runtime.history",
+                "history entry id must not be empty",
+                "mutation viewPatch operation nodeId must not be empty",
+                "replay cursor must not be empty",
+                "replay previousCursor must not be empty",
+                "replay gap expectedSequence must be less than actualSequence",
+                "event sessionRevision must match snapshot.sessionRevision",
+            ],
+        );
+    }
+
+    fn assert_messages_include(report: &RuntimeValidationReport, expected: &[&str]) {
+        let text = report.to_string();
+        for expected in expected {
+            assert!(
+                text.contains(expected),
+                "expected report to include {expected:?}, got {text:?}"
+            );
+        }
+    }
+
+    fn root_target() -> GraphTargetRef {
+        GraphTargetRef {
+            path: PatchPath::Root,
+            base_revision: "1".to_owned(),
+            target_revision: None,
+        }
+    }
+
+    fn paste_request() -> PasteGraphFragmentRequest {
+        PasteGraphFragmentRequest {
+            target: root_target(),
+            fragment: GraphFragmentV01 {
+                schema: "skenion.graph.fragment".to_owned(),
+                schema_version: "0.1.0".to_owned(),
+                id: Some("fragment_1".to_owned()),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                view: Some(GraphFragmentViewV01 {
+                    nodes: Some(BTreeMap::new()),
+                }),
+                omitted_edges: Some(Vec::new()),
+                metadata: None,
+            },
+            placement: None,
+            options: Some(PasteGraphFragmentOptions {
+                outside_endpoint_policy: Some(GraphFragmentOutsideEndpointPolicyV01::Reject),
+                id_conflict_policy: Some(IdConflictPolicy::Reject),
+                interface_incident_edge_policy: Some(InterfaceIncidentEdgePolicyV01::Reject),
+                preserve_relative_positions: Some(true),
+            }),
+        }
+    }
+
+    fn interface_detail(
+        recovery_actions: Vec<InterfaceRecoveryActionIdV01>,
+    ) -> InterfaceDiagnosticDetailV01 {
+        InterfaceDiagnosticDetailV01 {
+            edge_id: "edge_1".to_owned(),
+            source_node_id: "source_1".to_owned(),
+            source_port_id: "out".to_owned(),
+            target_node_id: "target_1".to_owned(),
+            target_port_id: "in".to_owned(),
+            missing_endpoint: None,
+            expected_direction: Some(PortDirectionV01::Input),
+            actual_direction: Some(PortDirectionV01::Output),
+            expected_type: Some("value.core.float32".to_owned()),
+            actual_type: Some("value.core.string".to_owned()),
+            cardinality: None,
+            recovery_actions,
+        }
+    }
+
+    fn causal_without_participant() -> RuntimeCollaborationCausalMetadata {
+        RuntimeCollaborationCausalMetadata {
+            base_revision: "1".to_owned(),
+            base_sequence: 1,
+            vector: BTreeMap::from([("other_participant".to_owned(), 2)]),
+            observed_operation_ids: Some(vec!["operation_0".to_owned()]),
+        }
+    }
+
+    fn valid_causal() -> RuntimeCollaborationCausalMetadata {
+        RuntimeCollaborationCausalMetadata {
+            base_revision: "1".to_owned(),
+            base_sequence: 2,
+            vector: BTreeMap::from([("participant_1".to_owned(), 2)]),
+            observed_operation_ids: None,
+        }
+    }
+
+    fn node_move(change_id: &str) -> RuntimeCollaborationChange {
+        RuntimeCollaborationChange::NodeMove {
+            change_id: change_id.to_owned(),
+            node_id: "node_1".to_owned(),
+            from: Some(RuntimeCollaborationCanvasPosition { x: 0.0, y: 0.0 }),
+            to: RuntimeCollaborationCanvasPosition { x: 1.0, y: 1.0 },
+        }
+    }
+
+    fn operation_result(
+        status: RuntimeCollaborationOperationStatus,
+    ) -> RuntimeCollaborationOperationResult {
+        RuntimeCollaborationOperationResult {
+            schema: "skenion.runtime.collaboration.operation-result".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            session_id: "session_1".to_owned(),
+            operation_id: "operation_1".to_owned(),
+            participant_id: "participant_1".to_owned(),
+            idempotency_key: "idem_1".to_owned(),
+            status,
+            causal: valid_causal(),
+            ack: Some(ack()),
+            nack: None,
+            rebase: None,
+            diagnostics: Vec::new(),
+            created_at: "2026-06-27T00:00:00.000Z".to_owned(),
+        }
+    }
+
+    fn ack() -> RuntimeCollaborationAck {
+        RuntimeCollaborationAck {
+            sequence: 2,
+            revision: "2".to_owned(),
+            server_clock: RuntimeCollaborationServerClock {
+                revision: "2".to_owned(),
+                sequence: 2,
+                vector: BTreeMap::from([("participant_1".to_owned(), 2)]),
+            },
+            applied_at: "2026-06-27T00:00:00.000Z".to_owned(),
+        }
+    }
+
+    fn nack(reason: RuntimeCollaborationNackReason) -> RuntimeCollaborationNack {
+        RuntimeCollaborationNack {
+            reason,
+            retryable: Some(false),
+            diagnostics: Some(vec![RuntimeCollaborationOperationDiagnostic {
+                severity: "error".to_owned(),
+                code: "invalid-operation".to_owned(),
+                message: "invalid".to_owned(),
+                path: Some("/payload".to_owned()),
+                participant_id: Some("participant_1".to_owned()),
+                operation_id: Some("operation_1".to_owned()),
+                idempotency_key: Some("idem_1".to_owned()),
+                expected_revision: Some("2".to_owned()),
+                actual_revision: Some("1".to_owned()),
+                expected_sequence: Some(2),
+                actual_sequence: Some(1),
+            }]),
+        }
+    }
+
+    fn rebase() -> RuntimeCollaborationRebase {
+        RuntimeCollaborationRebase {
+            from: valid_causal(),
+            to: valid_causal(),
+            strategy: RuntimeCollaborationRebaseStrategy::OtTransform,
+            transformed_payload: Some(RuntimeCollaborationOperationPayload::UndoRedo {
+                action: RuntimeCollaborationUndoRedoAction::Undo,
+                scope: RuntimeCollaborationUndoScope {
+                    kind: RuntimeCollaborationUndoScopeKind::Participant,
+                    participant_id: "participant_1".to_owned(),
+                },
+                subject_operation_id: Some("operation_0".to_owned()),
+                undo_group_id: None,
+                max_operations: Some(1),
+            }),
+            conflicts: vec![RuntimeCollaborationConflict {
+                code: "conflict".to_owned(),
+                message: "conflict".to_owned(),
+                change_ids: Some(vec!["change_1".to_owned()]),
+                node_ids: Some(vec!["node_1".to_owned()]),
+                edge_ids: Some(vec!["edge_1".to_owned()]),
+            }],
+        }
+    }
+
+    fn replay_with_bad_gap() -> RuntimeEventReplayMetadata {
+        RuntimeEventReplayMetadata {
+            cursor: String::new(),
+            previous_cursor: Some(String::new()),
+            replayed: true,
+            gap: Some(RuntimeEventReplayGap {
+                expected_sequence: 2,
+                actual_sequence: 1,
+                reason: RuntimeEventReplayGapReason::RetentionOverflow,
+            }),
+            overflow: true,
+        }
+    }
+
+    fn bad_snapshot() -> RuntimeTransportSessionSnapshot {
+        RuntimeTransportSessionSnapshot {
+            session_revision: 1,
+            view_revision: 1,
+            control_revision: 1,
+            project: None,
+            binding_formats: Vec::new(),
+            diagnostics: vec![empty_runtime_diagnostic()],
+            plan: Some(json!(false)),
+        }
+    }
+
+    fn empty_runtime_diagnostic() -> RuntimeDiagnostic {
+        RuntimeDiagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: String::new(),
+            code: Some("runtime.empty".to_owned()),
+            details: Some(json!({ "field": "message" })),
+        }
+    }
+
+    fn bad_profile() -> RuntimeConnectionProfile {
+        RuntimeConnectionProfile {
+            mode: RuntimeConnectionProfileMode::LocalManaged,
+            ownership: RuntimeOwnershipMode::Remote,
+            display_name: Some("broken".to_owned()),
+            endpoint: RuntimeEndpointMetadata {
+                url: String::new(),
+                canonical_url: Some(String::new()),
+                protocol: RuntimeEndpointProtocol::Http,
+                host: Some(String::new()),
+                port: Some(3761),
+                tls: Some(false),
+            },
+            process: Some(RuntimeProcessMetadata {
+                owned_by_host: true,
+                pid: Some(0),
+                executable_path: Some(String::new()),
+                working_directory: Some(String::new()),
+                started_at: Some("2026-06-27T00:00:00.000Z".to_owned()),
+                owner_window_id: Some(String::new()),
+                platform: Some(String::new()),
+                arch: Some(String::new()),
+            }),
+        }
+    }
+
+    fn bad_history() -> RuntimeTransportHistory {
+        RuntimeTransportHistory {
+            schema: "wrong.history".to_owned(),
+            schema_version: "9.9.9".to_owned(),
+            entries: vec![bad_history_entry()],
+            can_undo: true,
+            can_redo: true,
+            undo_depth: 1,
+            redo_depth: 1,
+        }
+    }
+
+    fn bad_history_entry() -> RuntimeTransportHistoryEntry {
+        RuntimeTransportHistoryEntry {
+            id: String::new(),
+            sequence: 0,
+            kind: RuntimeTransportHistoryEntryKind::Apply,
+            mutation: bad_mutation(),
+            inverse_mutation: bad_mutation(),
+            subject_event_id: Some(String::new()),
+            client_id: Some(String::new()),
+            description: Some("bad".to_owned()),
+            created_at: String::new(),
+        }
+    }
+
+    fn bad_mutation() -> RuntimeTransportMutationRequest {
+        RuntimeTransportMutationRequest {
+            operation: None,
+            view_patch: Some(RuntimeTransportViewPatch {
+                base_view_revision: 1,
+                ops: vec![
+                    RuntimeTransportViewPatchOperation::SetNodeView {
+                        node_id: String::new(),
+                        view: CanvasNodeViewV01 {
+                            x: 0.0,
+                            y: 0.0,
+                            width: Some(10.0),
+                            height: Some(10.0),
+                            collapsed: Some(false),
+                        },
+                    },
+                    RuntimeTransportViewPatchOperation::MoveNodeView {
+                        node_id: String::new(),
+                        from: None,
+                        to: CanvasNodeViewV01 {
+                            x: 1.0,
+                            y: 1.0,
+                            width: None,
+                            height: None,
+                            collapsed: None,
+                        },
+                    },
+                ],
+            }),
+            client_id: Some(String::new()),
+            description: Some("bad mutation".to_owned()),
+        }
     }
 }

@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     http::{Method, Request, header},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -58,6 +58,12 @@ async fn spawn_loaded_runtime() -> TestRuntime {
         .await
         .expect("load request succeeds");
     assert!(response.status().is_success());
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("load response body should be readable");
+    let load_response: Value =
+        serde_json::from_slice(&body).expect("load response body should be JSON");
+    assert_eq!(load_response["ok"], true, "load failed: {load_response}");
     spawn_runtime_with_state(state).await
 }
 
@@ -257,7 +263,7 @@ fn graph_node_add_payload(base_revision: &str, node_id: &str) -> Value {
                 "changeId": format!("add-{node_id}"),
                 "node": {
                     "id": node_id,
-                    "kind": "core.float",
+                    "kind": "object.core.float",
                     "kindVersion": "0.1.0",
                     "params": {},
                     "ports": value_f32_ports_current_json()
@@ -565,10 +571,7 @@ async fn realtime_graph_view_patch_broadcasts_applied_to_attached_clients() {
     assert_eq!(ack["payload"]["graphRevision"], "1");
     assert_eq!(ack["payload"]["viewRevision"], 2);
     assert!(ack["payload"].get("history").is_none());
-    assert_eq!(
-        ack["payload"]["historySummary"]["latestEntryId"].is_string(),
-        true
-    );
+    assert!(ack["payload"]["historySummary"]["latestEntryId"].is_string());
     assert_eq!(ack["payload"]["historySummary"]["undoDepth"], 1);
     assert_eq!(ack["payload"]["historySummary"]["redoDepth"], 0);
     assert_eq!(broadcast["payload"]["kind"], "view.patch");
@@ -603,15 +606,12 @@ async fn realtime_graph_change_set_broadcasts_compact_applied_event() {
     assert_eq!(ack["payload"]["graphRevision"], "2");
     assert_eq!(ack["payload"]["viewRevision"], 2);
     assert!(ack["payload"].get("history").is_none());
-    assert_eq!(
-        ack["payload"]["historySummary"]["latestEntryId"].is_string(),
-        true
-    );
+    assert!(ack["payload"]["historySummary"]["latestEntryId"].is_string());
     assert_eq!(ack["payload"]["historySummary"]["canUndo"], true);
     assert_eq!(ack["payload"]["historySummary"]["canRedo"], false);
     assert_eq!(broadcast["payload"]["kind"], "collaboration.changeSet");
     assert_eq!(broadcast["payload"]["graphRevision"], "2");
-    assert_eq!(broadcast["payload"]["historyEntryId"].is_string(), true);
+    assert!(broadcast["payload"]["historyEntryId"].is_string());
 }
 
 #[tokio::test]
@@ -694,10 +694,7 @@ async fn realtime_graph_duplicate_idempotency_key_replays_without_second_apply_o
         duplicate_ack["payload"]["historySummary"],
         first_ack["payload"]["historySummary"]
     );
-    assert_eq!(
-        duplicate_ack["payload"]["historySummary"]["latestEntryId"].is_string(),
-        true
-    );
+    assert!(duplicate_ack["payload"]["historySummary"]["latestEntryId"].is_string());
     assert_eq!(duplicate_local_result, client_a_echo);
     assert!(no_second_broadcast.is_err());
 }
@@ -986,14 +983,14 @@ fn sample_project_document_current() -> Value {
         "nodes": [
           {
             "id": "value_1",
-            "kind": "core.float",
+            "kind": "object.core.float",
             "kindVersion": "0.1.0",
             "params": {},
             "ports": value_f32_ports_current_json()
           },
           {
             "id": "target_1",
-            "kind": "core.float",
+            "kind": "object.core.float",
             "kindVersion": "0.1.0",
             "params": {},
             "ports": value_f32_ports_current_json()
@@ -1004,7 +1001,7 @@ fn sample_project_document_current() -> Value {
             "id": "edge_value_target",
             "source": { "nodeId": "value_1", "portId": "value" },
             "target": { "nodeId": "target_1", "portId": "cold" },
-            "resolvedType": "control.number.float"
+            "resolvedType": "value.core.float32"
           }
         ]
       },
@@ -1023,7 +1020,7 @@ fn sample_project_document_current() -> Value {
         {
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.float",
+          "id": "object.core.float",
           "version": "0.1.0",
           "displayName": "Float",
           "category": "Typed Controls",
@@ -1031,7 +1028,7 @@ fn sample_project_document_current() -> Value {
           "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
-          "capabilities": ["control.number.float.v0.1"]
+          "capabilities": ["value.core.float32.v0.1"]
         }
       ]
     })
@@ -1043,18 +1040,18 @@ fn value_f32_ports_current_json() -> Value {
         "id": "in",
         "direction": "input",
         "label": "In",
-        "type": "control.message.any",
+        "type": "value.core.message",
         "rate": "control",
         "required": false,
         "triggerMode": "trigger",
         "accepts": [
-          "control.number.float",
-          "control.number.int",
-          "control.number.uint",
-          "control.bool",
-          "event.bang"
+          "value.core.float32",
+          "value.core.int32",
+          "value.core.uint32",
+          "value.core.bool",
+          "value.core.bang"
         ],
-        "messageSelectors": {
+        "messageKeys": {
           "accepted": ["bang", "set", "float", "int", "uint", "bool"],
           "silent": ["set"],
           "trigger": ["bang", "float", "int", "uint", "bool"],
@@ -1066,7 +1063,7 @@ fn value_f32_ports_current_json() -> Value {
         "id": "cold",
         "direction": "input",
         "label": "Cold",
-        "type": "control.number.float",
+        "type": "value.core.float32",
         "rate": "control",
         "required": false,
         "triggerMode": "passive"
@@ -1075,7 +1072,7 @@ fn value_f32_ports_current_json() -> Value {
         "id": "value",
         "direction": "output",
         "label": "Value",
-        "type": "control.number.float",
+        "type": "value.core.float32",
         "rate": "control"
       }
     ])

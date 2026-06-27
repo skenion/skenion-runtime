@@ -678,7 +678,7 @@ mod tests {
         manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
         let mut control_state = ControlState::default();
         control_state.channels.insert(
-            "control.number.float:speed".to_owned(),
+            "value.core.float32:speed".to_owned(),
             crate::ControlMessage::from_value(crate::ControlValue::float(0.8)),
         );
         let snapshot = PreviewControlStateSnapshot::new(1, 3, &control_state);
@@ -1234,7 +1234,7 @@ mod tests {
             revision: graph_revision.to_owned(),
             nodes: vec![GraphNode {
                 id: "value_1".to_owned(),
-                kind: "core.float".to_owned(),
+                kind: "object.core.float".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 params: serde_json::Map::new(),
                 ports: Vec::new(),
@@ -1249,7 +1249,7 @@ mod tests {
             graph_revision: graph_revision.to_owned(),
             nodes: vec![PlanNode {
                 node_id: "value_1".to_owned(),
-                kind: "core.float".to_owned(),
+                kind: "object.core.float".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 execution_model: ExecutionModel::Control,
                 order: 0,
@@ -1279,7 +1279,7 @@ mod tests {
             revision: graph_revision.to_owned(),
             nodes: vec![GraphNode {
                 id: "shader_1".to_owned(),
-                kind: "render.fullscreen-shader".to_owned(),
+                kind: "object.core.render.fullscreen-shader".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 params,
                 ports: shader_ports(shader_source()),
@@ -1294,7 +1294,7 @@ mod tests {
             graph_revision: graph_revision.to_owned(),
             nodes: vec![PlanNode {
                 node_id: "shader_1".to_owned(),
-                kind: "render.fullscreen-shader".to_owned(),
+                kind: "object.core.render.fullscreen-shader".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 execution_model: ExecutionModel::GpuPass,
                 order: 0,
@@ -1308,7 +1308,7 @@ mod tests {
     }
 
     fn shader_source() -> &'static str {
-        r#"// @skenion.uniform speed number.float default=0.5
+        r#"// @skenion.uniform speed value.core.float32 default=0.5
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
   return vec4<f32>(skenion.speed, 0.2, 1.0 - skenion.speed, 1.0);
@@ -1328,6 +1328,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             control_revision: 0,
             package_registry_revision: None,
             project: Some(project_document(&graph)),
+            binding_formats: Vec::new(),
             diagnostics: Vec::new(),
             plan: Some(plan(graph_revision)),
         }
@@ -1384,6 +1385,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             view_revision: 0,
             control_revision: 0,
             package_registry_revision: None,
+            binding_formats: Vec::new(),
             diagnostics: Vec::new(),
             plan: None,
         }

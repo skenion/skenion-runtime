@@ -268,12 +268,12 @@ mod tests {
             json!({
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.float",
+              "id": "object.core.float",
               "version": "0.1.0",
               "displayName": "Float",
               "category": "Core",
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ],
               "execution": { "model": "control" },
               "state": { "persistent": false },
@@ -283,13 +283,13 @@ mod tests {
             json!({
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.pass-float",
+              "id": "object.core.pass-float",
               "version": "0.1.0",
               "displayName": "Pass Float",
               "category": "Core",
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ],
               "execution": { "model": "control" },
               "state": { "persistent": false },
@@ -311,11 +311,11 @@ mod tests {
     fn graph_node(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "core.float",
+          "kind": "object.core.float",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -330,21 +330,21 @@ mod tests {
           "nodes": [
             {
               "id": "value",
-              "kind": "core.float",
+              "kind": "object.core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             },
             {
               "id": "pass",
-              "kind": "core.pass-float",
+              "kind": "object.core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             }
           ],
@@ -387,22 +387,22 @@ mod tests {
           "nodes": [
             {
               "id": "a",
-              "kind": "core.pass-float",
+              "kind": "object.core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             },
             {
               "id": "b",
-              "kind": "core.pass-float",
+              "kind": "object.core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             }
           ],
@@ -471,7 +471,7 @@ mod tests {
             .enumerate()
             .map(|(order, execution_model)| PlanNode {
                 node_id: format!("node-{order}"),
-                kind: "core.node".to_owned(),
+                kind: "object.core.node".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 execution_model: execution_model.clone(),
                 order,

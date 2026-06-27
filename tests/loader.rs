@@ -52,7 +52,7 @@ fn valid_definition_current() -> Value {
     json!({
       "schema": "skenion.node.definition",
       "schemaVersion": "0.1.0",
-      "id": "core.loader",
+      "id": "object.core.loader",
       "version": "0.1.0",
       "displayName": "Loader",
       "category": "Core",
@@ -60,7 +60,7 @@ fn valid_definition_current() -> Value {
         {
           "id": "out",
           "direction": "output",
-          "type": "control.number.float",
+          "type": "value.core.float32",
           "rate": "control"
         }
       ],
@@ -81,14 +81,14 @@ fn valid_project_request_current() -> Value {
         "nodes": [
           {
             "id": "node",
-            "kind": "core.loader",
+            "kind": "object.core.loader",
             "kindVersion": "0.1.0",
             "params": {},
             "ports": [
               {
                 "id": "out",
                 "direction": "output",
-                "type": "control.number.float",
+                "type": "value.core.float32",
                 "rate": "control"
               }
             ]
@@ -112,7 +112,7 @@ fn loads_current_current_node_definition_and_project_request() {
     let request: ProjectRequestCurrent = read_json_file(&project_path);
 
     assert_eq!(definition.schema_version, "0.1.0");
-    assert_eq!(definition.id, "core.loader");
+    assert_eq!(definition.id, "object.core.loader");
     assert_eq!(request.graph.schema_version, "0.1.0");
     assert_eq!(request.graph.id, "loader-graph-current");
     validate_project_request_current(&request)
@@ -160,7 +160,7 @@ fn current_project_request_plans_value_number_graph() {
         .expect("source should expose value output");
 
     assert_eq!(project.graph.schema_version, "0.1.0");
-    assert_eq!(source_port.port_type, "control.number.float");
+    assert_eq!(source_port.port_type, "value.core.float32");
 
     validate_project_request_current(&project)
         .expect("canonical current 0.1 project should validate");

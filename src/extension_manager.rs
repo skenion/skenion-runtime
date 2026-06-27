@@ -1052,6 +1052,38 @@ mod tests {
     }
 
     #[test]
+    fn invalid_manifest_shape_preserves_header_in_failed_descriptor() {
+        let package_dir = temp_dir("header-invalid-manifest");
+        write_manifest(
+            &package_dir,
+            r#"{
+              "id": "example/header-invalid",
+              "version": "1.2.3",
+              "runtimeAbiVersion": "9.9.9",
+              "kind": "codec"
+            }"#,
+        );
+        let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir]);
+
+        let response = manager.list_extensions();
+
+        assert!(!response.ok);
+        assert_eq!(response.extensions.len(), 1);
+        let descriptor = &response.extensions[0];
+        assert_eq!(descriptor.id, "example/header-invalid");
+        assert_eq!(descriptor.version, "1.2.3");
+        assert_eq!(descriptor.runtime_abi_version, "9.9.9");
+        assert_eq!(descriptor.kind, ExtensionKind::Codec);
+        assert_eq!(descriptor.status, RuntimeExtensionStatus::Failed);
+        let diagnostic =
+            diagnostic_by_code(&descriptor.diagnostics, "extension.manifest.parse-failed");
+        let details = diagnostic.details.as_ref().unwrap();
+        assert_eq!(details["packageId"], "example/header-invalid");
+        assert_eq!(details["manifestId"], "example/header-invalid");
+        assert_eq!(details["packageVersion"], "1.2.3");
+    }
+
+    #[test]
     fn manifest_read_error_reports_failed_extension_with_fallback_path() {
         let package_dir = temp_dir("unreadable-manifest");
         let manifest_path = package_dir.join(RUNTIME_EXTENSION_MANIFEST_FILE);
@@ -1504,7 +1536,7 @@ mod tests {
                   {
                     "schema": "skenion.node.definition",
                     "schemaVersion": "0.1.0",
-                    "id": "core.float",
+                    "id": "object.core.float",
                     "version": "0.1.0",
                     "displayName": "Float",
                     "category": "Typed Controls",
@@ -1512,18 +1544,18 @@ mod tests {
                       {
                         "id": "in",
                         "direction": "input",
-                        "type": "control.message.any",
+                        "type": "value.core.message",
                         "rate": "control",
                         "required": false,
                         "triggerMode": "trigger",
                         "accepts": [
-                          "control.number.float",
-                          "control.number.int",
-                          "control.number.uint",
-                          "control.bool",
-                          "event.bang"
+                          "value.core.float32",
+                          "value.core.int32",
+                          "value.core.uint32",
+                          "value.core.bool",
+                          "value.core.bang"
                         ],
-                        "messageSelectors": {
+                        "messageKeys": {
                           "accepted": ["bang", "set", "float", "int", "uint", "bool"],
                           "silent": ["set"],
                           "trigger": ["bang", "float", "int", "uint", "bool"],
@@ -1534,7 +1566,7 @@ mod tests {
                       {
                         "id": "cold",
                         "direction": "input",
-                        "type": "control.number.float",
+                        "type": "value.core.float32",
                         "rate": "control",
                         "required": false,
                         "triggerMode": "passive"
@@ -1542,18 +1574,18 @@ mod tests {
                       {
                         "id": "value",
                         "direction": "output",
-                        "type": "control.number.float",
+                        "type": "value.core.float32",
                         "rate": "control"
                       }
                     ],
                     "execution": { "model": "control" },
                     "state": { "persistent": false },
                     "permissions": [],
-                    "capabilities": ["control.number.float.v0.1"]
+                    "capabilities": ["value.core.float32.v0.1"]
                   }
                 ],
                 "help": [
-                  { "nodeId": "core.float", "markdownPath": "help/float.md" }
+                  { "nodeId": "object.core.float", "markdownPath": "help/float.md" }
                 ]
               },
               "permissions": [],
@@ -1561,7 +1593,7 @@ mod tests {
                 {
                   "id": "float-baseline",
                   "kind": "node",
-                  "target": "core.float",
+                  "target": "object.core.float",
                   "fixturePath": "tests/float.input.json",
                   "expectedPath": "tests/float.expected.json"
                 }
@@ -1578,8 +1610,14 @@ mod tests {
             response.extensions[0].status,
             RuntimeExtensionStatus::Loaded
         );
-        assert_eq!(response.extensions[0].provided_nodes, vec!["core.float"]);
-        assert_eq!(response.extensions[0].provided_help, vec!["core.float"]);
+        assert_eq!(
+            response.extensions[0].provided_nodes,
+            vec!["object.core.float"]
+        );
+        assert_eq!(
+            response.extensions[0].provided_help,
+            vec!["object.core.float"]
+        );
         assert_eq!(response.extensions[0].test_ids, vec!["float-baseline"]);
     }
 
@@ -1743,5 +1781,42 @@ mod tests {
             Some("extension.manifest.missing")
         );
         assert!(scan.log_diagnostics()[0].details.is_some());
+    }
+
+    #[test]
+    fn package_file_diagnostic_details_include_relative_and_resolved_paths() {
+        let package_dir = temp_dir("file-diagnostic-details");
+        let manifest_path = package_dir.join(RUNTIME_EXTENSION_MANIFEST_FILE);
+        let manifest: ExtensionManifest = serde_json::from_value(json!({
+            "schema": "skenion.extension.manifest",
+            "schemaVersion": "0.1.0",
+            "id": "example/file-details",
+            "version": "0.1.0",
+            "runtimeAbiVersion": "0.1.0",
+            "kind": "node-pack",
+            "provides": {},
+            "permissions": []
+        }))
+        .unwrap();
+        let resolved_path = package_dir.join("help/example.skenion.json");
+
+        let details = package_file_diagnostic_details(
+            &package_dir,
+            &manifest_path,
+            &manifest,
+            "help/example.skenion.json",
+            Some(&resolved_path),
+            HELP_GRAPH_FILE,
+            json!("ignored-non-object"),
+        );
+
+        assert_eq!(details["surface"], "extension-help-file");
+        assert_eq!(details["fileKind"], "help-graph");
+        assert_eq!(details["relativePath"], "help/example.skenion.json");
+        assert_eq!(details["filePath"], "help/example.skenion.json");
+        assert_eq!(details["resolvedPath"], resolved_path.display().to_string());
+        assert_eq!(details["packageId"], "example/file-details");
+        assert_eq!(details["packageVersion"], "0.1.0");
+        assert_eq!(details["manifestPath"], manifest_path.display().to_string());
     }
 }

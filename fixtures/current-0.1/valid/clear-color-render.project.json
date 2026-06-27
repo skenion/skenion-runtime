@@ -7,7 +7,7 @@
     "nodes": [
       {
         "id": "clear_color",
-        "kind": "render.clear-color",
+        "kind": "object.core.render.clear-color",
         "kindVersion": "0.1.0",
         "params": {
           "color": [0.12, 0.2, 0.34, 1]
@@ -16,21 +16,21 @@
           {
             "id": "out",
             "direction": "output",
-            "type": "render.frame",
+            "type": "value.core.tensor",
             "rate": "render"
           }
         ]
       },
       {
         "id": "output",
-        "kind": "render.output",
+        "kind": "object.core.render.output",
         "kindVersion": "0.1.0",
         "params": {},
         "ports": [
           {
             "id": "in",
             "direction": "input",
-            "type": "render.frame",
+            "type": "value.core.tensor",
             "rate": "render",
             "required": true
           }
@@ -48,7 +48,7 @@
           "nodeId": "output",
           "portId": "in"
         },
-        "resolvedType": "render.frame"
+        "resolvedType": "value.core.tensor"
       }
     ]
   },
@@ -56,7 +56,7 @@
     {
       "schema": "skenion.node.definition",
       "schemaVersion": "0.1.0",
-      "id": "render.clear-color",
+      "id": "object.core.render.clear-color",
       "version": "0.1.0",
       "displayName": "Clear Color",
       "category": "Render",
@@ -64,7 +64,7 @@
         {
           "id": "out",
           "direction": "output",
-          "type": "render.frame",
+          "type": "value.core.tensor",
           "rate": "render"
         }
       ],
@@ -76,12 +76,12 @@
         "persistent": false
       },
       "permissions": [],
-      "capabilities": ["render.frame.v0.1"]
+      "capabilities": ["value.core.tensor.v0.1"]
     },
     {
       "schema": "skenion.node.definition",
       "schemaVersion": "0.1.0",
-      "id": "render.output",
+      "id": "object.core.render.output",
       "version": "0.1.0",
       "displayName": "Render Output",
       "category": "Render",
@@ -89,7 +89,7 @@
         {
           "id": "in",
           "direction": "input",
-          "type": "render.frame",
+          "type": "value.core.tensor",
           "rate": "render",
           "required": true
         }
@@ -102,7 +102,7 @@
         "persistent": false
       },
       "permissions": [],
-      "capabilities": ["render.output.v0.1"]
+      "capabilities": ["object.core.render.output.v0.1"]
     }
   ]
 }

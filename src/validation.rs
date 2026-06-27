@@ -113,14 +113,12 @@ fn is_payload_identity_node_kind(kind: &str) -> bool {
             | "payload"
             | "bool"
             | "string"
-            | "core.bool"
-            | "core.string"
-            | "control.message.any"
-            | "event.bang"
-            | "asset.video"
-            | "asset.image"
-            | "asset.audio"
-            | "gpu.texture2d"
+            | "object.core.bool"
+            | "object.core.string"
+            | "value.core.message"
+            | "value.core.bang"
+            | "value.core.string"
+            | "value.core.tensor"
     ) || kind.starts_with("value.")
         || kind.starts_with("data.")
         || kind.starts_with("payload.")
@@ -278,12 +276,12 @@ mod tests {
         let definition: NodeDefinition = serde_json::from_value(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.wrapper",
+          "id": "object.core.wrapper",
           "version": "0.1.0",
           "displayName": "Wrapper",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "bool" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.bool" } }
           ],
           "execution": { "model": "control" },
           "state": { "persistent": false },
@@ -299,11 +297,11 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "core.wrapper",
+              "kind": "object.core.wrapper",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "bool" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.bool" } }
               ]
             }
           ],
@@ -312,7 +310,7 @@ mod tests {
         .unwrap();
         let boolean_value = DataType {
             flow: crate::DataFlow::Control,
-            data_kind: "bool".to_owned(),
+            data_kind: "value.core.bool".to_owned(),
             unit: None,
             range: None,
             shape: None,
@@ -328,21 +326,21 @@ mod tests {
         assert!(validate_node_definition(&definition).is_ok());
         assert!(validate_graph_document(&graph).is_ok());
         assert!(compatible_data_types(&boolean_value, &boolean_value));
-        assert_eq!(type_label(&boolean_value), "control<bool>");
+        assert_eq!(type_label(&boolean_value), "control<value.core.bool>");
     }
 
     #[test]
     fn rejects_payload_identity_node_kinds_and_definition_ids() {
         for payload_identity in [
-            "core.bool",
-            "core.string",
+            "object.core.bool",
+            "object.core.string",
             "bool",
             "string",
             "value.number",
-            "control.message.any",
-            "event.bang",
-            "asset.video",
-            "gpu.texture2d",
+            "value.core.message",
+            "value.core.bang",
+            "value.core.string",
+            "value.core.tensor",
         ] {
             let definition: NodeDefinition = serde_json::from_value(json!({
                 "schema": "skenion.node.definition",
@@ -383,7 +381,7 @@ mod tests {
         let invalid: NodeDefinition = serde_json::from_value(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "9.9.9",
-          "id": "core.invalid",
+          "id": "object.core.invalid",
           "version": "0.1.0",
           "displayName": "Invalid",
           "category": "Core",
@@ -411,11 +409,11 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "core.wrapper",
+              "kind": "object.core.wrapper",
               "kindVersion": "0.1.0",
               "params": { "value": 0.5 },
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "bool" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.bool" } }
               ]
             }
           ],
@@ -449,11 +447,11 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "core.wrapper",
+              "kind": "object.core.wrapper",
               "kindVersion": "0.1.0",
               "params": { "value": 0.5 },
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "bool" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.bool" } }
               ]
             }
           ],
@@ -746,7 +744,7 @@ mod tests {
     fn patch_node(id: &str) -> GraphNode {
         GraphNode {
             id: id.to_owned(),
-            kind: "core.wrapper".to_owned(),
+            kind: "object.core.wrapper".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params: serde_json::Map::new(),
             ports: Vec::new(),

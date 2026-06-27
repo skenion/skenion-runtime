@@ -14,11 +14,11 @@ use crate::{
     schema_version_diagnostic, validate_project,
 };
 
-const AUDIO_SIGNAL_KIND: &str = "signal.audio";
-const AUDIO_INPUT_KIND: &str = "audio.input";
-const AUDIO_OUTPUT_KIND: &str = "audio.output";
-const AUDIO_CLOCK_BRIDGE_KIND: &str = "audio.clock-bridge";
-const AUDIO_RESAMPLE_KIND: &str = "audio.resample";
+const AUDIO_SIGNAL_KIND: &str = "value.core.float32";
+const AUDIO_INPUT_KIND: &str = "object.core.audio.input";
+const AUDIO_OUTPUT_KIND: &str = "object.core.audio.output";
+const AUDIO_CLOCK_BRIDGE_KIND: &str = "object.core.audio.clock-bridge";
+const AUDIO_RESAMPLE_KIND: &str = "object.core.audio.resample";
 const DEFAULT_BLOCK_SIZE: u32 = 64;
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_SAMPLE_FORMAT: &str = "f32";
@@ -209,7 +209,7 @@ pub enum AudioDspPlanError {
         diagnostic: Box<RuntimeDiagnostic>,
     },
     #[error(
-        "audio signal route from {source_node_id} domain {source_clock_domain_id} to {target_node_id} domain {target_clock_domain_id} requires audio.clock-bridge or audio.resample"
+        "audio signal route from {source_node_id} domain {source_clock_domain_id} to {target_node_id} domain {target_clock_domain_id} requires object.core.audio.clock-bridge or object.core.audio.resample"
     )]
     ClockDomainCrossingRequiresBridge {
         source_node_id: String,
@@ -309,7 +309,9 @@ pub enum AudioRealtimeDspError {
     Plan(#[from] AudioDspPlanError),
     #[error("audio realtime dsp output channel count must be greater than zero")]
     InvalidChannelCount { diagnostic: Box<RuntimeDiagnostic> },
-    #[error("audio realtime dsp graph must contain exactly one audio.output node, found {count}")]
+    #[error(
+        "audio realtime dsp graph must contain exactly one object.core.audio.output node, found {count}"
+    )]
     OutputCount {
         count: usize,
         diagnostic: Box<RuntimeDiagnostic>,
@@ -406,7 +408,7 @@ impl AudioRealtimeDspExecutor {
                 diagnostic: Box::new(RuntimeDiagnostic::structured_error(
                     "audio-dsp.realtime-output-count",
                     format!(
-                        "audio realtime dsp graph must contain exactly one audio.output node, found {}",
+                        "audio realtime dsp graph must contain exactly one object.core.audio.output node, found {}",
                         output_nodes.len()
                     ),
                     json!({ "count": output_nodes.len() }),
@@ -845,8 +847,8 @@ fn run_offline_audio_dsp_with_plan(
 
         for node in &plan.nodes {
             match node.kind.as_str() {
-                "audio.sig" => render_sig(node, &mut buffers, block_len),
-                "audio.osc" => render_osc(
+                "object.core.audio.sig" => render_sig(node, &mut buffers, block_len),
+                "object.core.audio.osc" => render_osc(
                     node,
                     &nodes_by_id,
                     &mut oscillator_phase_by_node,
@@ -854,8 +856,8 @@ fn run_offline_audio_dsp_with_plan(
                     block_len,
                     plan.sample_rate,
                 ),
-                "audio.operator.mul" => render_mul(node, &mut buffers, block_len),
-                "audio.snapshot" => {
+                "object.core.audio.operator.mul" => render_mul(node, &mut buffers, block_len),
+                "object.core.audio.snapshot" => {
                     snapshots.push(snapshot_signal(node, &buffers, block_index));
                 }
                 _ => {
@@ -1029,7 +1031,10 @@ fn param_f32(params: &Map<String, Value>, key: &str, default: f32) -> f32 {
 fn matches_realtime_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "audio.sig" | "audio.osc" | "audio.operator.mul" | AUDIO_OUTPUT_KIND
+        "object.core.audio.sig"
+            | "object.core.audio.osc"
+            | "object.core.audio.operator.mul"
+            | AUDIO_OUTPUT_KIND
     )
 }
 
@@ -1209,7 +1214,7 @@ fn audio_clock_bridge_plans(
                     diagnostic: Box::new(RuntimeDiagnostic::structured_error(
                         "audio-dsp.clock-domain-crossing-requires-bridge",
                         format!(
-                            "audio signal route from {} domain {} to {} domain {} requires audio.clock-bridge or audio.resample",
+                            "audio signal route from {} domain {} to {} domain {} requires object.core.audio.clock-bridge or object.core.audio.resample",
                             source.node_id,
                             source.clock_domain_id,
                             output.node_id,
@@ -1312,14 +1317,14 @@ fn realtime_node_kind(
     node_params_by_id: &BTreeMap<String, Map<String, Value>>,
 ) -> AudioRealtimeNodeKind {
     match node.kind.as_str() {
-        "audio.sig" => AudioRealtimeNodeKind::Sig {
+        "object.core.audio.sig" => AudioRealtimeNodeKind::Sig {
             value: param_f32(&node.params, "value", 0.0),
         },
-        "audio.osc" => AudioRealtimeNodeKind::Osc {
+        "object.core.audio.osc" => AudioRealtimeNodeKind::Osc {
             frequency: control_input_f32_from_params(node, "frequency", node_params_by_id)
                 .unwrap_or_else(|| param_f32(&node.params, "frequency", 440.0)),
         },
-        "audio.operator.mul" => AudioRealtimeNodeKind::Mul,
+        "object.core.audio.operator.mul" => AudioRealtimeNodeKind::Mul,
         _ => AudioRealtimeNodeKind::Output,
     }
 }
@@ -1474,15 +1479,15 @@ mod tests {
     fn registry() -> NodeRegistry {
         let mut registry = NodeRegistry::new();
         for definition in [
-            audio_source_definition("audio.osc", "frequency"),
+            audio_source_definition("object.core.audio.osc", "frequency"),
             audio_sig_definition(),
-            audio_binary_definition("audio.operator.mul"),
-            audio_unary_definition("audio.operator.sqrt", "in"),
+            audio_binary_definition("object.core.audio.operator.mul"),
+            audio_unary_definition("object.core.audio.operator.sqrt", "in"),
             audio_snapshot_definition(),
             audio_input_definition(),
             audio_output_definition(),
-            audio_clock_boundary_definition("audio.clock-bridge"),
-            audio_clock_boundary_definition("audio.resample"),
+            audio_clock_boundary_definition("object.core.audio.clock-bridge"),
+            audio_clock_boundary_definition("object.core.audio.resample"),
             float_definition(),
             bad_signal_definition(),
         ] {
@@ -1505,7 +1510,7 @@ mod tests {
           "nodes": [
             float_node("freq", 220.0),
             audio_osc_node("osc"),
-            audio_binary_node("mul", "audio.operator.mul"),
+            audio_binary_node("mul", "object.core.audio.operator.mul"),
             audio_snapshot_node("snap")
           ],
           "edges": [
@@ -1574,7 +1579,7 @@ mod tests {
             plan.nodes[0].control_inputs,
             vec![AudioDspControlInput {
                 port_id: "frequency".to_owned(),
-                data_kind: "number.float".to_owned(),
+                data_kind: "value.core.float32".to_owned(),
                 source_node_id: Some("freq".to_owned()),
                 source_port_id: Some("value".to_owned()),
             }]
@@ -1783,7 +1788,7 @@ mod tests {
           "revision": "1",
           "nodes": [
             audio_input_node_with_domain("input", "device:input-clock"),
-            audio_clock_boundary_node("bridge", "audio.clock-bridge"),
+            audio_clock_boundary_node("bridge", "object.core.audio.clock-bridge"),
             audio_output_node_with_domain("output", "device:output-clock")
           ],
           "edges": [
@@ -1824,7 +1829,7 @@ mod tests {
           "revision": "1",
           "nodes": [
             audio_input_node("input"),
-            audio_clock_boundary_node("bridge", "audio.clock-bridge"),
+            audio_clock_boundary_node("bridge", "object.core.audio.clock-bridge"),
             audio_output_node("output")
           ],
           "edges": [
@@ -1865,7 +1870,7 @@ mod tests {
           "revision": "1",
           "nodes": [
             audio_input_node_with_domain("input", "device:input-clock"),
-            audio_clock_boundary_node("resample", "audio.resample"),
+            audio_clock_boundary_node("resample", "object.core.audio.resample"),
             audio_output_node_with_domain("output", "device:output-clock")
           ],
           "edges": [
@@ -1897,8 +1902,8 @@ mod tests {
           "revision": "1",
           "nodes": [
             audio_input_node("input"),
-            audio_clock_boundary_node("bridge_a", "audio.clock-bridge"),
-            audio_clock_boundary_node("bridge_b", "audio.clock-bridge"),
+            audio_clock_boundary_node("bridge_a", "object.core.audio.clock-bridge"),
+            audio_clock_boundary_node("bridge_b", "object.core.audio.clock-bridge"),
             audio_output_node("output"),
             float_node("not_signal", 1.0)
           ],
@@ -1922,7 +1927,7 @@ mod tests {
         assert_eq!(route.explicit_bridge_node_id.as_deref(), Some("bridge_b"));
         assert_eq!(
             route.explicit_bridge_kind.as_deref(),
-            Some("audio.clock-bridge")
+            Some("object.core.audio.clock-bridge")
         );
         assert_eq!(missing, None);
     }
@@ -2003,7 +2008,7 @@ mod tests {
           "schemaVersion": "0.1.0",
           "id": "missing-edge-ports",
           "revision": "1",
-          "nodes": [audio_osc_node("osc"), audio_binary_node("mul", "audio.operator.mul")],
+          "nodes": [audio_osc_node("osc"), audio_binary_node("mul", "object.core.audio.operator.mul")],
           "edges": []
         }));
         let missing_from = serde_json::from_value::<Edge>(json!({
@@ -2031,7 +2036,7 @@ mod tests {
           "nodes": [
             audio_sig_node("left", 2.0),
             audio_sig_node("right", 0.5),
-            audio_binary_node("mul", "audio.operator.mul"),
+            audio_binary_node("mul", "object.core.audio.operator.mul"),
             audio_snapshot_node("snap")
           ],
           "edges": [
@@ -2126,7 +2131,7 @@ mod tests {
           "nodes": [
             audio_osc_node("osc"),
             audio_sig_node("left", 3.0),
-            audio_binary_node("mul", "audio.operator.mul")
+            audio_binary_node("mul", "object.core.audio.operator.mul")
           ],
           "edges": [
             { "from": { "node": "left", "port": "out" }, "to": { "node": "mul", "port": "left" } }
@@ -2165,7 +2170,7 @@ mod tests {
           "revision": "1",
           "nodes": [
             audio_sig_node("input", -4.0),
-            audio_unary_node("sqrt", "audio.operator.sqrt")
+            audio_unary_node("sqrt", "object.core.audio.operator.sqrt")
           ],
           "edges": [
             { "from": { "node": "input", "port": "out" }, "to": { "node": "sqrt", "port": "in" } }
@@ -2196,7 +2201,7 @@ mod tests {
         assert!(
             unsupported_error
                 .to_string()
-                .contains("audio.operator.sqrt")
+                .contains("object.core.audio.operator.sqrt")
         );
     }
 
@@ -2252,7 +2257,7 @@ mod tests {
           "nodes": [
             audio_sig_node("left", 2.0),
             audio_sig_node("right", 0.5),
-            audio_binary_node("mul", "audio.operator.mul"),
+            audio_binary_node("mul", "object.core.audio.operator.mul"),
             audio_output_node("out")
           ],
           "edges": [
@@ -2348,7 +2353,7 @@ mod tests {
           "id": "unsupported-realtime",
           "revision": "1",
           "nodes": [
-            audio_unary_node("sqrt", "audio.operator.sqrt"),
+            audio_unary_node("sqrt", "object.core.audio.operator.sqrt"),
             audio_output_node("out")
           ],
           "edges": [
@@ -2405,7 +2410,7 @@ mod tests {
     fn realtime_control_input_helper_handles_absent_sources() {
         let node = AudioDspPlanNode {
             node_id: "osc".to_owned(),
-            kind: "audio.osc".to_owned(),
+            kind: "object.core.audio.osc".to_owned(),
             kind_version: "0.1.0".to_owned(),
             order: 0,
             params: Map::new(),
@@ -2413,13 +2418,13 @@ mod tests {
             control_inputs: vec![
                 AudioDspControlInput {
                     port_id: "other".to_owned(),
-                    data_kind: "number.float".to_owned(),
+                    data_kind: "value.core.float32".to_owned(),
                     source_node_id: None,
                     source_port_id: None,
                 },
                 AudioDspControlInput {
                     port_id: "frequency".to_owned(),
-                    data_kind: "number.float".to_owned(),
+                    data_kind: "value.core.float32".to_owned(),
                     source_node_id: None,
                     source_port_id: None,
                 },
@@ -2472,13 +2477,13 @@ mod tests {
                   "id": "edge_left_out",
                   "source": { "nodeId": "left", "portId": "out" },
                   "target": { "nodeId": "out", "portId": "left" },
-                  "resolvedType": "signal.audio"
+                  "resolvedType": "value.core.float32"
                 },
                 {
                   "id": "edge_right_out",
                   "source": { "nodeId": "right", "portId": "out" },
                   "target": { "nodeId": "out", "portId": "right" },
-                  "resolvedType": "signal.audio"
+                  "resolvedType": "value.core.float32"
                 }
               ]
             }),
@@ -2535,7 +2540,7 @@ mod tests {
                   "id": "edge_sig_snap",
                   "source": { "nodeId": "sig", "portId": "out" },
                   "target": { "nodeId": "snap", "portId": "signal" },
-                  "resolvedType": "signal.audio"
+                  "resolvedType": "value.core.float32"
                 }
               ]
             }),
@@ -2576,8 +2581,8 @@ mod tests {
           "displayName": id,
           "category": "Audio",
           "ports": [
-            { "id": input_port, "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": input_port, "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2590,13 +2595,13 @@ mod tests {
         node_definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "audio.sig",
+          "id": "object.core.audio.sig",
           "version": "0.1.0",
           "displayName": "sig~",
           "category": "Audio",
           "ports": [
-            { "id": "value", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "value", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2614,9 +2619,9 @@ mod tests {
           "displayName": id,
           "category": "Audio",
           "ports": [
-            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2634,8 +2639,8 @@ mod tests {
           "displayName": id,
           "category": "Audio",
           "ports": [
-            { "id": input_port, "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": input_port, "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2648,14 +2653,14 @@ mod tests {
         node_definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "audio.snapshot",
+          "id": "object.core.audio.snapshot",
           "version": "0.1.0",
           "displayName": "snapshot~",
           "category": "Audio",
           "ports": [
-            { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "trigger", "direction": "input", "type": { "flow": "control", "dataKind": "message.any" }, "activation": "trigger" },
-            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+            { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "trigger", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.message" }, "activation": "trigger" },
+            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2668,12 +2673,12 @@ mod tests {
         node_definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "audio.input",
+          "id": "object.core.audio.input",
           "version": "0.1.0",
           "displayName": "adc~",
           "category": "Audio",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2686,13 +2691,13 @@ mod tests {
         node_definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "audio.output",
+          "id": "object.core.audio.output",
           "version": "0.1.0",
           "displayName": "dac~",
           "category": "Audio",
           "ports": [
-            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" }
+            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2710,8 +2715,8 @@ mod tests {
           "displayName": id,
           "category": "Audio",
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2724,12 +2729,12 @@ mod tests {
         node_definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.float",
+          "id": "object.core.float",
           "version": "0.1.0",
           "displayName": "Float",
           "category": "Core",
           "ports": [
-            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "control" },
           "state": { "persistent": false },
@@ -2747,7 +2752,7 @@ mod tests {
           "displayName": "Bad Signal",
           "category": "Test",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "control" },
           "state": { "persistent": false },
@@ -2780,13 +2785,13 @@ mod tests {
         json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "audio.sig",
+          "id": "object.core.audio.sig",
           "version": "0.1.0",
           "displayName": "sig~",
           "category": "Audio",
           "ports": [
-            { "id": "value", "direction": "input", "type": "control.number.float" },
-            { "id": "out", "direction": "output", "type": "signal.audio", "rate": "audio" }
+            { "id": "value", "direction": "input", "type": "value.core.float32" },
+            { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "audio" }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2799,25 +2804,25 @@ mod tests {
         json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "audio.snapshot",
+          "id": "object.core.audio.snapshot",
           "version": "0.1.0",
           "displayName": "snapshot~",
           "category": "Audio",
           "ports": [
-            { "id": "signal", "direction": "input", "type": "signal.audio", "rate": "audio" },
+            { "id": "signal", "direction": "input", "type": "value.core.float32", "rate": "audio" },
             {
               "id": "trigger",
               "direction": "input",
-              "type": "control.message.any",
+              "type": "value.core.message",
               "rate": "event",
               "triggerMode": "trigger",
-              "accepts": ["event.bang"],
-              "messageSelectors": {
+              "accepts": ["value.core.bang"],
+              "messageKeys": {
                 "accepted": ["bang"],
                 "trigger": ["bang"]
               }
             },
-            { "id": "value", "direction": "output", "type": "control.number.float" }
+            { "id": "value", "direction": "output", "type": "value.core.float32" }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2830,13 +2835,13 @@ mod tests {
         json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "audio.output",
+          "id": "object.core.audio.output",
           "version": "0.1.0",
           "displayName": "dac~",
           "category": "Audio",
           "ports": [
-            { "id": "left", "direction": "input", "type": "signal.audio", "rate": "audio" },
-            { "id": "right", "direction": "input", "type": "signal.audio", "rate": "audio" }
+            { "id": "left", "direction": "input", "type": "value.core.float32", "rate": "audio" },
+            { "id": "right", "direction": "input", "type": "value.core.float32", "rate": "audio" }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -2848,12 +2853,12 @@ mod tests {
     fn audio_sig_node_current(id: &str, value: f64) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.sig",
+          "kind": "object.core.audio.sig",
           "kindVersion": "0.1.0",
           "params": { "value": value },
           "ports": [
-            { "id": "value", "direction": "input", "type": "control.number.float" },
-            { "id": "out", "direction": "output", "type": "signal.audio", "rate": "audio" }
+            { "id": "value", "direction": "input", "type": "value.core.float32" },
+            { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "audio" }
           ]
         })
     }
@@ -2861,24 +2866,24 @@ mod tests {
     fn audio_snapshot_node_current(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.snapshot",
+          "kind": "object.core.audio.snapshot",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "signal", "direction": "input", "type": "signal.audio", "rate": "audio" },
+            { "id": "signal", "direction": "input", "type": "value.core.float32", "rate": "audio" },
             {
               "id": "trigger",
               "direction": "input",
-              "type": "control.message.any",
+              "type": "value.core.message",
               "rate": "event",
               "triggerMode": "trigger",
-              "accepts": ["event.bang"],
-              "messageSelectors": {
+              "accepts": ["value.core.bang"],
+              "messageKeys": {
                 "accepted": ["bang"],
                 "trigger": ["bang"]
               }
             },
-            { "id": "value", "direction": "output", "type": "control.number.float" }
+            { "id": "value", "direction": "output", "type": "value.core.float32" }
           ]
         })
     }
@@ -2886,12 +2891,12 @@ mod tests {
     fn audio_output_node_current(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.output",
+          "kind": "object.core.audio.output",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "left", "direction": "input", "type": "signal.audio", "rate": "audio" },
-            { "id": "right", "direction": "input", "type": "signal.audio", "rate": "audio" }
+            { "id": "left", "direction": "input", "type": "value.core.float32", "rate": "audio" },
+            { "id": "right", "direction": "input", "type": "value.core.float32", "rate": "audio" }
           ]
         })
     }
@@ -2899,11 +2904,11 @@ mod tests {
     fn float_node(id: &str, value: f64) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "core.float",
+          "kind": "object.core.float",
           "kindVersion": "0.1.0",
           "params": { "value": value },
           "ports": [
-            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -2911,12 +2916,12 @@ mod tests {
     fn audio_osc_node(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.osc",
+          "kind": "object.core.audio.osc",
           "kindVersion": "0.1.0",
           "params": { "frequency": 440.0 },
           "ports": [
-            { "id": "frequency", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "frequency", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -2924,12 +2929,12 @@ mod tests {
     fn audio_sig_node(id: &str, value: f64) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.sig",
+          "kind": "object.core.audio.sig",
           "kindVersion": "0.1.0",
           "params": { "value": value },
           "ports": [
-            { "id": "value", "direction": "input", "type": { "flow": "control", "dataKind": "number.float" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "value", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -2941,9 +2946,9 @@ mod tests {
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -2955,8 +2960,8 @@ mod tests {
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -2964,13 +2969,13 @@ mod tests {
     fn audio_snapshot_node(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.snapshot",
+          "kind": "object.core.audio.snapshot",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "trigger", "direction": "input", "type": { "flow": "control", "dataKind": "message.any" }, "activation": "trigger" },
-            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+            { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "trigger", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.message" }, "activation": "trigger" },
+            { "id": "value", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -2978,12 +2983,12 @@ mod tests {
     fn audio_output_node(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.output",
+          "kind": "object.core.audio.output",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" }
+            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" }
           ]
         })
     }
@@ -2991,11 +2996,11 @@ mod tests {
     fn audio_input_node(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.input",
+          "kind": "object.core.audio.input",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -3003,11 +3008,11 @@ mod tests {
     fn audio_input_node_with_domain(id: &str, clock_domain: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.input",
+          "kind": "object.core.audio.input",
           "kindVersion": "0.1.0",
           "params": { "clockDomain": clock_domain },
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -3015,12 +3020,12 @@ mod tests {
     fn audio_output_node_with_domain(id: &str, clock_domain: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "audio.output",
+          "kind": "object.core.audio.output",
           "kindVersion": "0.1.0",
           "params": { "clockDomain": clock_domain },
           "ports": [
-            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" }
+            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" }
           ]
         })
     }
@@ -3032,8 +3037,8 @@ mod tests {
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "in", "direction": "input", "type": { "flow": "signal", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -3045,7 +3050,7 @@ mod tests {
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "signal.audio" } }
+            { "id": "out", "direction": "output", "type": { "flow": "signal", "dataKind": "value.core.float32" } }
           ]
         })
     }

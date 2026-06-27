@@ -223,7 +223,7 @@ mod tests {
           "displayName": "Node",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "number.float" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ],
           "execution": { "model": "control" },
           "state": { "persistent": false },
@@ -238,42 +238,42 @@ mod tests {
 
     #[test]
     fn key_new_and_basic_registry_methods_work() {
-        let key = NodeDefinitionKey::new("core.node", "0.1.0");
-        assert_eq!(key.id, "core.node");
+        let key = NodeDefinitionKey::new("object.core.node", "0.1.0");
+        assert_eq!(key.id, "object.core.node");
         assert_eq!(key.version, "0.1.0");
 
         let mut registry = NodeRegistry::new();
         assert!(registry.is_empty());
-        registry.insert(definition("core.node")).unwrap();
+        registry.insert(definition("object.core.node")).unwrap();
 
         assert_eq!(registry.len(), 1);
         assert!(!registry.is_empty());
-        assert!(registry.get("core.node", "0.1.0").is_some());
-        assert!(registry.get("core.node", "9.9.9").is_none());
+        assert!(registry.get("object.core.node", "0.1.0").is_some());
+        assert!(registry.get("object.core.node", "9.9.9").is_none());
         assert_eq!(
             registry
                 .definitions()
                 .map(|definition| definition.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["core.node"]
+            vec!["object.core.node"]
         );
     }
 
     #[test]
     fn insert_rejects_duplicate_and_invalid_definitions() {
         let mut registry = NodeRegistry::new();
-        registry.insert(definition("core.node")).unwrap();
+        registry.insert(definition("object.core.node")).unwrap();
 
-        let duplicate = registry.insert(definition("core.node")).unwrap_err();
+        let duplicate = registry.insert(definition("object.core.node")).unwrap_err();
         assert_eq!(
             duplicate.to_string(),
-            "duplicate node definition: core.node@0.1.0"
+            "duplicate node definition: object.core.node@0.1.0"
         );
 
         let invalid: NodeDefinition = serde_json::from_value(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "9.9.9",
-          "id": "core.invalid",
+          "id": "object.core.invalid",
           "version": "0.1.0",
           "displayName": "Invalid",
           "category": "Core",
@@ -288,7 +288,7 @@ mod tests {
         assert!(
             invalid_error
                 .to_string()
-                .contains("invalid node definition core.invalid@0.1.0")
+                .contains("invalid node definition object.core.invalid@0.1.0")
         );
     }
 
@@ -299,12 +299,12 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(
             temp.path().join("b.json"),
-            definition_value("core.b").to_string(),
+            definition_value("object.core.b").to_string(),
         )
         .unwrap();
         fs::write(
             nested.join("a.json"),
-            definition_value("core.a").to_string(),
+            definition_value("object.core.a").to_string(),
         )
         .unwrap();
         fs::write(temp.path().join("ignored.txt"), "not json").unwrap();
@@ -312,8 +312,8 @@ mod tests {
         let registry = NodeRegistry::load_dir(temp.path()).unwrap();
 
         assert_eq!(registry.len(), 2);
-        assert!(registry.get("core.a", "0.1.0").is_some());
-        assert!(registry.get("core.b", "0.1.0").is_some());
+        assert!(registry.get("object.core.a", "0.1.0").is_some());
+        assert!(registry.get("object.core.b", "0.1.0").is_some());
     }
 
     #[test]
@@ -327,7 +327,7 @@ mod tests {
         assert!(matches!(parse, Err(RegistryLoadError::Parse { .. })));
 
         let invalid_temp = TempDir::new("invalid");
-        let mut invalid = definition_value("core.invalid");
+        let mut invalid = definition_value("object.core.invalid");
         invalid["schemaVersion"] = json!("9.9.9");
         fs::write(
             invalid_temp.path().join("invalid.json"),

@@ -114,7 +114,7 @@ mod tests {
             .values
             .insert("slider_1".to_owned(), ControlValue::float(0.75));
         control_state.channels.insert(
-            "control.number.float:speed".to_owned(),
+            "value.core.float32:speed".to_owned(),
             ControlMessage::from_value(ControlValue::float(0.75)),
         );
         control_state
@@ -140,7 +140,7 @@ mod tests {
         ));
         let mut control_state = ControlState::default();
         control_state.channels.insert(
-            "control.bool:enabled".to_owned(),
+            "value.core.bool:enabled".to_owned(),
             ControlMessage::from_value(ControlValue::bool(true)),
         );
         control_state

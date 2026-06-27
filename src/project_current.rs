@@ -12,10 +12,10 @@ use crate::{
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-const SUBPATCH_KIND: &str = "core.subpatch";
+const SUBPATCH_KIND: &str = "object.core.subpatch";
 const SUBPATCH_SHORTHAND_KIND: &str = "p";
-const INLET_KIND: &str = "core.inlet";
-const OUTLET_KIND: &str = "core.outlet";
+const INLET_KIND: &str = "object.core.inlet";
+const OUTLET_KIND: &str = "object.core.outlet";
 const MAX_SUBPATCH_DEPTH: usize = 16;
 pub const CURRENT_SCHEMA_VERSION: &str = "0.1.0";
 
@@ -414,7 +414,7 @@ fn contract_boundary_edges(
     mut edges: Vec<ExpansionEdge>,
     boundary_pins: HashSet<String>,
 ) -> Vec<EdgeSpecCurrent> {
-    let mut counter = 0usize;
+    let mut merged_boundary_edge_index = 0usize;
 
     while let Some(pin) = boundary_pins
         .iter()
@@ -443,12 +443,12 @@ fn contract_boundary_edges(
                 if source_edge.source == target_edge.target {
                     continue;
                 }
-                counter += 1;
+                merged_boundary_edge_index += 1;
                 retained.push(merge_boundary_edges(
                     source_edge,
                     target_edge,
                     &pin,
-                    counter,
+                    merged_boundary_edge_index,
                 ));
             }
         }
@@ -483,14 +483,14 @@ fn merge_boundary_edges(
     source_edge: &ExpansionEdge,
     target_edge: &ExpansionEdge,
     pin: &str,
-    counter: usize,
+    merged_boundary_edge_index: usize,
 ) -> ExpansionEdge {
     let mut edge = target_edge.edge.clone();
     edge.id = format!(
         "{}__{}__{}",
         source_edge.edge.id,
         boundary_id_fragment(pin),
-        counter
+        merged_boundary_edge_index
     );
     if edge.resolved_type.is_none() {
         edge.resolved_type = source_edge.edge.resolved_type.clone();
@@ -941,7 +941,7 @@ fn object_text_diagnostics_current(
     if diagnostics.is_empty()
         && let Some(resolved_kind) = resolution.resolved_kind.as_deref()
         && resolved_kind != node.kind
-        && node.kind != "core.unresolved-object"
+        && node.kind != "object.core.unresolved"
     {
         diagnostics.push(RuntimeDiagnostic::structured_error(
             "object-text.kind-mismatch",
@@ -1456,11 +1456,11 @@ fn edge_diagnostic(
 fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
     let (canonical_flow, data_kind) = current_port_type_parts(&port.port_type);
     let format = match data_kind.as_str() {
-        "number.float" => Some(StringOrStrings::One("f32".to_owned())),
-        "gpu.texture2d" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
+        "value.core.float32" => Some(StringOrStrings::One("f32".to_owned())),
+        "value.core.tensor" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
         _ => None,
     };
-    let color_space = (data_kind == "gpu.texture2d").then(|| "srgb".to_owned());
+    let color_space = (data_kind == "value.core.tensor").then(|| "srgb".to_owned());
     DataType {
         flow: canonical_flow.unwrap_or_else(|| match port.rate {
             Some(PortRateCurrent::Event) => DataFlow::Event,
@@ -1468,7 +1468,7 @@ fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
             Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
             Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
             | None => {
-                if data_kind == "gpu.texture2d" {
+                if data_kind == "value.core.tensor" {
                     DataFlow::Resource
                 } else {
                     DataFlow::Control
@@ -1491,15 +1491,7 @@ fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
 
 fn current_port_type_parts(port_type: &str) -> (Option<DataFlow>, String) {
     match port_type {
-        "control.message.any" => (Some(DataFlow::Control), "message.any".to_owned()),
-        "control.number.float" => (Some(DataFlow::Control), "number.float".to_owned()),
-        "control.number.int" => (Some(DataFlow::Control), "number.int".to_owned()),
-        "control.number.uint" => (Some(DataFlow::Control), "number.uint".to_owned()),
-        "control.bool" => (Some(DataFlow::Control), "bool".to_owned()),
-        "control.string" => (Some(DataFlow::Control), "string".to_owned()),
-        "control.color" => (Some(DataFlow::Control), "color".to_owned()),
-        "event.bang" => (Some(DataFlow::Event), "event.bang".to_owned()),
-        "gpu.texture2d" => (Some(DataFlow::Resource), "gpu.texture2d".to_owned()),
+        value_type if value_type.starts_with("value.") => (None, value_type.to_owned()),
         other => (None, other.to_owned()),
     }
 }
@@ -1647,12 +1639,12 @@ mod tests {
         definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "render.clear-color",
+          "id": "object.core.render.clear-color",
           "version": "0.1.0",
           "displayName": "Clear Color",
           "category": "Render",
           "ports": [
-            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
           "state": { "persistent": false },
@@ -1665,12 +1657,12 @@ mod tests {
         definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "render.output",
+          "id": "object.core.render.output",
           "version": "0.1.0",
           "displayName": "Render Output",
           "category": "Render",
           "ports": [
-            { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+            { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
           "state": { "persistent": false },
@@ -1688,8 +1680,8 @@ mod tests {
           "displayName": "Pass",
           "category": "Test",
           "ports": [
-            { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+            { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
           "state": { "persistent": false },
@@ -1723,20 +1715,20 @@ mod tests {
           "nodes": [
             {
               "id": "clear",
-              "kind": "render.clear-color",
+              "kind": "object.core.render.clear-color",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
               "id": "output",
-              "kind": "render.output",
+              "kind": "object.core.render.output",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
               ]
             }
           ],
@@ -1745,7 +1737,7 @@ mod tests {
               "id": "edge_clear_output",
               "source": { "nodeId": "clear", "portId": "out" },
               "target": { "nodeId": "output", "portId": "in" },
-              "resolvedType": "render.frame"
+              "resolvedType": "value.core.tensor"
             }
           ]
         }))
@@ -1763,11 +1755,11 @@ mod tests {
             "nodes": [
               {
                 "id": "patch_in",
-                "kind": "core.inlet",
+                "kind": "object.core.inlet",
                 "kindVersion": "0.1.0",
                 "params": { "portId": "in", "label": "Input" },
                 "ports": [
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "description": "Frame entering the patch" }
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "description": "Frame entering the patch" }
                 ]
               },
               {
@@ -1776,17 +1768,17 @@ mod tests {
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               },
               {
                 "id": "patch_out",
-                "kind": "core.outlet",
+                "kind": "object.core.outlet",
                 "kindVersion": "0.1.0",
                 "params": { "portId": "out", "label": "Output" },
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true, "description": "Frame leaving the patch" }
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true, "description": "Frame leaving the patch" }
                 ]
               }
             ],
@@ -1795,13 +1787,13 @@ mod tests {
                 "id": "edge_in_pass",
                 "source": { "nodeId": "patch_in", "portId": "out" },
                 "target": { "nodeId": "pass", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               },
               {
                 "id": "edge_pass_out",
                 "source": { "nodeId": "pass", "portId": "out" },
                 "target": { "nodeId": "patch_out", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               }
             ]
           }
@@ -1818,30 +1810,30 @@ mod tests {
           "nodes": [
             {
               "id": "clear",
-              "kind": "render.clear-color",
+              "kind": "object.core.render.clear-color",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
               "id": "fx",
-              "kind": "core.subpatch",
+              "kind": "object.core.subpatch",
               "kindVersion": "0.1.0",
               "params": { "patchRef": "identity" },
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
               "id": "output",
-              "kind": "render.output",
+              "kind": "object.core.render.output",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
               ]
             }
           ],
@@ -1850,13 +1842,13 @@ mod tests {
               "id": "edge_clear_fx",
               "source": { "nodeId": "clear", "portId": "out" },
               "target": { "nodeId": "fx", "portId": "in" },
-              "resolvedType": "render.frame"
+              "resolvedType": "value.core.tensor"
             },
             {
               "id": "edge_fx_output",
               "source": { "nodeId": "fx", "portId": "out" },
               "target": { "nodeId": "output", "portId": "in" },
-              "resolvedType": "render.frame"
+              "resolvedType": "value.core.tensor"
             }
           ]
         }))
@@ -1898,7 +1890,7 @@ mod tests {
             .metadata
             .as_ref()
             .expect("metadata should exist");
-        assert_eq!(metadata.resolved_type.as_deref(), Some("render.frame"));
+        assert_eq!(metadata.resolved_type.as_deref(), Some("value.core.tensor"));
         assert_eq!(metadata.merge_policy.as_deref(), Some("forbid"));
         assert_eq!(metadata.fan_out_policy.as_deref(), Some("allow"));
         assert_eq!(metadata.cycle_classification, None);
@@ -1914,12 +1906,12 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "render.feedback-composite",
+              "kind": "object.core.render.feedback-composite",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "previous", "direction": "input", "type": "render.frame", "rate": "render" },
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "fanOutPolicy": "copy" }
+                { "id": "previous", "direction": "input", "type": "value.core.tensor", "rate": "render" },
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "fanOutPolicy": "copy" }
               ]
             }
           ],
@@ -1936,13 +1928,13 @@ mod tests {
         let definition = definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "render.feedback-composite",
+          "id": "object.core.render.feedback-composite",
           "version": "0.1.0",
           "displayName": "Feedback",
           "category": "Render",
           "ports": [
-            { "id": "previous", "direction": "input", "type": "render.frame", "rate": "render" },
-            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "fanOutPolicy": "copy" }
+            { "id": "previous", "direction": "input", "type": "value.core.tensor", "rate": "render" },
+            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "fanOutPolicy": "copy" }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
           "state": { "persistent": false },
@@ -2105,7 +2097,7 @@ mod tests {
 
         let mut source_edge = base_edge.clone();
         source_edge.id = "source_edge".to_owned();
-        source_edge.resolved_type = Some("render.frame".to_owned());
+        source_edge.resolved_type = Some("value.core.tensor".to_owned());
         let mut target_edge = base_edge.clone();
         target_edge.id = "target_edge".to_owned();
         target_edge.resolved_type = None;
@@ -2131,7 +2123,10 @@ mod tests {
             std::collections::HashSet::from(["fx::@inlet::in".to_owned()]),
         );
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].resolved_type.as_deref(), Some("render.frame"));
+        assert_eq!(
+            merged[0].resolved_type.as_deref(),
+            Some("value.core.tensor")
+        );
         assert!(merged[0].id.contains("fx___inlet__in"));
 
         assert!(
@@ -2176,7 +2171,7 @@ mod tests {
           "nodes": [
             {
               "id": "fx",
-              "kind": "core.subpatch",
+              "kind": "object.core.subpatch",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": []
@@ -2209,7 +2204,7 @@ mod tests {
                     "nodes": [
                       {
                         "id": "next",
-                        "kind": "core.subpatch",
+                        "kind": "object.core.subpatch",
                         "kindVersion": "0.1.0",
                         "params": { "patchRef": format!("p{}", index + 1) },
                         "ports": []
@@ -2229,7 +2224,7 @@ mod tests {
           "nodes": [
             {
               "id": "root",
-              "kind": "core.subpatch",
+              "kind": "object.core.subpatch",
               "kindVersion": "0.1.0",
               "params": { "patchRef": "p0" },
               "ports": []
@@ -2253,7 +2248,7 @@ mod tests {
             Some("identity")
         );
         assert_eq!(
-            parse_subpatch_object_text("core.subpatch identity").as_deref(),
+            parse_subpatch_object_text("object.core.subpatch identity").as_deref(),
             Some("identity")
         );
         assert_eq!(parse_subpatch_object_text("object identity"), None);
@@ -2276,7 +2271,7 @@ mod tests {
           "nodes": [
             {
               "id": "plain_inlet",
-              "kind": "core.inlet",
+              "kind": "object.core.inlet",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": []
@@ -2297,20 +2292,20 @@ mod tests {
             "nodes": [
               {
                 "id": "in_a",
-                "kind": "core.inlet",
+                "kind": "object.core.inlet",
                 "kindVersion": "0.1.0",
                 "params": { "portId": "in_a", "label": "shared" },
                 "ports": [
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               },
               {
                 "id": "in_b",
-                "kind": "core.inlet",
+                "kind": "object.core.inlet",
                 "kindVersion": "0.1.0",
                 "params": { "portId": "in_b", "label": "shared" },
                 "ports": [
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               }
             ],
@@ -2344,11 +2339,11 @@ mod tests {
           "nodes": [
             {
               "id": "clear",
-              "kind": "render.clear-color",
+              "kind": "object.core.render.clear-color",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
@@ -2357,17 +2352,17 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": { "objectText": "p alias-patch" },
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render" },
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render" },
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
               "id": "output",
-              "kind": "render.output",
+              "kind": "object.core.render.output",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render" }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render" }
               ]
             }
           ],
@@ -2421,7 +2416,7 @@ mod tests {
             "nodes": [
               {
                 "id": "self",
-                "kind": "core.subpatch",
+                "kind": "object.core.subpatch",
                 "kindVersion": "0.1.0",
                 "params": { "patchRef": "recursive" },
                 "ports": []
@@ -2441,7 +2436,7 @@ mod tests {
               "nodes": [
                 {
                   "id": "root",
-                  "kind": "core.subpatch",
+                  "kind": "object.core.subpatch",
                   "kindVersion": "0.1.0",
                   "params": { "patchRef": "recursive" },
                   "ports": []
@@ -2537,15 +2532,15 @@ mod tests {
     #[test]
     fn rejects_payload_identity_node_kinds_and_definition_ids() {
         for payload_identity in [
-            "core.bool",
-            "core.string",
+            "object.core.bool",
+            "object.core.string",
             "bool",
             "string",
             "value.number",
-            "control.message.any",
-            "event.bang",
-            "asset.video",
-            "gpu.texture2d",
+            "value.core.message",
+            "value.core.bang",
+            "value.core.string",
+            "value.core.tensor",
         ] {
             let mut graph = render_graph();
             graph.nodes[0].kind = payload_identity.to_owned();
@@ -2580,11 +2575,11 @@ mod tests {
     #[test]
     fn accepts_behavior_object_identities_that_still_exist() {
         let behavior_ids = [
-            "core.float",
-            "core.int",
-            "core.uint",
-            "core.bang",
-            "core.message",
+            "object.core.float",
+            "object.core.int",
+            "object.core.uint",
+            "object.core.bang",
+            "object.core.message",
         ];
         let graph = graph(json!({
           "schema": "skenion.graph",
@@ -2639,7 +2634,7 @@ mod tests {
           "nodes": [
             {
               "id": "add",
-              "kind": "core.operator.add",
+              "kind": "object.core.operator.add",
               "kindVersion": "0.1.0",
               "objectText": "+ 2",
               "params": {},
@@ -2649,39 +2644,44 @@ mod tests {
           "edges": []
         }));
 
-        validate_project_current(&graph, &[behavior_definition("core.operator.add")])
+        validate_project_current(&graph, &[behavior_definition("object.core.operator.add")])
             .expect("matching Runtime object text should validate");
 
         let mut invalid_arg = graph.clone();
         invalid_arg.nodes[0].object_text = Some("+ true".to_owned());
-        let invalid_arg_result =
-            validate_project_current(&invalid_arg, &[behavior_definition("core.operator.add")])
-                .expect_err("invalid Runtime object-text args should fail");
+        let invalid_arg_result = validate_project_current(
+            &invalid_arg,
+            &[behavior_definition("object.core.operator.add")],
+        )
+        .expect_err("invalid Runtime object-text args should fail");
         assert!(invalid_arg_result.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("object-text.invalid-arg-type")
                 && diagnostic.details.as_ref().unwrap()["objectText"] == "+ true"
         }));
 
         let mut mismatch = graph.clone();
-        mismatch.nodes[0].kind = "core.operator.sub".to_owned();
-        let mismatch_result =
-            validate_project_current(&mismatch, &[behavior_definition("core.operator.sub")])
-                .expect_err("resolved object kind mismatch should fail");
+        mismatch.nodes[0].kind = "object.core.operator.sub".to_owned();
+        let mismatch_result = validate_project_current(
+            &mismatch,
+            &[behavior_definition("object.core.operator.sub")],
+        )
+        .expect_err("resolved object kind mismatch should fail");
         assert!(mismatch_result.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("object-text.kind-mismatch")
-                && diagnostic.details.as_ref().unwrap()["resolvedKind"] == "core.operator.add"
-                && diagnostic.details.as_ref().unwrap()["nodeKind"] == "core.operator.sub"
+                && diagnostic.details.as_ref().unwrap()["resolvedKind"]
+                    == "object.core.operator.add"
+                && diagnostic.details.as_ref().unwrap()["nodeKind"] == "object.core.operator.sub"
         }));
 
         let mut payload = graph.clone();
-        payload.nodes[0].kind = "core.float".to_owned();
-        payload.nodes[0].object_text = Some("control.number.float".to_owned());
+        payload.nodes[0].kind = "object.core.float".to_owned();
+        payload.nodes[0].object_text = Some("value.core.float32".to_owned());
         let payload_result =
-            validate_project_current(&payload, &[behavior_definition("core.float")])
+            validate_project_current(&payload, &[behavior_definition("object.core.float")])
                 .expect_err("payload identity object text should fail");
         assert!(payload_result.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("object-text.payload-identity")
-                && diagnostic.details.as_ref().unwrap()["objectText"] == "control.number.float"
+                && diagnostic.details.as_ref().unwrap()["objectText"] == "value.core.float32"
         }));
 
         let mut package_deferred = graph.clone();
@@ -2697,9 +2697,9 @@ mod tests {
     #[test]
     fn surfaces_selector_and_connection_policy_diagnostics_with_specific_codes() {
         let mut selector_graph = render_graph();
-        selector_graph.nodes[1].ports[0].port_type = "control.message.any".to_owned();
+        selector_graph.nodes[1].ports[0].port_type = "value.core.message".to_owned();
         selector_graph.nodes[1].ports[0].rate = Some(PortRateCurrent::Control);
-        selector_graph.nodes[1].ports[0].message_selectors = None;
+        selector_graph.nodes[1].ports[0].message_keys = None;
         let mut selector_output_definition = output_definition();
         selector_output_definition.ports[0] = selector_graph.nodes[1].ports[0].clone();
         let selector_result = validate_project_current(
@@ -2709,10 +2709,10 @@ mod tests {
         .expect_err("selector-aware input port should fail without selector policy");
         assert!(
             selector_result.iter().any(|diagnostic| {
-                diagnostic.code.as_deref() == Some("graph.message-selector-policy")
+                diagnostic.code.as_deref() == Some("graph.message-key-policy")
                     && diagnostic
                         .message
-                        .contains("selector-aware input port requires messageSelectors")
+                        .contains("message-key-aware input port requires messageKeys")
             }),
             "{selector_result:#?}"
         );
@@ -2731,7 +2731,7 @@ mod tests {
                 node_id: "output".to_owned(),
                 port_id: "in".to_owned(),
             },
-            resolved_type: Some("render.frame".to_owned()),
+            resolved_type: Some("value.core.tensor".to_owned()),
             order: None,
             enabled: None,
             adapter: None,
@@ -2765,7 +2765,7 @@ mod tests {
                 node_id: "output_two".to_owned(),
                 port_id: "in".to_owned(),
             },
-            resolved_type: Some("render.frame".to_owned()),
+            resolved_type: Some("value.core.tensor".to_owned()),
             order: None,
             enabled: None,
             adapter: None,
@@ -2856,11 +2856,11 @@ mod tests {
         let mut mismatch = render_graph();
         mismatch.nodes[0].ports.clear();
         mismatch.nodes[1].ports[0].direction = PortDirectionCurrent::Output;
-        mismatch.nodes[1].ports[0].port_type = "control.number.float".to_owned();
+        mismatch.nodes[1].ports[0].port_type = "value.core.float32".to_owned();
         mismatch.nodes[1].ports.push(PortSpecCurrent {
             id: "extra".to_owned(),
             direction: PortDirectionCurrent::Input,
-            port_type: "render.frame".to_owned(),
+            port_type: "value.core.tensor".to_owned(),
             label: None,
             rate: None,
             accepts: None,
@@ -2869,7 +2869,7 @@ mod tests {
             merge_policy: None,
             fan_out_policy: None,
             trigger_mode: None,
-            message_selectors: None,
+            message_keys: None,
             default_value: None,
             latch: None,
             required: None,
@@ -2893,12 +2893,12 @@ mod tests {
         );
         assert!(messages.contains("missing manifest port"));
         assert!(messages.contains("direction differs from definition"));
-        assert!(messages.contains("type control.number.float"));
+        assert!(messages.contains("type value.core.float32"));
         assert!(messages.contains("missing source port"));
         assert!(messages.contains("missing manifest port: output.extra"));
 
         let mut incompatible = render_graph();
-        incompatible.nodes[1].ports[0].port_type = "control.message.any".to_owned();
+        incompatible.nodes[1].ports[0].port_type = "value.core.message".to_owned();
         incompatible.nodes[1].ports[0].rate = Some(PortRateCurrent::Event);
         let incompatible_result =
             validate_project_current(&incompatible, &[clear_definition(), output_definition()])
@@ -2906,7 +2906,7 @@ mod tests {
         assert!(incompatible_result.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("graph.edge-incompatible-type")
                 && diagnostic.message.contains(
-                    "incompatible edge clear:out render.frame -> output:in control.message.any",
+                    "incompatible edge clear:out value.core.tensor -> output:in value.core.message",
                 )
         }));
     }

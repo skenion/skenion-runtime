@@ -3,22 +3,22 @@ use serde_json::Value;
 
 use crate::GraphNode;
 
-pub const FLOAT_KIND: &str = "core.float";
-pub const INT_KIND: &str = "core.int";
-pub const UINT_KIND: &str = "core.uint";
-pub const COLOR_KIND: &str = "core.color";
-pub const BANG_KIND: &str = "core.bang";
-pub const MESSAGE_KIND: &str = "core.message";
-pub const COMMENT_KIND: &str = "core.comment";
-pub const PANEL_KIND: &str = "core.panel";
-pub const OPERATOR_ADD_KIND: &str = "core.operator.add";
-pub const OPERATOR_SUB_KIND: &str = "core.operator.sub";
-pub const OPERATOR_MUL_KIND: &str = "core.operator.mul";
-pub const OPERATOR_DIV_KIND: &str = "core.operator.div";
-pub const OPERATOR_POW_KIND: &str = "core.operator.pow";
-pub const OPERATOR_MIN_KIND: &str = "core.operator.min";
-pub const OPERATOR_MAX_KIND: &str = "core.operator.max";
-pub const OPERATOR_SQRT_KIND: &str = "core.operator.sqrt";
+pub const FLOAT_KIND: &str = "object.core.float";
+pub const INT_KIND: &str = "object.core.int";
+pub const UINT_KIND: &str = "object.core.uint";
+pub const COLOR_KIND: &str = "object.core.color";
+pub const BANG_KIND: &str = "object.core.bang";
+pub const MESSAGE_KIND: &str = "object.core.message";
+pub const COMMENT_KIND: &str = "object.core.comment";
+pub const PANEL_KIND: &str = "object.core.panel";
+pub const OPERATOR_ADD_KIND: &str = "object.core.operator.add";
+pub const OPERATOR_SUB_KIND: &str = "object.core.operator.sub";
+pub const OPERATOR_MUL_KIND: &str = "object.core.operator.mul";
+pub const OPERATOR_DIV_KIND: &str = "object.core.operator.div";
+pub const OPERATOR_POW_KIND: &str = "object.core.operator.pow";
+pub const OPERATOR_MIN_KIND: &str = "object.core.operator.min";
+pub const OPERATOR_MAX_KIND: &str = "object.core.operator.max";
+pub const OPERATOR_SQRT_KIND: &str = "object.core.operator.sqrt";
 
 pub const DEFAULT_FLOAT_REPRESENTATION: &str = "f32";
 pub const DEFAULT_INT_REPRESENTATION: &str = "i32";
@@ -139,13 +139,13 @@ impl ControlValue {
     pub fn kind_label(&self) -> String {
         match self {
             Self::Float { representation, .. } => {
-                format!("control.number.float/{representation}")
+                format!("value.core.float32/{representation}")
             }
-            Self::Int { representation, .. } => format!("control.number.int/{representation}"),
-            Self::Uint { representation, .. } => format!("control.number.uint/{representation}"),
-            Self::Bool { .. } => "control.bool".to_owned(),
-            Self::String { .. } => "control.string".to_owned(),
-            Self::Color { representation, .. } => format!("control.color/{representation}"),
+            Self::Int { representation, .. } => format!("value.core.int32/{representation}"),
+            Self::Uint { representation, .. } => format!("value.core.uint32/{representation}"),
+            Self::Bool { .. } => "value.core.bool".to_owned(),
+            Self::String { .. } => "value.core.string".to_owned(),
+            Self::Color { representation, .. } => format!("value.core.color/{representation}"),
         }
     }
 
@@ -789,21 +789,18 @@ mod tests {
     fn reports_kind_labels_for_diagnostics() {
         assert_eq!(
             ControlValue::float(1.0).kind_label(),
-            "control.number.float/f32"
+            "value.core.float32/f32"
         );
-        assert_eq!(ControlValue::int(1).kind_label(), "control.number.int/i32");
-        assert_eq!(
-            ControlValue::uint(1).kind_label(),
-            "control.number.uint/u32"
-        );
-        assert_eq!(ControlValue::bool(true).kind_label(), "control.bool");
+        assert_eq!(ControlValue::int(1).kind_label(), "value.core.int32/i32");
+        assert_eq!(ControlValue::uint(1).kind_label(), "value.core.uint32/u32");
+        assert_eq!(ControlValue::bool(true).kind_label(), "value.core.bool");
         assert_eq!(
             ControlValue::string("x".to_owned()).kind_label(),
-            "control.string"
+            "value.core.string"
         );
         assert_eq!(
             ControlValue::color([0.0, 0.0, 0.0, 1.0]).kind_label(),
-            "control.color/rgba32f"
+            "value.core.color/rgba32f"
         );
         assert_eq!(ControlMessage::bang().selector, "bang");
     }

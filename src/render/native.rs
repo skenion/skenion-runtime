@@ -847,6 +847,71 @@ mod tests {
     }
 
     #[test]
+    fn native_preview_app_initializes_title_frame_limits_and_noop_redraw_paths() {
+        let telemetry_path = std::env::temp_dir().join(format!(
+            "skenion-native-preview-app-{}.json",
+            std::process::id()
+        ));
+        let document = preview_document_with_nodes(vec![clear_color_node()]);
+        let mut app = NativePreviewApp::new(
+            document,
+            RenderScene::default(),
+            Some("scene failed".to_owned()),
+            PreviewFrameLimit::Frames(0),
+            Some(telemetry_path.clone()),
+            None,
+            Some(7),
+        );
+
+        assert!(
+            app.title()
+                .contains("render-response-graph rev 1 session 1 source default-clear")
+        );
+        assert!(app.telemetry.is_some());
+        assert_eq!(app.control_revision, Some(7));
+        assert_eq!(app.frame_index, 0);
+        assert!(app.renderer.is_none());
+        assert!(app.window.is_none());
+
+        app.request_redraw();
+        app.reload_control_state_if_needed();
+        assert!(!app.should_exit_after_redraw());
+
+        app.frame_index = 1;
+        assert!(app.should_exit_after_redraw());
+
+        app.frame_limit = PreviewFrameLimit::UntilClose;
+        assert!(!app.should_exit_after_redraw());
+
+        let _ = std::fs::remove_file(telemetry_path);
+    }
+
+    #[test]
+    fn native_preview_app_ignores_missing_control_state_snapshot() {
+        let control_state_path = std::env::temp_dir().join(format!(
+            "skenion-missing-preview-control-state-{}.json",
+            std::process::id()
+        ));
+        let document = preview_document_with_nodes(vec![clear_color_node()]);
+        let mut app = NativePreviewApp::new(
+            document,
+            RenderScene::default(),
+            None,
+            PreviewFrameLimit::Frames(1),
+            None,
+            Some(control_state_path.clone()),
+            None,
+        );
+
+        app.reload_control_state_if_needed();
+
+        assert_eq!(app.control_revision, None);
+        assert_eq!(app.scene.renderer_label(), "clear-color");
+
+        let _ = std::fs::remove_file(control_state_path);
+    }
+
+    #[test]
     fn generated_shader_module_declares_dynamic_uniforms() {
         let scene = FullscreenShaderScene {
             language: crate::render::ShaderLanguage::Wgsl,

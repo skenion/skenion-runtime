@@ -17,6 +17,8 @@ use crate::{
     RuntimeMutationRequest, RuntimePatchResponse, RuntimeSessionRecord, RuntimeSessionSnapshot,
     RuntimeViewPatch, runtime_time::created_at_now,
 };
+#[cfg(test)]
+use crate::{EndpointBindingValueFormat, ValueOccurrenceHeader};
 
 pub const RUNTIME_REALTIME_SCHEMA: &str = "skenion.runtime.realtime";
 pub const RUNTIME_REALTIME_SCHEMA_VERSION: &str = "0.1.0";
@@ -355,32 +357,23 @@ impl RuntimeRealtimeState {
             })
     }
 
-    fn remember_ack(
-        &self,
-        identity: &RuntimeRealtimeConnectionIdentity,
-        message_type: &str,
-        idempotency_key: &str,
-        event_cursor: &str,
-        event_sequence: u64,
-        ack_payload: Value,
-        emitted_result: Option<RuntimeRealtimeEnvelope>,
-    ) {
+    fn remember_ack(&self, ack: RememberAckInput<'_>) {
         let mut idempotency_results = self
             .idempotency_results
             .lock()
             .expect("runtime realtime idempotency lock should not be poisoned");
         idempotency_results.insert(
             RuntimeRealtimeIdempotencyScope {
-                client_id: identity.client_id.clone(),
-                window_id: identity.window_id.clone(),
-                message_type: message_type.to_owned(),
-                idempotency_key: idempotency_key.to_owned(),
+                client_id: ack.identity.client_id.clone(),
+                window_id: ack.identity.window_id.clone(),
+                message_type: ack.message_type.to_owned(),
+                idempotency_key: ack.idempotency_key.to_owned(),
             },
             RuntimeRealtimeIdempotencyEntry {
-                event_cursor: event_cursor.to_owned(),
-                event_sequence,
-                ack_payload,
-                emitted_result,
+                event_cursor: ack.event_cursor.to_owned(),
+                event_sequence: ack.event_sequence,
+                ack_payload: ack.ack_payload,
+                emitted_result: ack.emitted_result,
                 inserted_at: SystemTime::now(),
             },
         );
@@ -535,6 +528,22 @@ impl RuntimeRealtimeState {
             presence.remove(&key);
         }
     }
+}
+
+struct RememberAckInput<'a> {
+    identity: &'a RuntimeRealtimeConnectionIdentity,
+    message_type: &'a str,
+    idempotency_key: &'a str,
+    event_cursor: &'a str,
+    event_sequence: u64,
+    ack_payload: Value,
+    emitted_result: Option<RuntimeRealtimeEnvelope>,
+}
+
+#[derive(Clone, Copy)]
+struct RealtimeEventPosition<'a> {
+    sequence: u64,
+    cursor: &'a str,
 }
 
 pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket: WebSocket) {
@@ -907,15 +916,15 @@ fn handle_presence_update(
         payload: presence,
     };
     let ack = command_ack(record, identity, &frame, &cursor, false);
-    record.realtime.remember_ack(
+    record.realtime.remember_ack(RememberAckInput {
         identity,
-        &frame.message_type,
-        &idempotency_key,
-        &cursor,
-        sequence,
-        ack.payload.clone(),
-        None,
-    );
+        message_type: &frame.message_type,
+        idempotency_key: &idempotency_key,
+        event_cursor: &cursor,
+        event_sequence: sequence,
+        ack_payload: ack.payload.clone(),
+        emitted_result: None,
+    });
     Ok((ack, Some(event)))
 }
 
@@ -975,21 +984,23 @@ fn handle_control_command(
             &request_for_event,
             &mut response,
             changed_values,
-            sequence,
-            cursor.clone(),
+            RealtimeEventPosition {
+                sequence,
+                cursor: &cursor,
+            },
         )
     } else {
         None
     };
-    record.realtime.remember_ack(
+    record.realtime.remember_ack(RememberAckInput {
         identity,
-        &frame.message_type,
-        &idempotency_key,
-        &cursor,
-        sequence,
-        ack.payload.clone(),
-        event.clone(),
-    );
+        message_type: &frame.message_type,
+        idempotency_key: &idempotency_key,
+        event_cursor: &cursor,
+        event_sequence: sequence,
+        ack_payload: ack.payload.clone(),
+        emitted_result: event.clone(),
+    });
 
     Ok((ack, event, None))
 }
@@ -1037,8 +1048,12 @@ fn handle_graph_command(
     let sequence = record.realtime.next_event_sequence();
     let cursor = record.realtime.cursor_for(sequence);
     let response = apply_graph_command(record, identity, &frame, &payload);
+    let position = RealtimeEventPosition {
+        sequence,
+        cursor: &cursor,
+    };
     let ack = graph_ack(
-        record, identity, &frame, &payload, &response, sequence, &cursor, false,
+        record, identity, &frame, &payload, &response, position, false,
     );
     let event = if response.applied {
         Some(graph_applied_event(
@@ -1053,15 +1068,15 @@ fn handle_graph_command(
     } else {
         None
     };
-    record.realtime.remember_ack(
+    record.realtime.remember_ack(RememberAckInput {
         identity,
-        &frame.message_type,
-        &idempotency_key,
-        &cursor,
-        sequence,
-        ack.payload.clone(),
-        event.clone(),
-    );
+        message_type: &frame.message_type,
+        idempotency_key: &idempotency_key,
+        event_cursor: &cursor,
+        event_sequence: sequence,
+        ack_payload: ack.payload.clone(),
+        emitted_result: event.clone(),
+    });
 
     Ok((ack, event, None))
 }
@@ -1347,8 +1362,7 @@ fn control_emitted_event(
     request: &RuntimeControlEventRequest,
     response: &mut RuntimeControlEventResponse,
     changed_values: BTreeMap<String, ControlValue>,
-    sequence: u64,
-    cursor: String,
+    position: RealtimeEventPosition<'_>,
 ) -> Option<RuntimeRealtimeEnvelope> {
     if response.emitted.is_empty() && changed_values.is_empty() {
         return None;
@@ -1358,7 +1372,7 @@ fn control_emitted_event(
         schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
         schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
         message_type: "control.emitted".to_owned(),
-        message_id: format!("{}_control_{sequence:06}", record.id),
+        message_id: format!("{}_control_{:06}", record.id, position.sequence),
         session_id: record.id.clone(),
         connection_id: Some(identity.connection_id.clone()),
         client_id: Some(identity.client_id.clone()),
@@ -1372,14 +1386,14 @@ fn control_emitted_event(
             .clone()
             .or_else(|| Some(frame.message_id.clone())),
         idempotency_key: frame.idempotency_key.clone(),
-        sequence: Some(sequence),
-        cursor: Some(cursor),
+        sequence: Some(position.sequence),
+        cursor: Some(position.cursor.to_owned()),
         created_at: Some(created_at_now()),
         payload: json!({
             "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
             "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
             "idempotencyKey": frame.idempotency_key,
-            "controlSequence": sequence,
+            "controlSequence": position.sequence,
             "controlRevision": response.control_revision,
             "changed": response.changed,
             "request": request,
@@ -1476,8 +1490,7 @@ fn graph_ack(
     frame: &RuntimeRealtimeEnvelope,
     command: &GraphCommandPayload,
     response: &RuntimePatchResponse,
-    sequence: u64,
-    event_cursor: &str,
+    position: RealtimeEventPosition<'_>,
     cached: bool,
 ) -> RuntimeRealtimeEnvelope {
     graph_ack_with_payload(
@@ -1490,11 +1503,11 @@ fn graph_ack(
             "applied": response.applied,
             "conflict": response.conflict,
             "cached": cached,
-            "graphSequence": sequence,
+            "graphSequence": position.sequence,
             "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
             "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
             "idempotencyKey": frame.idempotency_key,
-            "eventCursor": event_cursor,
+            "eventCursor": position.cursor,
             "kind": command.kind,
             "target": command.target,
             "surfacePath": command.surface_path,
@@ -1814,6 +1827,66 @@ fn current_revisions(snapshot: &RuntimeSessionSnapshot) -> RuntimeRealtimeSessio
     }
 }
 
+#[cfg(test)]
+pub(crate) fn validate_value_occurrence_header_for_session_binding<'a>(
+    header: &ValueOccurrenceHeader,
+    binding_formats: &'a [EndpointBindingValueFormat],
+) -> Result<&'a EndpointBindingValueFormat, RuntimeDiagnostic> {
+    if let Err(report) = skenion_contracts::validate_value_occurrence_header_v01(header) {
+        return Err(RuntimeDiagnostic::structured_error(
+            "runtime.value-binding.invalid-header",
+            "invalid value occurrence header",
+            json!({
+                "bindingId": header.binding_id,
+                "errors": report
+                    .errors()
+                    .iter()
+                    .map(|error| error.message.clone())
+                    .collect::<Vec<_>>(),
+            }),
+        ));
+    }
+
+    let Some(binding_format) = binding_formats
+        .iter()
+        .find(|binding_format| binding_format.binding_id == header.binding_id)
+    else {
+        return Err(RuntimeDiagnostic::structured_error(
+            "runtime.value-binding.unknown-binding",
+            "value occurrence header references an unknown binding",
+            json!({
+                "bindingId": header.binding_id,
+            }),
+        ));
+    };
+
+    if binding_format.binding_epoch != header.binding_epoch {
+        return Err(RuntimeDiagnostic::structured_error(
+            "runtime.value-binding.stale-epoch",
+            "value occurrence header binding epoch does not match the current binding",
+            json!({
+                "bindingId": header.binding_id,
+                "expectedBindingEpoch": binding_format.binding_epoch,
+                "receivedBindingEpoch": header.binding_epoch,
+            }),
+        ));
+    }
+
+    if binding_format.format_revision != header.format_revision {
+        return Err(RuntimeDiagnostic::structured_error(
+            "runtime.value-binding.stale-format-revision",
+            "value occurrence header format revision does not match the current binding",
+            json!({
+                "bindingId": header.binding_id,
+                "expectedFormatRevision": binding_format.format_revision,
+                "receivedFormatRevision": header.format_revision,
+            }),
+        ));
+    }
+
+    Ok(binding_format)
+}
+
 fn mark_replayed(mut event: RuntimeRealtimeEnvelope) -> RuntimeRealtimeEnvelope {
     if let Some(payload) = event.payload.as_object_mut() {
         payload.insert("replayed".to_owned(), Value::Bool(true));
@@ -1875,6 +1948,60 @@ fn trim_btree_map_by_key<T>(map: &mut BTreeMap<String, T>, retention_limit: usiz
 mod tests {
     use super::*;
 
+    fn test_binding_format() -> EndpointBindingValueFormat {
+        EndpointBindingValueFormat {
+            binding_id: "edge_value_target".to_owned(),
+            binding_epoch: 2,
+            format_revision: 7,
+            format_digest: None,
+            value_format: crate::ValueFormat {
+                value_type_id: "value.core.float32".to_owned(),
+                format: Some("f32".to_owned()),
+                shape: None,
+                dynamic_shape: None,
+                layout: None,
+                strides: None,
+                byte_length: None,
+                sample_rate: None,
+                channels: None,
+                channel_layout: None,
+                color_space: None,
+                color_range: None,
+                transfer: None,
+                primaries: None,
+                alpha_policy: None,
+                resource_kind: None,
+            },
+            source: Some(crate::ValueEndpointRef {
+                node_id: "value_1".to_owned(),
+                port_id: "value".to_owned(),
+            }),
+            target: Some(crate::ValueEndpointRef {
+                node_id: "target_1".to_owned(),
+                port_id: "cold".to_owned(),
+            }),
+            delivery: None,
+        }
+    }
+
+    fn test_occurrence_header() -> ValueOccurrenceHeader {
+        ValueOccurrenceHeader {
+            binding_id: "edge_value_target".to_owned(),
+            binding_epoch: 2,
+            format_revision: 7,
+            sequence: 1,
+            clock: None,
+            timestamp: None,
+            payload_kind: crate::ValuePayloadKind::Json,
+            byte_length: None,
+            byte_offset: None,
+            actual_shape: None,
+            flags: None,
+            dropped_before: None,
+            duration: None,
+        }
+    }
+
     fn realtime_event(session_id: &str, sequence: u64, cursor: &str) -> RuntimeRealtimeEnvelope {
         RuntimeRealtimeEnvelope {
             schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
@@ -1896,21 +2023,91 @@ mod tests {
     }
 
     #[test]
+    fn value_occurrence_header_guard_accepts_current_binding() {
+        let binding = test_binding_format();
+        let header = test_occurrence_header();
+        let binding_formats = [binding.clone()];
+
+        let accepted =
+            validate_value_occurrence_header_for_session_binding(&header, &binding_formats)
+                .expect("current binding should be accepted");
+
+        assert_eq!(accepted, &binding);
+    }
+
+    #[test]
+    fn value_occurrence_header_guard_rejects_invalid_header() {
+        let mut header = test_occurrence_header();
+        header.binding_id.clear();
+
+        let diagnostic =
+            validate_value_occurrence_header_for_session_binding(&header, &[test_binding_format()])
+                .expect_err("invalid header should be rejected");
+
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("runtime.value-binding.invalid-header")
+        );
+    }
+
+    #[test]
+    fn value_occurrence_header_guard_rejects_unknown_binding() {
+        let mut header = test_occurrence_header();
+        header.binding_id = "missing_edge".to_owned();
+
+        let diagnostic =
+            validate_value_occurrence_header_for_session_binding(&header, &[test_binding_format()])
+                .expect_err("unknown binding should be rejected");
+
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("runtime.value-binding.unknown-binding")
+        );
+    }
+
+    #[test]
+    fn value_occurrence_header_guard_rejects_stale_binding_metadata() {
+        let binding = test_binding_format();
+        let mut stale_epoch = test_occurrence_header();
+        stale_epoch.binding_epoch = 1;
+        let epoch_diagnostic = validate_value_occurrence_header_for_session_binding(
+            &stale_epoch,
+            std::slice::from_ref(&binding),
+        )
+        .expect_err("stale epoch should be rejected");
+        assert_eq!(
+            epoch_diagnostic.code.as_deref(),
+            Some("runtime.value-binding.stale-epoch")
+        );
+
+        let mut stale_format = test_occurrence_header();
+        stale_format.format_revision = 6;
+        let format_diagnostic =
+            validate_value_occurrence_header_for_session_binding(&stale_format, &[binding])
+                .expect_err("stale format revision should be rejected");
+        assert_eq!(
+            format_diagnostic.code.as_deref(),
+            Some("runtime.value-binding.stale-format-revision")
+        );
+    }
+
+    #[test]
     fn idempotency_results_follow_retained_event_window() {
         let state = RuntimeRealtimeState::new("default", 2);
         let identity = state.issue_connection_identity(None);
 
         for sequence in 1..=3 {
             let cursor = state.cursor_for(sequence);
-            state.remember_ack(
-                &identity,
-                "presence.update",
-                &format!("key-{sequence}"),
-                &cursor,
-                sequence,
-                json!({ "eventCursor": cursor }),
-                None,
-            );
+            let idempotency_key = format!("key-{sequence}");
+            state.remember_ack(RememberAckInput {
+                identity: &identity,
+                message_type: "presence.update",
+                idempotency_key: &idempotency_key,
+                event_cursor: &cursor,
+                event_sequence: sequence,
+                ack_payload: json!({ "eventCursor": cursor }),
+                emitted_result: None,
+            });
             state.publish(realtime_event("default", sequence, &cursor));
         }
 

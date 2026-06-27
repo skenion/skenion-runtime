@@ -1034,6 +1034,57 @@ mod tests {
     }
 
     #[test]
+    fn missing_and_unreadable_package_roots_are_structured_diagnostics() {
+        let missing_manifest_dir = temp_dir("missing-manifest");
+        let unreadable_dir = temp_dir("unreadable-root");
+        fs::remove_dir_all(&unreadable_dir).unwrap();
+        let manager = RuntimePackageManager::with_package_dirs(vec![
+            missing_manifest_dir.clone(),
+            unreadable_dir.clone(),
+        ]);
+
+        let response = manager.list_packages();
+
+        assert!(!response.ok);
+        assert!(response.packages.is_empty());
+        assert_eq!(
+            codes(&response.diagnostics),
+            vec!["package.manifest.missing", "package.root.unreadable"]
+        );
+        assert_no_absolute_root(&response, &missing_manifest_dir);
+        assert_no_absolute_root(&response, &unreadable_dir);
+    }
+
+    #[test]
+    fn contract_invalid_manifest_stays_in_registry_with_package_diagnostic() {
+        let package_dir = temp_dir("contract-invalid");
+        let body = valid_manifest("bad id").replace(
+            r#""contracts": { "line": "0.49", "range": ">=0.49.0 <0.50.0" }"#,
+            r#""contracts": { "line": "0.49", "range": "*" }"#,
+        );
+        write_package_manifest(&package_dir, &body);
+        let manager = RuntimePackageManager::with_package_dirs(vec![package_dir.clone()]);
+
+        let response = manager.list_packages();
+
+        assert!(!response.ok);
+        assert_eq!(response.packages.len(), 1);
+        assert_eq!(response.packages[0].package_id, "bad id");
+        assert!(
+            codes(&response.packages[0].diagnostics).contains(&"package.manifest.contract-invalid")
+        );
+        assert!(
+            manager
+                .scan_registry()
+                .log_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some("package.manifest.contract-invalid"))
+        );
+        assert_no_absolute_root(&response, &package_dir);
+    }
+
+    #[test]
     fn legacy_manifest_projection_fields_fail_closed_under_contracts_049() {
         let package_dir = temp_dir("legacy-projection-fields");
         let body = valid_manifest("example/legacy-fields").replace(
@@ -1089,6 +1140,100 @@ mod tests {
     }
 
     #[test]
+    fn every_manifest_declared_path_surface_is_checked_and_public_paths_are_sanitized() {
+        let package_dir = temp_dir("all-path-surfaces");
+        let body = r#"{
+          "schema": "skenion.package.manifest",
+          "schemaVersion": "0.1.0",
+          "id": "example/all-paths",
+          "version": "0.49.0",
+          "category": "mixed",
+          "contracts": { "line": "0.49", "range": ">=0.49.0 <0.50.0" },
+          "runtimeAbiRange": ">=0.1.0 <0.2.0",
+          "targets": ["x86_64-unknown-linux-gnu"],
+          "provides": {
+            "patches": [{ "id": "example.all.patch", "path": "/absolute/patch.skenion.json" }],
+            "nodes": [{ "id": "example.all.node", "path": "../nodes/node.json" }],
+            "resources": [{ "id": "example.all.resource", "path": "" }],
+            "help": [{ "id": "example.all.help", "path": "../help/help.skenion.json" }]
+          },
+          "paths": {
+            "patches": ["../patches"],
+            "resources": ["/absolute/resources"],
+            "docs": [""],
+            "tests": ["../tests"]
+          },
+          "checksums": [
+            {
+              "id": "manifest",
+              "path": "/absolute/checksum.sha256",
+              "checksum": {
+                "algorithm": "sha256",
+                "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            }
+          ],
+          "evidence": [
+            {
+              "id": "sbom",
+              "kind": "sbom",
+              "path": "../evidence/sbom.json",
+              "checksum": {
+                "algorithm": "sha256",
+                "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              }
+            }
+          ],
+          "nativeArtifacts": [
+            {
+              "target": "x86_64-unknown-linux-gnu",
+              "path": "/absolute/libexample.so",
+              "entrypoint": "skenion_extension_init",
+              "checksum": {
+                "algorithm": "sha256",
+                "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+              },
+              "evidenceRefs": ["sbom"]
+            }
+          ]
+        }"#;
+        write_package_manifest(&package_dir, body);
+        let manager = RuntimePackageManager::with_package_dirs(vec![package_dir.clone()]);
+
+        let response = manager.list_packages();
+
+        assert!(!response.ok);
+        assert_eq!(response.packages.len(), 1);
+        assert_eq!(
+            response.packages[0].provides.patches[0].path,
+            "<redacted:absolute-path>"
+        );
+        assert_eq!(
+            response.packages[0].provides.nodes[0].path,
+            "../nodes/node.json"
+        );
+        assert_eq!(response.packages[0].provides.resources[0].path, "");
+        assert_eq!(
+            response.packages[0].provides.help[0].path,
+            "../help/help.skenion.json"
+        );
+        let path_diagnostics = response.packages[0]
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "package.path.invalid")
+            .collect::<Vec<_>>();
+        assert!(path_diagnostics.len() >= 11);
+        assert!(path_diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .details
+                .as_ref()
+                .and_then(|details| details.get("pathKind"))
+                == Some(&json!("native-artifact-path"))
+        }));
+        assert_no_absolute_root(&response, &package_dir);
+    }
+
+    #[test]
     fn duplicate_and_overlapping_roots_are_diagnostics() {
         let parent = temp_dir("overlap-parent");
         let child = parent.join("child");
@@ -1118,6 +1263,125 @@ mod tests {
 
         assert!(!response.ok);
         assert!(codes(&response.diagnostics).contains(&"package.registry.duplicate-package"));
+    }
+
+    #[test]
+    fn registry_private_helpers_keep_public_dtos_quiet_and_redacted() {
+        let mut provides = PackageProvidesV01 {
+            patches: vec![provided_ref(
+                "example.patch",
+                "/absolute/patch.skenion.json",
+            )],
+            nodes: vec![provided_ref("example.node", "nodes/node.json")],
+            resources: vec![provided_ref("example.resource", "/absolute/resource.bin")],
+            help: vec![provided_ref("example.help", "help/help.skenion.json")],
+        };
+
+        provides = public_package_provides(provides);
+
+        assert_eq!(provides.patches[0].path, "<redacted:absolute-path>");
+        assert_eq!(provides.nodes[0].path, "nodes/node.json");
+        assert_eq!(provides.resources[0].path, "<redacted:absolute-path>");
+        assert_eq!(provides.help[0].path, "help/help.skenion.json");
+        assert_eq!(package_path_violation(""), "empty");
+        assert_eq!(package_path_violation("/absolute"), "absolute");
+        assert_eq!(package_path_violation("../parent"), "parent-directory");
+        assert_eq!(package_path_violation("relative"), "unknown");
+        assert_eq!(
+            package_root_display_name(3, Path::new("/")),
+            "package-root-3"
+        );
+
+        let info = PackageRootInfo {
+            index: 3,
+            path: PathBuf::from("/redacted/root"),
+            canonical_path: None,
+            display_name: "root-name".to_owned(),
+        };
+        let root_diag = root_diagnostic(
+            PackageDiagnosticSeverityV01::Warning,
+            "package.root.warning",
+            "root warning",
+            &info,
+            Some(RUNTIME_PACKAGE_MANIFEST_FILE),
+            json!("ignored-non-object"),
+        );
+        let package_diag = package_diagnostic(
+            PackageDiagnosticSeverityV01::Info,
+            "package.info",
+            "package info",
+            registry_diagnostic_details(
+                "package-registry-entry",
+                Some(RUNTIME_PACKAGE_MANIFEST_FILE),
+                Some("example/package"),
+                Some("0.49.0"),
+                json!("ignored-non-object"),
+            ),
+        );
+        let package_error = package_diagnostic(
+            PackageDiagnosticSeverityV01::Error,
+            "package.error",
+            "package error",
+            registry_diagnostic_details(
+                "package-registry-entry",
+                Some(RUNTIME_PACKAGE_MANIFEST_FILE),
+                Some("example/package"),
+                Some("0.49.0"),
+                json!({ "reason": "test" }),
+            ),
+        );
+        let response = PackageRegistryListResponseV01 {
+            ok: false,
+            packages: vec![PackageRegistryEntryV01 {
+                package_id: "example/package".to_owned(),
+                version: "0.49.0".to_owned(),
+                category: skenion_contracts::PackageCategoryV01::Patch,
+                source: PackageSourceV01::Workspace,
+                root: PackageRootKindV01::Package,
+                trust: PackageTrustV01::Trusted,
+                contracts: PackageContractsSupportV01 {
+                    line: "0.49".to_owned(),
+                    range: ">=0.49.0 <0.50.0".to_owned(),
+                },
+                runtime_abi_range: None,
+                targets: Vec::new(),
+                manifest_path: RUNTIME_PACKAGE_MANIFEST_FILE.to_owned(),
+                manifest_checksum: PackageChecksumV01 {
+                    algorithm: PackageChecksumAlgorithmV01::Sha256,
+                    value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                },
+                provides,
+                diagnostics: vec![package_diag, package_error],
+            }],
+            diagnostics: vec![root_diag],
+        };
+
+        assert!(has_error(&response));
+        let log_diagnostics = registry_log_diagnostics(&response);
+        assert_eq!(log_diagnostics.len(), 2);
+        assert_eq!(log_diagnostics[0].severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            log_diagnostics[0].code.as_deref(),
+            Some("package.root.warning")
+        );
+        assert_eq!(log_diagnostics[1].severity, DiagnosticSeverity::Error);
+        assert_eq!(log_diagnostics[1].code.as_deref(), Some("package.error"));
+        assert_eq!(
+            log_diagnostics[0]
+                .details
+                .as_ref()
+                .and_then(|details| details.get("packageRoot")),
+            Some(&json!("<redacted>"))
+        );
+    }
+
+    fn provided_ref(id: &str, path: &str) -> PackageProvidedRefV01 {
+        PackageProvidedRefV01 {
+            id: id.to_owned(),
+            path: path.to_owned(),
+            description: Some("provided item".to_owned()),
+        }
     }
 
     #[cfg(unix)]

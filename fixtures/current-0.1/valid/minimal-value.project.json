@@ -7,7 +7,7 @@
     "nodes": [
       {
         "id": "float_1",
-        "kind": "core.float",
+        "kind": "object.core.float",
         "kindVersion": "0.1.0",
         "params": {
           "value": 0.5
@@ -16,18 +16,18 @@
           {
             "id": "in",
             "direction": "input",
-            "type": "control.message.any",
+            "type": "value.core.message",
             "rate": "control",
             "required": false,
             "triggerMode": "trigger",
             "accepts": [
-              "control.number.float",
-              "control.number.int",
-              "control.number.uint",
-              "control.bool",
-              "event.bang"
+              "value.core.float32",
+              "value.core.int32",
+              "value.core.uint32",
+              "value.core.bool",
+              "value.core.bang"
             ],
-            "messageSelectors": {
+            "messageKeys": {
               "accepted": ["bang", "set", "float", "int", "uint", "bool"],
               "silent": ["set"],
               "trigger": ["bang", "float", "int", "uint", "bool"],
@@ -38,7 +38,7 @@
           {
             "id": "cold",
             "direction": "input",
-            "type": "control.number.float",
+            "type": "value.core.float32",
             "rate": "control",
             "required": false,
             "triggerMode": "passive"
@@ -46,7 +46,7 @@
           {
             "id": "value",
             "direction": "output",
-            "type": "control.number.float",
+            "type": "value.core.float32",
             "rate": "control"
           }
         ]
@@ -58,7 +58,7 @@
     {
       "schema": "skenion.node.definition",
       "schemaVersion": "0.1.0",
-      "id": "core.float",
+      "id": "object.core.float",
       "version": "0.1.0",
       "displayName": "Float",
       "category": "Typed Controls",
@@ -66,18 +66,18 @@
         {
           "id": "in",
           "direction": "input",
-          "type": "control.message.any",
+          "type": "value.core.message",
           "rate": "control",
           "required": false,
           "triggerMode": "trigger",
           "accepts": [
-            "control.number.float",
-            "control.number.int",
-            "control.number.uint",
-            "control.bool",
-            "event.bang"
+            "value.core.float32",
+            "value.core.int32",
+            "value.core.uint32",
+            "value.core.bool",
+            "value.core.bang"
           ],
-          "messageSelectors": {
+          "messageKeys": {
             "accepted": ["bang", "set", "float", "int", "uint", "bool"],
             "silent": ["set"],
             "trigger": ["bang", "float", "int", "uint", "bool"],
@@ -88,7 +88,7 @@
         {
           "id": "cold",
           "direction": "input",
-          "type": "control.number.float",
+          "type": "value.core.float32",
           "rate": "control",
           "required": false,
           "triggerMode": "passive"
@@ -96,7 +96,7 @@
         {
           "id": "value",
           "direction": "output",
-          "type": "control.number.float",
+          "type": "value.core.float32",
           "rate": "control"
         }
       ],
@@ -107,7 +107,7 @@
         "persistent": false
       },
       "permissions": [],
-      "capabilities": ["control.number.float.v0.1"]
+      "capabilities": ["value.core.float32.v0.1"]
     }
   ]
 }

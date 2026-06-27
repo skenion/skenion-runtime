@@ -956,7 +956,7 @@ mod tests {
             revision: "2".to_owned(),
             nodes: vec![GraphNode {
                 id: "clear_1".to_owned(),
-                kind: "render.clear-color".to_owned(),
+                kind: "object.core.render.clear-color".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 params: serde_json::Map::new(),
                 ports: Vec::new(),
@@ -970,6 +970,7 @@ mod tests {
             control_revision: if loaded { 7 } else { 0 },
             package_registry_revision: None,
             project,
+            binding_formats: Vec::new(),
             diagnostics: Vec::new(),
             plan: None,
         }
