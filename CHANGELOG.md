@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.48.0](https://github.com/skenion/skenion-runtime/compare/v0.47.10...v0.48.0) (2026-06-27)
+
+
+### Features
+
+* **runtime:** align object and value semantics ([#203](https://github.com/skenion/skenion-runtime/issues/203)) ([6e5f7f4](https://github.com/skenion/skenion-runtime/commit/6e5f7f441e656b6c6e8ec5157ee61dfc47059758)), closes [#199](https://github.com/skenion/skenion-runtime/issues/199)
+
 ## [0.47.10](https://github.com/skenion/skenion-runtime/compare/v0.47.9...v0.47.10) (2026-06-26)
 
 
