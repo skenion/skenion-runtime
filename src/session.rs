@@ -11,13 +11,12 @@ use crate::{
     GraphDocument, GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent,
     GraphNodeCurrent, GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinitionCurrent,
     NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
-    PlanError, PortDirectionCurrent, PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot,
+    PortDirectionCurrent, PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot,
     ProjectDocumentCurrent, ProjectRequestCurrent, RuntimeCollaborationChange,
     RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
     RuntimeControlReadResponse, RuntimeControlReadTarget, RuntimeControlStateResponse,
     RuntimeDiagnostic, RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ViewState,
-    build_execution_plan, build_execution_plan_request_current,
-    project_current::is_payload_identity_node_kind_current,
+    build_execution_plan_request_current, project_current::is_payload_identity_node_kind_current,
     project_document_validation_diagnostics_current, read_graph_param, read_graph_port,
     run_dummy_execution, server::registry_from_nodes, validate_project_request_current,
 };
@@ -25,6 +24,7 @@ use crate::{
 mod binding_formats;
 mod history;
 mod node_catalog;
+mod planning;
 mod projection;
 mod types;
 mod view_state;
@@ -43,6 +43,10 @@ use history::{
     view_state_history_delta_current,
 };
 use node_catalog::RuntimeNodeCatalogCache;
+use planning::{
+    build_session_execution_plan, unresolved_object_diagnostics,
+    unresolved_object_diagnostics_current,
+};
 pub(crate) use projection::{lower_edge_for_execution, lower_graph_node_for_execution};
 #[cfg(test)]
 use projection::{lower_execution_model_for_execution, lower_port_for_execution, remap_edge};
@@ -60,8 +64,6 @@ use view_state::{
     reconcile_view_state_with_graph_current, runtime_owned_view_state, target_supports_view_state,
     unsupported_patch_view_change_diagnostic,
 };
-
-const UNRESOLVED_OBJECT_NODE_KIND: &str = "object.core.unresolved";
 
 pub(crate) struct ApplyObjectNodeCreateCurrentRequest {
     pub(crate) target: GraphTargetRef,
@@ -2958,101 +2960,6 @@ fn operation_diagnostic_to_runtime_diagnostic(
             details: Some(details),
         },
         _ => RuntimeDiagnostic::structured_error(diagnostic.code, diagnostic.message, details),
-    }
-}
-
-fn unresolved_object_diagnostics(graph: &GraphDocument) -> Vec<RuntimeDiagnostic> {
-    graph
-        .nodes
-        .iter()
-        .filter(|node| node.kind == UNRESOLVED_OBJECT_NODE_KIND)
-        .map(|node| {
-            let object_text = node
-                .params
-                .get("objectText")
-                .and_then(|value| value.as_str())
-                .unwrap_or(node.id.as_str());
-            let diagnostic_message = node
-                .params
-                .get("diagnosticMessage")
-                .and_then(|value| value.as_str())
-                .unwrap_or("object text could not be resolved");
-            RuntimeDiagnostic::error(format!(
-                "unresolved object {object_text}: {diagnostic_message}"
-            ))
-        })
-        .collect()
-}
-
-fn unresolved_object_diagnostics_current(graph: &GraphDocumentCurrent) -> Vec<RuntimeDiagnostic> {
-    graph
-        .nodes
-        .iter()
-        .filter(|node| node.kind == UNRESOLVED_OBJECT_NODE_KIND)
-        .map(|node| {
-            let object_text = node
-                .params
-                .get("objectText")
-                .and_then(|value| value.as_str())
-                .unwrap_or(node.id.as_str());
-            let diagnostic_message = node
-                .params
-                .get("diagnosticMessage")
-                .and_then(|value| value.as_str())
-                .unwrap_or("object text could not be resolved");
-            RuntimeDiagnostic::error(format!(
-                "unresolved object {object_text}: {diagnostic_message}"
-            ))
-        })
-        .collect()
-}
-
-fn build_session_execution_plan(
-    graph: &GraphDocument,
-    registry: &NodeRegistry,
-    surface: &'static str,
-) -> Result<ExecutionPlan, Vec<RuntimeDiagnostic>> {
-    build_execution_plan(graph, registry).map_err(|error| {
-        let mut diagnostics = plan_error_diagnostics(error, surface, graph);
-        diagnostics.extend(unresolved_object_diagnostics(graph));
-        diagnostics
-    })
-}
-
-fn plan_error_diagnostics(
-    error: PlanError,
-    surface: &'static str,
-    graph: &GraphDocument,
-) -> Vec<RuntimeDiagnostic> {
-    let details = || {
-        json!({
-            "surface": surface,
-            "graphId": graph.id,
-            "graphRevision": graph.revision,
-        })
-    };
-    match error {
-        PlanError::InvalidProject(report) => report
-            .errors()
-            .iter()
-            .map(|error| {
-                RuntimeDiagnostic::structured_error(
-                    "session.plan.invalid-project",
-                    error.message.clone(),
-                    details(),
-                )
-            })
-            .collect(),
-        PlanError::Cycle { nodes } => vec![RuntimeDiagnostic::structured_error(
-            "session.plan.cycle",
-            format!("cycle detected: {nodes}"),
-            json!({
-                "surface": surface,
-                "graphId": graph.id,
-                "graphRevision": graph.revision,
-                "nodes": nodes,
-            }),
-        )],
     }
 }
 
