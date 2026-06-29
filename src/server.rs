@@ -21,11 +21,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use skenion_contracts::{
-    CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
-};
+use serde::Serialize;
 use tokio_stream::{
     Stream, StreamExt,
     wrappers::{BroadcastStream, IntervalStream, errors::BroadcastStreamRecvError},
@@ -33,27 +29,30 @@ use tokio_stream::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    CURRENT_SCHEMA_VERSION, DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse,
-    NodeDefinition, NodeRegistry, PackageRegistryListResponseV01, PreviewDocument,
-    ProjectDocumentCurrent, ProjectRequestCurrent, RunProjectRequestCurrent,
+    DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, NodeDefinition, NodeRegistry,
+    PackageRegistryListResponseV01, PreviewDocument, ProjectRequestCurrent,
     RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
-    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeExtensionRegistrySnapshot,
-    RuntimeIoDeviceListResponse, RuntimeIoDeviceManager, RuntimeLogSnapshotResponse,
-    RuntimeLogStore, RuntimePackageManager, RuntimePackageRegistrySnapshot,
-    RuntimePreviewStartRequest, RuntimeSessionEventKind, RuntimeSessionInfoResponse,
-    RuntimeSessionLoadModeCurrent, RuntimeSessionLoadRequestCurrent, RuntimeTelemetrySnapshot,
-    SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource,
+    RuntimeDiagnostic, RuntimeExtensionListResponse, RuntimeExtensionManager,
+    RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
+    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimePackageManager,
+    RuntimePackageRegistrySnapshot, RuntimePreviewStartRequest, RuntimeSessionEventKind,
+    RuntimeSessionInfoResponse, RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic,
+    ShaderDiagnosticPhase, ShaderDiagnosticSource,
     asset_store::{
         RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse,
         RuntimeAssetStore, SharedRuntimeAssetStore, store_asset,
     },
     build_execution_plan_request_current, build_execution_plan_run_request_current,
     generated_shader_response_from_preview_document, http_live_disabled,
-    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
     realtime::{handle_runtime_realtime_socket, node_catalog_snapshot_for_record},
+    request_payload::{
+        ProjectPayload, RunProjectPayload, RuntimeSessionLoadPayload, decode_project_payload,
+        decode_run_project_payload, decode_runtime_session_load_request_payload,
+        validate_session_load_precondition,
+    },
     run_dummy_execution,
+    runtime_info::{HealthResponse, RuntimeInfoResponse, health_response, runtime_info_response},
     runtime_time::created_at_now,
-    schema_version_diagnostic,
     session_registry::{RuntimeSessionRecord, RuntimeSessionRegistry, publish_session_event},
     sidecar::{
         RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
@@ -63,35 +62,9 @@ use crate::{
     validate_project_request_current,
 };
 
-pub const RUNTIME_API_VERSION: &str = "0.1.0";
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 3761;
 const MAX_ASSET_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
-const RUNTIME_SESSION_LOAD_REQUEST_SCHEMA: &str = "skenion.runtime.session-load-request";
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HealthResponse {
-    pub ok: bool,
-    pub service: &'static str,
-    pub version: &'static str,
-    pub api_version: &'static str,
-    pub contracts_built_against_version: &'static str,
-    pub supported_contracts_line: &'static str,
-    pub supported_contracts_range: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeInfoResponse {
-    pub name: &'static str,
-    pub version: &'static str,
-    pub api_version: &'static str,
-    pub contracts_built_against_version: &'static str,
-    pub supported_contracts_line: &'static str,
-    pub supported_contracts_range: &'static str,
-    pub capabilities: Vec<&'static str>,
-}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,25 +73,6 @@ pub struct RuntimeApiResponse {
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
     pub report: Option<DummyExecutionReport>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeDiagnostic {
-    pub severity: DiagnosticSeverity,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-    Info,
 }
 
 #[derive(Clone)]
@@ -303,86 +257,11 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
 }
 
 async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        ok: true,
-        service: "skenion-runtime",
-        version: env!("CARGO_PKG_VERSION"),
-        api_version: RUNTIME_API_VERSION,
-        contracts_built_against_version: CONTRACTS_PACKAGE_VERSION,
-        supported_contracts_line: CONTRACTS_COMPATIBILITY_LINE,
-        supported_contracts_range: CONTRACTS_COMPATIBILITY_RANGE,
-    })
+    Json(health_response())
 }
 
 async fn runtime_info() -> Json<RuntimeInfoResponse> {
-    Json(RuntimeInfoResponse {
-        name: "skenion-runtime",
-        version: env!("CARGO_PKG_VERSION"),
-        api_version: RUNTIME_API_VERSION,
-        contracts_built_against_version: CONTRACTS_PACKAGE_VERSION,
-        supported_contracts_line: CONTRACTS_COMPATIBILITY_LINE,
-        supported_contracts_range: CONTRACTS_COMPATIBILITY_RANGE,
-        capabilities: vec![
-            "project.validate",
-            "project.validate.v0.1",
-            "project.plan",
-            "project.plan.v0.1",
-            "dummy.run",
-            "session.load",
-            "session.load.v0.1",
-            "session.realtime.websocket",
-            "session.realtime.v0",
-            "session.project",
-            "session.project.v0.1",
-            "session.nodeCatalog",
-            "session.nodeCatalog.v0.1",
-            "session.nodeCatalog.realtime.v0.1",
-            "session.node.resolve",
-            "session.node.create",
-            "session.node.replace",
-            "session.node.delete",
-            "session.node.update",
-            "session.node.input",
-            "session.graph.changeSet.realtime.v0.1",
-            "session.graph.pasteFragment.realtime.v0.1",
-            "session.history.realtime.v0.1",
-            "session.collaboration.selection.realtime.v0.1",
-            "session.control.nodeInput.realtime.v0.1",
-            "session.validate",
-            "session.plan",
-            "session.run",
-            "session.history",
-            "session.clear",
-            "session.addressing",
-            "session.info",
-            "session.control.state",
-            "session.control.read",
-            "session.control.channels",
-            "session.control.messages",
-            "session.preview.controlState",
-            "session.preview.status",
-            "session.preview.start",
-            "session.preview.stop",
-            "session.preview.restart",
-            "session.render.generatedShader",
-            "assets.import",
-            "assets.list",
-            "assets.get",
-            "session.telemetry",
-            "session.telemetry.stream",
-            "runtime.logs",
-            "runtime.logs.stream",
-            "runtime.extensions",
-            "runtime.packages",
-            "runtime.profile.localManaged",
-            "runtime.profile.localShared",
-            "runtime.profile.remote",
-            "runtime.sidecar.startup",
-            "runtime.sidecar.health",
-            "runtime.sidecar.shutdown",
-            "io.devices",
-        ],
-    })
+    Json(runtime_info_response())
 }
 
 async fn sidecar_startup(
@@ -1206,484 +1085,6 @@ impl RuntimeApiResponse {
     }
 }
 
-impl RuntimeDiagnostic {
-    pub(crate) fn error(message: impl Into<String>) -> Self {
-        Self {
-            severity: DiagnosticSeverity::Error,
-            message: message.into(),
-            code: None,
-            details: None,
-        }
-    }
-
-    pub(crate) fn warning(message: impl Into<String>) -> Self {
-        Self {
-            severity: DiagnosticSeverity::Warning,
-            message: message.into(),
-            code: None,
-            details: None,
-        }
-    }
-
-    pub(crate) fn structured_error(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        details: serde_json::Value,
-    ) -> Self {
-        Self {
-            severity: DiagnosticSeverity::Error,
-            message: message.into(),
-            code: Some(code.into()),
-            details: Some(details),
-        }
-    }
-
-    pub(crate) fn structured_warning(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        details: serde_json::Value,
-    ) -> Self {
-        Self {
-            severity: DiagnosticSeverity::Warning,
-            message: message.into(),
-            code: Some(code.into()),
-            details: Some(details),
-        }
-    }
-}
-
-enum ProjectPayload {
-    Current(Box<ProjectRequestCurrent>),
-}
-
-enum RunProjectPayload {
-    Current(Box<RunProjectRequestCurrent>),
-}
-
-enum RuntimeSessionLoadPayload {
-    Current(Box<RuntimeSessionLoadRequestCurrent>),
-}
-
-fn decode_runtime_session_load_request_payload(
-    value: serde_json::Value,
-) -> Result<RuntimeSessionLoadPayload, Vec<RuntimeDiagnostic>> {
-    if is_project_document(&value) {
-        return Err(vec![RuntimeDiagnostic::structured_error(
-            "runtime.session-load.raw-project-rejected",
-            "Runtime session load requires a skenion.runtime.session-load-request envelope; raw ProjectDocument bodies are no longer accepted.",
-            json!({
-                "schema": "skenion.runtime.session-load-request",
-                "schemaVersion": CURRENT_SCHEMA_VERSION,
-                "replacement": {
-                    "schema": RUNTIME_SESSION_LOAD_REQUEST_SCHEMA,
-                    "fields": ["project", "mode", "precondition"]
-                }
-            }),
-        )]);
-    }
-
-    match runtime_session_load_request_schema_version(&value).as_deref() {
-        Some(CURRENT_SCHEMA_VERSION) => decode_runtime_session_load_request_current(value)
-            .map(Box::new)
-            .map(RuntimeSessionLoadPayload::Current),
-        received => Err(vec![runtime_session_load_schema_version_diagnostic(
-            &value, received,
-        )]),
-    }
-}
-
-fn decode_runtime_session_load_request_current(
-    value: serde_json::Value,
-) -> Result<RuntimeSessionLoadRequestCurrent, Vec<RuntimeDiagnostic>> {
-    if let Some(project) = value.get("project") {
-        reject_top_level_nodes_current(project)?;
-        let schema_diagnostics = project_document_payload_schema_diagnostics(project);
-        if !schema_diagnostics.is_empty() {
-            return Err(schema_diagnostics);
-        }
-    }
-    let request = serde_json::from_value::<RuntimeSessionLoadRequestCurrent>(value)
-        .map_err(invalid_runtime_session_load_payload)?;
-    if let Err(report) = skenion_contracts::validate_runtime_session_load_request_v01(&request) {
-        return Err(runtime_session_load_validation_diagnostics_current(
-            &request, &report,
-        ));
-    }
-    Ok(request)
-}
-
-fn validate_session_load_precondition(
-    session: &crate::RuntimeSession,
-    request: &RuntimeSessionLoadRequestCurrent,
-) -> Result<(), Vec<RuntimeDiagnostic>> {
-    let snapshot = session.snapshot();
-    match &request.mode {
-        RuntimeSessionLoadModeCurrent::ForceReplace => Ok(()),
-        RuntimeSessionLoadModeCurrent::LoadIfEmpty if !snapshot.loaded() => Ok(()),
-        RuntimeSessionLoadModeCurrent::LoadIfEmpty => Err(vec![session_load_conflict_diagnostic(
-            request,
-            &snapshot,
-            "loadIfEmpty requires an empty Runtime session",
-            Vec::new(),
-        )]),
-        RuntimeSessionLoadModeCurrent::ReplaceIfMatch => {
-            let Some(current_project) = snapshot.project.as_ref() else {
-                return Err(vec![session_load_conflict_diagnostic(
-                    request,
-                    &snapshot,
-                    "replaceIfMatch requires an existing Runtime session project",
-                    Vec::new(),
-                )]);
-            };
-            let Some(precondition) = request.precondition.as_ref() else {
-                return Err(vec![RuntimeDiagnostic::structured_error(
-                    "runtime.session-load.precondition-required",
-                    "replaceIfMatch requires a precondition",
-                    session_load_request_details(request, &snapshot, Vec::new()),
-                )]);
-            };
-
-            let mut mismatches = Vec::new();
-            if let Some(expected) = &precondition.document_id
-                && expected != &current_project.document_id
-            {
-                mismatches.push(json!({
-                    "field": "documentId",
-                    "expected": expected,
-                    "actual": current_project.document_id,
-                }));
-            }
-            if let Some(expected) = &precondition.session_revision {
-                let actual = snapshot.session_revision.to_string();
-                if expected != &actual {
-                    mismatches.push(json!({
-                        "field": "sessionRevision",
-                        "expected": expected,
-                        "actual": actual,
-                    }));
-                }
-            }
-            if let Some(expected) = &precondition.graph_revision {
-                let actual = current_project.graph.revision.as_str();
-                if expected != actual {
-                    mismatches.push(json!({
-                        "field": "graphRevision",
-                        "expected": expected,
-                        "actual": actual,
-                    }));
-                }
-            }
-
-            if mismatches.is_empty() {
-                Ok(())
-            } else {
-                Err(vec![session_load_conflict_diagnostic(
-                    request,
-                    &snapshot,
-                    "replaceIfMatch precondition does not match the current Runtime session",
-                    mismatches,
-                )])
-            }
-        }
-    }
-}
-
-fn runtime_session_load_request_schema_version(value: &serde_json::Value) -> Option<String> {
-    if value.get("schema").and_then(|schema| schema.as_str())
-        != Some(RUNTIME_SESSION_LOAD_REQUEST_SCHEMA)
-    {
-        return None;
-    }
-
-    value
-        .get("schemaVersion")
-        .and_then(|version| version.as_str())
-        .map(str::to_owned)
-}
-
-fn runtime_session_load_schema_version_diagnostic(
-    value: &serde_json::Value,
-    received_schema_version: Option<&str>,
-) -> RuntimeDiagnostic {
-    let received_schema = value.get("schema").and_then(|schema| schema.as_str());
-    if received_schema != Some(RUNTIME_SESSION_LOAD_REQUEST_SCHEMA) {
-        return RuntimeDiagnostic::structured_error(
-            "runtime.session-load.invalid-schema",
-            "Runtime session load requires a skenion.runtime.session-load-request envelope",
-            json!({
-                "expectedSchema": RUNTIME_SESSION_LOAD_REQUEST_SCHEMA,
-                "receivedSchema": received_schema,
-                "expectedSchemaVersion": CURRENT_SCHEMA_VERSION,
-                "receivedSchemaVersion": received_schema_version,
-            }),
-        );
-    }
-
-    match received_schema_version {
-        Some(version) => RuntimeDiagnostic::structured_error(
-            "runtime.session-load.unsupported-schema-version",
-            format!("unsupported Runtime session load schemaVersion: {version}"),
-            json!({
-                "expectedSchema": RUNTIME_SESSION_LOAD_REQUEST_SCHEMA,
-                "expectedSchemaVersion": CURRENT_SCHEMA_VERSION,
-                "receivedSchemaVersion": version,
-            }),
-        ),
-        None => RuntimeDiagnostic::structured_error(
-            "runtime.session-load.missing-schema-version",
-            "missing schemaVersion in Runtime session load request",
-            json!({
-                "expectedSchema": RUNTIME_SESSION_LOAD_REQUEST_SCHEMA,
-                "expectedSchemaVersion": CURRENT_SCHEMA_VERSION,
-                "receivedSchemaVersion": serde_json::Value::Null,
-            }),
-        ),
-    }
-}
-
-fn runtime_session_load_validation_diagnostics_current(
-    request: &RuntimeSessionLoadRequestCurrent,
-    report: &skenion_contracts::ValidationReportV01,
-) -> Vec<RuntimeDiagnostic> {
-    report
-        .errors()
-        .iter()
-        .map(|error| {
-            RuntimeDiagnostic::structured_error(
-                "runtime.session-load.invalid-0.1",
-                error.message.clone(),
-                json!({
-                    "schema": RUNTIME_SESSION_LOAD_REQUEST_SCHEMA,
-                    "schemaVersion": request.schema_version,
-                    "mode": runtime_session_load_mode_label(&request.mode),
-                    "projectId": request.project.id,
-                    "documentId": request.project.document_id,
-                }),
-            )
-        })
-        .collect()
-}
-
-fn invalid_runtime_session_load_payload(error: serde_json::Error) -> Vec<RuntimeDiagnostic> {
-    vec![RuntimeDiagnostic::structured_error(
-        "runtime.session-load.invalid-payload",
-        format!("invalid Runtime session load request: {error}"),
-        json!({
-            "schema": RUNTIME_SESSION_LOAD_REQUEST_SCHEMA,
-            "schemaVersion": CURRENT_SCHEMA_VERSION,
-        }),
-    )]
-}
-
-fn session_load_conflict_diagnostic(
-    request: &RuntimeSessionLoadRequestCurrent,
-    snapshot: &crate::RuntimeSessionSnapshot,
-    message: &'static str,
-    mismatches: Vec<serde_json::Value>,
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
-        "runtime.session-load.conflict",
-        message,
-        session_load_request_details(request, snapshot, mismatches),
-    )
-}
-
-fn session_load_request_details(
-    request: &RuntimeSessionLoadRequestCurrent,
-    snapshot: &crate::RuntimeSessionSnapshot,
-    mismatches: Vec<serde_json::Value>,
-) -> serde_json::Value {
-    let current = snapshot.project.as_ref().map(|project| {
-        json!({
-            "documentId": project.document_id,
-            "projectId": project.id,
-            "projectRevision": project.revision,
-            "graphId": project.graph.id,
-            "graphRevision": project.graph.revision,
-            "sessionRevision": snapshot.session_revision.to_string(),
-        })
-    });
-
-    json!({
-        "requested": {
-            "mode": runtime_session_load_mode_label(&request.mode),
-            "documentId": request.project.document_id,
-            "projectId": request.project.id,
-            "projectRevision": request.project.revision,
-            "graphId": request.project.graph.id,
-            "graphRevision": request.project.graph.revision,
-            "precondition": request.precondition,
-        },
-        "current": current,
-        "mismatches": mismatches,
-    })
-}
-
-fn runtime_session_load_mode_label(mode: &RuntimeSessionLoadModeCurrent) -> &'static str {
-    match mode {
-        RuntimeSessionLoadModeCurrent::LoadIfEmpty => "loadIfEmpty",
-        RuntimeSessionLoadModeCurrent::ReplaceIfMatch => "replaceIfMatch",
-        RuntimeSessionLoadModeCurrent::ForceReplace => "forceReplace",
-    }
-}
-
-fn decode_project_payload(
-    value: serde_json::Value,
-) -> Result<ProjectPayload, Vec<RuntimeDiagnostic>> {
-    match project_schema_version(&value).as_deref() {
-        Some(CURRENT_SCHEMA_VERSION) => decode_project_payload_current(value)
-            .map(Box::new)
-            .map(ProjectPayload::Current),
-        received => Err(vec![
-            schema_version_diagnostic(project_schema_surface(&value), received)
-                .expect("current schema version should have decoded as current 0.1"),
-        ]),
-    }
-}
-
-fn decode_run_project_payload(
-    value: serde_json::Value,
-) -> Result<RunProjectPayload, Vec<RuntimeDiagnostic>> {
-    match project_schema_version(&value).as_deref() {
-        Some(CURRENT_SCHEMA_VERSION) => decode_run_project_payload_current(value)
-            .map(Box::new)
-            .map(RunProjectPayload::Current),
-        received => Err(vec![
-            schema_version_diagnostic(project_schema_surface(&value), received)
-                .expect("current schema version should have decoded as current 0.1"),
-        ]),
-    }
-}
-
-fn decode_project_payload_current(
-    value: serde_json::Value,
-) -> Result<ProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
-    if is_project_document_current(&value) {
-        return decode_project_document_request_current(value);
-    }
-
-    serde_json::from_value(value).map_err(invalid_project_payload)
-}
-
-fn decode_run_project_payload_current(
-    value: serde_json::Value,
-) -> Result<RunProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
-    if is_project_document_current(&value) {
-        return decode_run_project_document_request_current(value);
-    }
-
-    serde_json::from_value(value).map_err(invalid_project_payload)
-}
-
-fn decode_project_document_request_current(
-    mut value: serde_json::Value,
-) -> Result<ProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
-    reject_top_level_nodes_current(&value)?;
-    let _ = take_frames_current(&mut value)?;
-    let document = decode_project_document_current(value)?;
-    Ok(ProjectRequestCurrent::from_project_document(
-        document,
-        Vec::new(),
-    ))
-}
-
-fn decode_run_project_document_request_current(
-    mut value: serde_json::Value,
-) -> Result<RunProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
-    reject_top_level_nodes_current(&value)?;
-    let frames = take_frames_current(&mut value)?;
-    let document = decode_project_document_current(value)?;
-    Ok(RunProjectRequestCurrent::from_project_document(
-        document,
-        Vec::new(),
-        frames,
-    ))
-}
-
-fn decode_project_document_current(
-    value: serde_json::Value,
-) -> Result<ProjectDocumentCurrent, Vec<RuntimeDiagnostic>> {
-    let schema_diagnostics = project_document_payload_schema_diagnostics(&value);
-    if !schema_diagnostics.is_empty() {
-        return Err(schema_diagnostics);
-    }
-    let document =
-        serde_json::from_value::<ProjectDocumentCurrent>(value).map_err(invalid_project_payload)?;
-    if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
-        return Err(project_document_validation_diagnostics_current(
-            &document, &report,
-        ));
-    }
-    Ok(document)
-}
-
-fn reject_top_level_nodes_current(value: &serde_json::Value) -> Result<(), Vec<RuntimeDiagnostic>> {
-    if value.get("nodes").is_none() {
-        return Ok(());
-    }
-
-    Err(vec![RuntimeDiagnostic::structured_error(
-        "project.document.top-level-nodes-rejected",
-        "ProjectDocument payloads must not include top-level nodes; node definitions must come from Runtime registry/catalog sources or an explicit legacy ProjectRequest wrapper",
-        serde_json::json!({
-            "surface": "project",
-            "field": "nodes",
-            "schema": "skenion.project",
-        }),
-    )])
-}
-
-fn take_frames_current(
-    value: &mut serde_json::Value,
-) -> Result<Option<usize>, Vec<RuntimeDiagnostic>> {
-    let frames = value
-        .as_object_mut()
-        .and_then(|object| object.remove("frames"))
-        .unwrap_or(serde_json::Value::Null);
-    serde_json::from_value(frames).map_err(invalid_project_payload)
-}
-
-fn project_schema_version(value: &serde_json::Value) -> Option<String> {
-    if is_project_document(value) {
-        return value
-            .get("schemaVersion")
-            .and_then(|version| version.as_str())
-            .map(str::to_owned);
-    }
-
-    value
-        .get("graph")
-        .and_then(|graph| graph.get("schemaVersion"))
-        .and_then(|version| version.as_str())
-        .map(str::to_owned)
-}
-
-fn is_project_document_current(value: &serde_json::Value) -> bool {
-    is_project_document(value)
-        && value
-            .get("schemaVersion")
-            .and_then(|version| version.as_str())
-            == Some(CURRENT_SCHEMA_VERSION)
-}
-
-fn is_project_document(value: &serde_json::Value) -> bool {
-    value.get("schema").and_then(|schema| schema.as_str()) == Some("skenion.project")
-}
-
-fn project_schema_surface(value: &serde_json::Value) -> &'static str {
-    if is_project_document(value) {
-        "project"
-    } else {
-        "graph"
-    }
-}
-
-fn invalid_project_payload(error: serde_json::Error) -> Vec<RuntimeDiagnostic> {
-    vec![RuntimeDiagnostic::error(format!(
-        "invalid project request: {error}"
-    ))]
-}
-
 pub(crate) fn registry_from_nodes(
     nodes: Vec<NodeDefinition>,
 ) -> Result<NodeRegistry, Vec<RuntimeDiagnostic>> {
@@ -1746,10 +1147,13 @@ mod tests {
         },
     };
     use serde_json::{Value, json};
+    use skenion_contracts::{
+        CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
+    };
     use tower::ServiceExt;
 
     use crate::{
-        RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,
+        RUNTIME_API_VERSION, RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,
         asset_store::{asset_kind, store_asset_with_id},
         io_device_manager::RuntimeIoDeviceRegistry,
         session_registry::DEFAULT_SESSION_ID,

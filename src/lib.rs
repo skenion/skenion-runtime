@@ -6,6 +6,7 @@ mod contract;
 mod control_state;
 mod control_value;
 mod conversion;
+mod diagnostic;
 mod dsp;
 mod extension_manager;
 mod http_live_disabled;
@@ -25,6 +26,8 @@ mod realtime;
 #[allow(dead_code)]
 mod registry;
 mod render;
+mod request_payload;
+mod runtime_info;
 mod runtime_time;
 mod runtime_transport;
 mod scheduler;
@@ -92,6 +95,7 @@ pub use control_state::{
 pub(crate) use control_state::{read_graph_param, read_graph_port};
 pub use control_value::{ControlMessage, ControlValue};
 pub use conversion::{convert_control_value_to_data_kind, convert_control_value_to_stored};
+pub use diagnostic::{DiagnosticSeverity, RuntimeDiagnostic};
 pub use dsp::{
     AudioDspBlockReport, AudioDspBuffer, AudioDspControlInput, AudioDspPlan, AudioDspPlanEdge,
     AudioDspPlanError, AudioDspPlanNode, AudioDspPlanOptions, AudioDspRenderedBuffer,
@@ -153,6 +157,7 @@ pub use render::{
     ShaderLanguage, ShaderUniformBinding, ShaderUniformValue, run_render_preview_document_file,
 };
 pub(crate) use render::{PreviewDocument, generated_shader_response_from_preview_document};
+pub use runtime_info::{HealthResponse, RUNTIME_API_VERSION, RuntimeInfoResponse};
 pub use runtime_transport::{
     IdRemapResult, PasteGraphFragmentResponse, RuntimeCollaborationAck,
     RuntimeCollaborationAuthSubject, RuntimeCollaborationAuthSubjectKind,
@@ -194,8 +199,7 @@ pub use scheduler::{
 };
 pub use serve::{ServeRuntimeOptions, serve_runtime, serve_runtime_with_options};
 pub use server::{
-    DEFAULT_HOST, DEFAULT_PORT, DiagnosticSeverity, HealthResponse, RUNTIME_API_VERSION,
-    RuntimeApiResponse, RuntimeDiagnostic, RuntimeInfoResponse, RuntimeServerState, runtime_router,
+    DEFAULT_HOST, DEFAULT_PORT, RuntimeApiResponse, RuntimeServerState, runtime_router,
     runtime_router_with_state,
 };
 pub use session::{

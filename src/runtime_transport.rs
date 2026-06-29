@@ -8,7 +8,7 @@ use skenion_contracts::{
     ProjectDocumentV01, validate_paste_graph_fragment_request, validate_project_document_v01,
 };
 
-use crate::{project_current::is_payload_identity_node_kind_current, server::RuntimeDiagnostic};
+use crate::{RuntimeDiagnostic, project_current::is_payload_identity_node_kind_current};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeValidationError {
