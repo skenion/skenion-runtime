@@ -26,6 +26,7 @@ use crate::{
         unresolved_object_text_node_definition_v01,
     },
     runtime_time::created_at_now,
+    session::{ApplyObjectNodeCreateCurrentRequest, ApplyObjectNodeReplaceCurrentRequest},
 };
 #[cfg(test)]
 use crate::{EndpointBindingValueFormat, ValueOccurrenceHeader};
@@ -554,6 +555,16 @@ struct RememberAckInput<'a> {
 struct RealtimeEventPosition<'a> {
     sequence: u64,
     cursor: &'a str,
+}
+
+struct GraphEventContext<'a> {
+    record: &'a RuntimeSessionRecord,
+    identity: &'a RuntimeRealtimeConnectionIdentity,
+    frame: &'a RuntimeRealtimeEnvelope,
+    command: &'a GraphCommandPayload,
+    response: &'a RuntimePatchResponse,
+    node_result: Option<&'a Value>,
+    position: RealtimeEventPosition<'a>,
 }
 
 pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket: WebSocket) {
@@ -1193,27 +1204,18 @@ fn handle_graph_command(
         sequence,
         cursor: &cursor,
     };
-    let ack = graph_ack(
+    let graph_context = GraphEventContext {
         record,
         identity,
-        &frame,
-        &payload,
-        &response,
-        node_result.as_ref(),
+        frame: &frame,
+        command: &payload,
+        response: &response,
+        node_result: node_result.as_ref(),
         position,
-        false,
-    );
+    };
+    let ack = graph_ack(&graph_context, false);
     let event = if response.applied {
-        Some(graph_applied_event(
-            record,
-            identity,
-            &frame,
-            &payload,
-            &response,
-            node_result.as_ref(),
-            sequence,
-            cursor.clone(),
-        ))
+        Some(graph_applied_event(&graph_context))
     } else if let Some(mut control_emission) = control_emission {
         if control_emission.response.ok {
             control_emitted_event(
@@ -1646,7 +1648,7 @@ fn apply_object_resolve_graph_command(
     let resolution = resolve_object_command_text(session, object_text);
     let node_result = node_command_result(payload, Some(&resolution), None, Vec::new(), None);
     if let Err(response) = validate_object_command_target(session, payload, true) {
-        return GraphCommandOutcome::with_node_result(response, node_result);
+        return GraphCommandOutcome::with_node_result(*response, node_result);
     }
 
     GraphCommandOutcome::with_node_result(
@@ -1689,7 +1691,7 @@ fn apply_object_create_graph_command(
     );
     let target = match validate_object_command_target(session, payload, false) {
         Ok(target) => target,
-        Err(response) => return GraphCommandOutcome::with_node_result(response, node_result),
+        Err(response) => return GraphCommandOutcome::with_node_result(*response, node_result),
     };
     let node_id = payload
         .requested_node_id
@@ -1720,18 +1722,22 @@ fn apply_object_create_graph_command(
         );
     };
 
-    let response = session.apply_object_node_create_current(
+    let response = session.apply_object_node_create_current(ApplyObjectNodeCreateCurrentRequest {
         target,
         node,
-        payload.view.clone(),
-        Some(definition),
-        None,
-        Some(identity.client_id.clone()),
-        payload
-            .description
-            .clone()
-            .or_else(|| Some(format!("Realtime graph command {}", frame.message_id))),
-    );
+        view: payload.view.clone(),
+        definition: Some(definition),
+        mutation: RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: None,
+            actor_id: None,
+            client_id: Some(identity.client_id.clone()),
+            description: payload
+                .description
+                .clone()
+                .or_else(|| Some(format!("Realtime graph command {}", frame.message_id))),
+        },
+    });
     let node_result =
         node_command_result(payload, Some(&resolution), Some(&node_id), Vec::new(), None);
     GraphCommandOutcome::with_node_result(response, node_result)
@@ -1765,7 +1771,7 @@ fn apply_object_replace_graph_command(
     );
     let target = match validate_object_command_target(session, payload, false) {
         Ok(target) => target,
-        Err(response) => return GraphCommandOutcome::with_node_result(response, node_result),
+        Err(response) => return GraphCommandOutcome::with_node_result(*response, node_result),
     };
     let Some(node_id) = node_id else {
         return GraphCommandOutcome::with_node_result(
@@ -1805,19 +1811,24 @@ fn apply_object_replace_graph_command(
         );
     };
 
-    let (response, dropped_edge_ids) = session.apply_object_node_replace_current(
-        target,
-        node,
-        payload.view.clone(),
-        Some(definition),
-        payload.interface_incident_edge_policy,
-        None,
-        Some(identity.client_id.clone()),
-        payload
-            .description
-            .clone()
-            .or_else(|| Some(format!("Realtime graph command {}", frame.message_id))),
-    );
+    let (response, dropped_edge_ids) =
+        session.apply_object_node_replace_current(ApplyObjectNodeReplaceCurrentRequest {
+            target,
+            node,
+            view: payload.view.clone(),
+            definition: Some(definition),
+            interface_incident_edge_policy: payload.interface_incident_edge_policy,
+            mutation: RuntimeMutationRequest {
+                graph_patch: None,
+                view_patch: None,
+                actor_id: None,
+                client_id: Some(identity.client_id.clone()),
+                description: payload
+                    .description
+                    .clone()
+                    .or_else(|| Some(format!("Realtime graph command {}", frame.message_id))),
+            },
+        });
     let node_result = node_command_result(
         payload,
         Some(&resolution),
@@ -1838,7 +1849,7 @@ fn apply_node_delete_graph_command(
     let node_result = node_command_result(payload, None, node_id.as_deref(), Vec::new(), None);
     let target = match validate_object_command_target(session, payload, false) {
         Ok(target) => target,
-        Err(response) => return GraphCommandOutcome::with_node_result(response, node_result),
+        Err(response) => return GraphCommandOutcome::with_node_result(*response, node_result),
     };
     let Some(node_id) = node_id else {
         return GraphCommandOutcome::with_node_result(
@@ -1879,7 +1890,7 @@ fn apply_node_update_graph_command(
     let node_result = node_command_result(payload, None, node_id.as_deref(), Vec::new(), None);
     let target = match validate_object_command_target(session, payload, false) {
         Ok(target) => target,
-        Err(response) => return GraphCommandOutcome::with_node_result(response, node_result),
+        Err(response) => return GraphCommandOutcome::with_node_result(*response, node_result),
     };
     let Some(node_id) = node_id else {
         return GraphCommandOutcome::with_node_result(
@@ -1934,9 +1945,9 @@ fn validate_object_command_target(
     session: &crate::RuntimeSession,
     payload: &GraphCommandPayload,
     require_existing: bool,
-) -> Result<GraphTargetRef, RuntimePatchResponse> {
+) -> Result<GraphTargetRef, Box<RuntimePatchResponse>> {
     let Some(target) = payload.target.clone() else {
-        return Err(graph_command_rejected_response(
+        return Err(Box::new(graph_command_rejected_response(
             session,
             false,
             RuntimeDiagnostic::structured_error(
@@ -1947,12 +1958,12 @@ fn validate_object_command_target(
                 ),
                 json!({ "commandKind": payload.kind }),
             ),
-        ));
+        )));
     };
     if let Some(base_graph_revision) = payload.base_graph_revision.as_deref()
         && base_graph_revision != target.base_revision
     {
-        return Err(graph_command_rejected_response(
+        return Err(Box::new(graph_command_rejected_response(
             session,
             true,
             RuntimeDiagnostic::structured_error(
@@ -1968,11 +1979,11 @@ fn validate_object_command_target(
                     "commandKind": payload.kind,
                 }),
             ),
-        ));
+        )));
     }
     match session.target_revision_current(&target) {
         Some(actual_revision) if actual_revision != target.base_revision => {
-            Err(graph_command_rejected_response(
+            Err(Box::new(graph_command_rejected_response(
                 session,
                 true,
                 RuntimeDiagnostic::structured_error(
@@ -1988,10 +1999,10 @@ fn validate_object_command_target(
                         "commandKind": payload.kind,
                     }),
                 ),
-            ))
+            )))
         }
         Some(_) => Ok(target),
-        None if require_existing => Err(graph_command_rejected_response(
+        None if require_existing => Err(Box::new(graph_command_rejected_response(
             session,
             false,
             RuntimeDiagnostic::structured_error(
@@ -1999,7 +2010,7 @@ fn validate_object_command_target(
                 "node target graph is not available in the active current 0.1 project",
                 json!({ "target": target, "commandKind": payload.kind }),
             ),
-        )),
+        ))),
         None => Ok(target),
     }
 }
@@ -2431,49 +2442,40 @@ fn control_ack(
     )
 }
 
-fn graph_ack(
-    record: &RuntimeSessionRecord,
-    identity: &RuntimeRealtimeConnectionIdentity,
-    frame: &RuntimeRealtimeEnvelope,
-    command: &GraphCommandPayload,
-    response: &RuntimePatchResponse,
-    node_result: Option<&Value>,
-    position: RealtimeEventPosition<'_>,
-    cached: bool,
-) -> RuntimeRealtimeEnvelope {
+fn graph_ack(context: &GraphEventContext<'_>, cached: bool) -> RuntimeRealtimeEnvelope {
     graph_ack_with_payload(
-        record,
-        identity,
-        frame,
+        context.record,
+        context.identity,
+        context.frame,
         json!({
-            "status": if response.ok { "accepted" } else if response.conflict { "conflict" } else { "rejected" },
-            "accepted": response.ok,
-            "applied": response.applied,
-            "conflict": response.conflict,
+            "status": if context.response.ok { "accepted" } else if context.response.conflict { "conflict" } else { "rejected" },
+            "accepted": context.response.ok,
+            "applied": context.response.applied,
+            "conflict": context.response.conflict,
             "cached": cached,
-            "graphSequence": position.sequence,
-            "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
-            "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
-            "idempotencyKey": frame.idempotency_key,
-            "eventCursor": position.cursor,
-            "kind": command.kind,
-            "target": command.target,
-            "surfacePath": command.surface_path,
-            "baseSessionRevision": command.base_session_revision,
-            "baseGraphRevision": command.base_graph_revision,
-            "baseViewRevision": command.base_view_revision.or_else(|| command.view_patch.as_ref().map(|patch| patch.base_view_revision)),
-            "node": node_result,
-            "sessionRevision": response.snapshot.session_revision,
-            "graphRevision": response.snapshot.graph_revision(),
-            "viewRevision": response.snapshot.view_revision,
+            "graphSequence": context.position.sequence,
+            "commandId": context.frame.command_id.clone().unwrap_or_else(|| context.frame.message_id.clone()),
+            "correlationId": context.frame.correlation_id.clone().unwrap_or_else(|| context.frame.message_id.clone()),
+            "idempotencyKey": context.frame.idempotency_key,
+            "eventCursor": context.position.cursor,
+            "kind": context.command.kind,
+            "target": context.command.target,
+            "surfacePath": context.command.surface_path,
+            "baseSessionRevision": context.command.base_session_revision,
+            "baseGraphRevision": context.command.base_graph_revision,
+            "baseViewRevision": context.command.base_view_revision.or_else(|| context.command.view_patch.as_ref().map(|patch| patch.base_view_revision)),
+            "node": context.node_result,
+            "sessionRevision": context.response.snapshot.session_revision,
+            "graphRevision": context.response.snapshot.graph_revision(),
+            "viewRevision": context.response.snapshot.view_revision,
             "historySummary": {
-                "latestEntryId": response.history.entries.last().map(|entry| entry.id.clone()),
-                "canUndo": response.history.can_undo,
-                "canRedo": response.history.can_redo,
-                "undoDepth": response.history.undo_depth,
-                "redoDepth": response.history.redo_depth,
+                "latestEntryId": context.response.history.entries.last().map(|entry| entry.id.clone()),
+                "canUndo": context.response.history.can_undo,
+                "canRedo": context.response.history.can_redo,
+                "undoDepth": context.response.history.undo_depth,
+                "redoDepth": context.response.history.redo_depth,
             },
-            "diagnostics": response.diagnostics,
+            "diagnostics": context.response.diagnostics,
         }),
     )
 }
@@ -2491,54 +2493,50 @@ fn graph_ack_from_cached(
     graph_ack_with_payload(record, identity, frame, payload)
 }
 
-fn graph_applied_event(
-    record: &RuntimeSessionRecord,
-    identity: &RuntimeRealtimeConnectionIdentity,
-    frame: &RuntimeRealtimeEnvelope,
-    command: &GraphCommandPayload,
-    response: &RuntimePatchResponse,
-    node_result: Option<&Value>,
-    sequence: u64,
-    cursor: String,
-) -> RuntimeRealtimeEnvelope {
+fn graph_applied_event(context: &GraphEventContext<'_>) -> RuntimeRealtimeEnvelope {
     RuntimeRealtimeEnvelope {
         schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
         schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
         message_type: "graph.applied".to_owned(),
-        message_id: format!("{}_graph_{sequence:06}", record.id),
-        session_id: record.id.clone(),
-        connection_id: Some(identity.connection_id.clone()),
-        client_id: Some(identity.client_id.clone()),
-        window_id: Some(identity.window_id.clone()),
-        command_id: frame
+        message_id: format!(
+            "{}_graph_{:06}",
+            context.record.id, context.position.sequence
+        ),
+        session_id: context.record.id.clone(),
+        connection_id: Some(context.identity.connection_id.clone()),
+        client_id: Some(context.identity.client_id.clone()),
+        window_id: Some(context.identity.window_id.clone()),
+        command_id: context
+            .frame
             .command_id
             .clone()
-            .or_else(|| Some(frame.message_id.clone())),
-        correlation_id: frame
+            .or_else(|| Some(context.frame.message_id.clone())),
+        correlation_id: context
+            .frame
             .correlation_id
             .clone()
-            .or_else(|| Some(frame.message_id.clone())),
-        idempotency_key: frame.idempotency_key.clone(),
-        sequence: Some(sequence),
-        cursor: Some(cursor),
+            .or_else(|| Some(context.frame.message_id.clone())),
+        idempotency_key: context.frame.idempotency_key.clone(),
+        sequence: Some(context.position.sequence),
+        cursor: Some(context.position.cursor.to_owned()),
         created_at: Some(created_at_now()),
         payload: json!({
-            "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
-            "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
-            "idempotencyKey": frame.idempotency_key,
-            "graphSequence": sequence,
-            "kind": command.kind,
-            "target": command.target,
-            "surfacePath": command.surface_path,
-            "baseSessionRevision": command.base_session_revision,
-            "baseGraphRevision": command.base_graph_revision,
-            "baseViewRevision": command.base_view_revision.or_else(|| command.view_patch.as_ref().map(|patch| patch.base_view_revision)),
-            "node": node_result,
-            "sessionRevision": response.snapshot.session_revision,
-            "graphRevision": response.snapshot.graph_revision(),
-            "viewRevision": response.snapshot.view_revision,
-            "historyEntryId": response.history.entries.last().map(|entry| entry.id.clone()),
-            "diagnostics": response.diagnostics,
+            "commandId": context.frame.command_id.clone().unwrap_or_else(|| context.frame.message_id.clone()),
+            "correlationId": context.frame.correlation_id.clone().unwrap_or_else(|| context.frame.message_id.clone()),
+            "idempotencyKey": context.frame.idempotency_key,
+            "graphSequence": context.position.sequence,
+            "kind": context.command.kind,
+            "target": context.command.target,
+            "surfacePath": context.command.surface_path,
+            "baseSessionRevision": context.command.base_session_revision,
+            "baseGraphRevision": context.command.base_graph_revision,
+            "baseViewRevision": context.command.base_view_revision.or_else(|| context.command.view_patch.as_ref().map(|patch| patch.base_view_revision)),
+            "node": context.node_result,
+            "sessionRevision": context.response.snapshot.session_revision,
+            "graphRevision": context.response.snapshot.graph_revision(),
+            "viewRevision": context.response.snapshot.view_revision,
+            "historyEntryId": context.response.history.entries.last().map(|entry| entry.id.clone()),
+            "diagnostics": context.response.diagnostics,
             "replayed": false,
         }),
     }

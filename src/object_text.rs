@@ -163,7 +163,7 @@ impl ObjectRegistry {
     pub(crate) fn resolve(&self, input: &str) -> ObjectTextResolution {
         let parsed = match parse_object_text_input_v01(input) {
             Ok(parsed) => parsed,
-            Err(resolution) => return resolution,
+            Err(resolution) => return *resolution,
         };
 
         if is_payload_identity_kind(&parsed.class_symbol) {
@@ -647,7 +647,7 @@ pub(crate) fn resolve_object_text_v01(input: &str) -> ObjectTextResolution {
         .resolve(input)
 }
 
-fn parse_object_text_input_v01(input: &str) -> Result<ParsedObjectText, ObjectTextResolution> {
+fn parse_object_text_input_v01(input: &str) -> Result<ParsedObjectText, Box<ObjectTextResolution>> {
     let parsed = skenion_contracts::parse_object_text_v01(input);
     let creation_args = parsed
         .creation_args
@@ -670,14 +670,14 @@ fn parse_object_text_input_v01(input: &str) -> Result<ParsedObjectText, ObjectTe
     let message = diagnostic
         .map(|diagnostic| diagnostic.message.clone())
         .unwrap_or_else(|| "object text could not be parsed".to_owned());
-    Err(failure(
+    Err(Box::new(failure(
         &parsed.input,
         parsed.display_text,
         &parsed.class_name,
         creation_args,
         code,
         message,
-    ))
+    )))
 }
 
 fn runtime_object_text_diagnostic_code(code: &str) -> String {

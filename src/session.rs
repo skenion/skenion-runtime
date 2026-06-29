@@ -257,6 +257,38 @@ pub struct RuntimeMutationRequest {
     pub description: Option<String>,
 }
 
+pub(crate) struct ApplyObjectNodeCreateCurrentRequest {
+    pub(crate) target: GraphTargetRef,
+    pub(crate) node: GraphNodeCurrent,
+    pub(crate) view: Option<CanvasNodeView>,
+    pub(crate) definition: Option<NodeDefinitionCurrent>,
+    pub(crate) mutation: RuntimeMutationRequest,
+}
+
+pub(crate) struct ApplyObjectNodeReplaceCurrentRequest {
+    pub(crate) target: GraphTargetRef,
+    pub(crate) node: GraphNodeCurrent,
+    pub(crate) view: Option<CanvasNodeView>,
+    pub(crate) definition: Option<NodeDefinitionCurrent>,
+    pub(crate) interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
+    pub(crate) mutation: RuntimeMutationRequest,
+}
+
+struct ObjectNodeCreateCurrentEdit {
+    target: GraphTargetRef,
+    node: GraphNodeCurrent,
+    view: Option<CanvasNodeView>,
+    mutation: RuntimeMutationRequest,
+}
+
+struct ObjectNodeReplaceCurrentEdit {
+    target: GraphTargetRef,
+    node: GraphNodeCurrent,
+    view: Option<CanvasNodeView>,
+    interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
+    mutation: RuntimeMutationRequest,
+}
+
 impl RuntimeMutationRequest {
     pub fn view_patch(view_patch: RuntimeViewPatch) -> Self {
         Self {
@@ -801,24 +833,23 @@ impl RuntimeSession {
 
     pub(crate) fn apply_object_node_create_current(
         &mut self,
-        target: GraphTargetRef,
-        node: GraphNodeCurrent,
-        view: Option<CanvasNodeView>,
-        definition: Option<NodeDefinitionCurrent>,
-        actor_id: Option<String>,
-        client_id: Option<String>,
-        description: Option<String>,
+        request: ApplyObjectNodeCreateCurrentRequest,
     ) -> RuntimePatchResponse {
-        let previous_nodes_current = self.nodes_current.clone();
-        self.ensure_object_node_definition_current(definition);
-        let response = self.apply_object_node_create_current_inner(
+        let ApplyObjectNodeCreateCurrentRequest {
             target,
             node,
             view,
-            actor_id,
-            client_id,
-            description,
-        );
+            definition,
+            mutation,
+        } = request;
+        let previous_nodes_current = self.nodes_current.clone();
+        self.ensure_object_node_definition_current(definition);
+        let response = self.apply_object_node_create_current_inner(ObjectNodeCreateCurrentEdit {
+            target,
+            node,
+            view,
+            mutation,
+        });
         if !response.applied {
             self.nodes_current = previous_nodes_current;
         }
@@ -827,26 +858,26 @@ impl RuntimeSession {
 
     pub(crate) fn apply_object_node_replace_current(
         &mut self,
-        target: GraphTargetRef,
-        node: GraphNodeCurrent,
-        view: Option<CanvasNodeView>,
-        definition: Option<NodeDefinitionCurrent>,
-        interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
-        actor_id: Option<String>,
-        client_id: Option<String>,
-        description: Option<String>,
+        request: ApplyObjectNodeReplaceCurrentRequest,
     ) -> (RuntimePatchResponse, Vec<String>) {
-        let previous_nodes_current = self.nodes_current.clone();
-        self.ensure_object_node_definition_current(definition);
-        let (response, dropped_edge_ids) = self.apply_object_node_replace_current_inner(
+        let ApplyObjectNodeReplaceCurrentRequest {
             target,
             node,
             view,
+            definition,
             interface_incident_edge_policy,
-            actor_id,
-            client_id,
-            description,
-        );
+            mutation,
+        } = request;
+        let previous_nodes_current = self.nodes_current.clone();
+        self.ensure_object_node_definition_current(definition);
+        let (response, dropped_edge_ids) =
+            self.apply_object_node_replace_current_inner(ObjectNodeReplaceCurrentEdit {
+                target,
+                node,
+                view,
+                interface_incident_edge_policy,
+                mutation,
+            });
         if !response.applied {
             self.nodes_current = previous_nodes_current;
         }
@@ -911,13 +942,14 @@ impl RuntimeSession {
 
     fn apply_object_node_create_current_inner(
         &mut self,
-        target: GraphTargetRef,
-        node: GraphNodeCurrent,
-        view: Option<CanvasNodeView>,
-        actor_id: Option<String>,
-        client_id: Option<String>,
-        description: Option<String>,
+        edit: ObjectNodeCreateCurrentEdit,
     ) -> RuntimePatchResponse {
+        let ObjectNodeCreateCurrentEdit {
+            target,
+            node,
+            view,
+            mutation,
+        } = edit;
         let Some(project) = self.project.as_ref().cloned() else {
             return self.patch_response(
                 false,
@@ -1005,27 +1037,22 @@ impl RuntimeSession {
             project,
             next_project,
             next_view_revision,
-            RuntimeMutationRequest {
-                graph_patch: None,
-                view_patch: None,
-                actor_id,
-                client_id,
-                description,
-            },
+            mutation,
             None,
         )
     }
 
     fn apply_object_node_replace_current_inner(
         &mut self,
-        target: GraphTargetRef,
-        node: GraphNodeCurrent,
-        view: Option<CanvasNodeView>,
-        interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
-        actor_id: Option<String>,
-        client_id: Option<String>,
-        description: Option<String>,
+        edit: ObjectNodeReplaceCurrentEdit,
     ) -> (RuntimePatchResponse, Vec<String>) {
+        let ObjectNodeReplaceCurrentEdit {
+            target,
+            node,
+            view,
+            interface_incident_edge_policy,
+            mutation,
+        } = edit;
         let Some(project) = self.project.as_ref().cloned() else {
             return (
                 self.patch_response(
@@ -1223,13 +1250,7 @@ impl RuntimeSession {
             project,
             next_project,
             next_view_revision,
-            RuntimeMutationRequest {
-                graph_patch: None,
-                view_patch: None,
-                actor_id,
-                client_id,
-                description,
-            },
+            mutation,
             None,
         );
         if response.applied {
