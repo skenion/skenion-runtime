@@ -58,7 +58,9 @@ async fn spawn_loaded_runtime() -> TestRuntime {
                 .method(Method::POST)
                 .uri("/v0/sessions/default/load")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(sample_project_document_current().to_string()))
+                .body(Body::from(
+                    session_load_request(sample_project_document_current()).to_string(),
+                ))
                 .expect("load request builds"),
         )
         .await
@@ -293,23 +295,11 @@ async fn send_control_command(
     port_id: &str,
     message: Value,
 ) {
-    send_json(
+    send_graph_command(
         socket,
-        json!({
-            "schema": "skenion.runtime.realtime",
-            "schemaVersion": "0.1.0",
-            "type": "control.command",
-            "messageId": message_id,
-            "sessionId": "default",
-            "commandId": message_id,
-            "correlationId": message_id,
-            "idempotencyKey": idempotency_key,
-            "payload": {
-                "nodeId": node_id,
-                "portId": port_id,
-                "message": message
-            }
-        }),
+        message_id,
+        idempotency_key,
+        node_input_payload(node_id, port_id, message),
     )
     .await;
 }
@@ -368,7 +358,7 @@ fn view_patch_payload(base_view_revision: u64, x: f64, y: f64) -> Value {
 
 fn graph_node_add_payload(base_revision: &str, node_id: &str) -> Value {
     json!({
-        "kind": "collaboration.changeSet",
+        "kind": "graph.changeSet",
         "baseSessionRevision": 1,
         "baseGraphRevision": base_revision,
         "target": root_target(base_revision),
@@ -390,9 +380,40 @@ fn graph_node_add_payload(base_revision: &str, node_id: &str) -> Value {
     })
 }
 
+fn paste_fragment_payload(base_revision: &str, node_id: &str) -> Value {
+    json!({
+        "kind": "graph.pasteFragment",
+        "baseGraphRevision": base_revision,
+        "request": {
+            "target": root_target(base_revision),
+            "fragment": {
+                "schema": "skenion.graph.fragment",
+                "schemaVersion": "0.1.0",
+                "nodes": [
+                    {
+                        "id": node_id,
+                        "kind": "object.core.float",
+                        "kindVersion": "0.1.0",
+                        "params": {},
+                        "ports": value_f32_ports_current_json()
+                    }
+                ],
+                "edges": []
+            },
+            "options": {
+                "idConflictPolicy": "remap"
+            }
+        }
+    })
+}
+
+fn history_payload(kind: &str) -> Value {
+    json!({ "kind": kind })
+}
+
 fn graph_edge_disconnect_payload(base_revision: &str, edge_id: &str) -> Value {
     json!({
-        "kind": "collaboration.changeSet",
+        "kind": "graph.changeSet",
         "baseSessionRevision": 1,
         "baseGraphRevision": base_revision,
         "target": root_target(base_revision),
@@ -416,7 +437,7 @@ fn project_patch_target(patch_id: &str, base_revision: &str) -> Value {
 
 fn project_patch_interface_node_add_payload(patch_id: &str, base_revision: &str) -> Value {
     json!({
-        "kind": "collaboration.changeSet",
+        "kind": "graph.changeSet",
         "baseSessionRevision": 1,
         "baseGraphRevision": base_revision,
         "target": project_patch_target(patch_id, base_revision),
@@ -444,7 +465,7 @@ fn project_patch_interface_node_add_payload(patch_id: &str, base_revision: &str)
 
 fn project_patch_internal_node_add_payload(patch_id: &str, base_revision: &str) -> Value {
     json!({
-        "kind": "collaboration.changeSet",
+        "kind": "graph.changeSet",
         "baseSessionRevision": 1,
         "baseGraphRevision": base_revision,
         "target": project_patch_target(patch_id, base_revision),
@@ -1040,7 +1061,7 @@ async fn realtime_attached_commands_reject_missing_idempotency_invalid_payloads_
     );
     assert_eq!(
         invalid_control_payload["payload"]["diagnostic"]["code"],
-        "realtime.control.invalid-payload"
+        "realtime.control-command.disabled"
     );
     assert_eq!(
         invalid_graph_payload["payload"]["diagnostic"]["code"],
@@ -1066,7 +1087,7 @@ async fn realtime_control_bang_broadcasts_control_emitted_to_attached_clients() 
         bang_message(),
     )
     .await;
-    let ack = next_type(&mut client_a, "control.ack").await;
+    let ack = next_type(&mut client_a, "graph.ack").await;
     let broadcast = next_type(&mut client_b, "control.emitted").await;
 
     assert_eq!(ack["payload"]["status"], "accepted");
@@ -1074,8 +1095,12 @@ async fn realtime_control_bang_broadcasts_control_emitted_to_attached_clients() 
     assert_eq!(ack["payload"]["commandId"], "control-bang-1");
     assert_eq!(ack["payload"]["correlationId"], "control-bang-1");
     assert_eq!(ack["payload"]["idempotencyKey"], "control-bang-key");
-    assert!(ack["payload"]["controlSequence"].as_u64().is_some());
-    assert!(ack["payload"]["controlRevision"].as_u64().is_some());
+    assert_eq!(ack["payload"]["kind"], "node.input");
+    assert!(
+        ack["payload"]["node"]["input"]["controlRevision"]
+            .as_u64()
+            .is_some()
+    );
     assert_eq!(broadcast["clientId"], attached_a["clientId"]);
     assert_eq!(broadcast["windowId"], attached_a["windowId"]);
     assert_eq!(broadcast["payload"]["emitted"][0]["nodeId"], "value_1");
@@ -1103,13 +1128,13 @@ async fn realtime_control_float_applies_through_session_and_broadcasts_result() 
         float_message(12.0),
     )
     .await;
-    let ack = next_type(&mut client_a, "control.ack").await;
+    let ack = next_type(&mut client_a, "graph.ack").await;
     let broadcast = next_type(&mut client_b, "control.emitted").await;
 
     assert_eq!(ack["payload"]["status"], "accepted");
     assert_eq!(ack["payload"]["accepted"], true);
-    assert_eq!(ack["payload"]["changed"], true);
-    assert_eq!(ack["payload"]["controlRevision"], 1);
+    assert_eq!(ack["payload"]["node"]["input"]["changed"], true);
+    assert_eq!(ack["payload"]["node"]["input"]["controlRevision"], 1);
     assert_eq!(broadcast["payload"]["controlRevision"], 1);
     assert_eq!(broadcast["payload"]["emitted"][0]["nodeId"], "value_1");
     assert_eq!(
@@ -1143,7 +1168,7 @@ async fn realtime_control_invalid_command_returns_rejected_ack_without_success_b
         float_message(12.0),
     )
     .await;
-    let ack = next_type(&mut client_a, "control.ack").await;
+    let ack = next_type(&mut client_a, "graph.ack").await;
     let no_success_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
 
     assert_eq!(ack["payload"]["status"], "rejected");
@@ -1176,7 +1201,7 @@ async fn realtime_control_duplicate_idempotency_key_replays_ack_without_second_a
         float_message(12.0),
     )
     .await;
-    let first_ack = next_type(&mut client_a, "control.ack").await;
+    let first_ack = next_type(&mut client_a, "graph.ack").await;
     let client_a_echo = next_type(&mut client_a, "control.emitted").await;
     let first_broadcast = next_type(&mut client_b, "control.emitted").await;
 
@@ -1189,7 +1214,7 @@ async fn realtime_control_duplicate_idempotency_key_replays_ack_without_second_a
         float_message(24.0),
     )
     .await;
-    let duplicate_ack = next_type(&mut client_a, "control.ack").await;
+    let duplicate_ack = next_type(&mut client_a, "graph.ack").await;
     let duplicate_local_result = next_type(&mut client_a, "control.emitted").await;
     let no_second_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
 
@@ -1200,7 +1225,10 @@ async fn realtime_control_duplicate_idempotency_key_replays_ack_without_second_a
         duplicate_ack["payload"]["eventCursor"],
         first_ack["payload"]["eventCursor"]
     );
-    assert_eq!(duplicate_ack["payload"]["controlRevision"], 1);
+    assert_eq!(
+        duplicate_ack["payload"]["node"]["input"]["controlRevision"],
+        1
+    );
     assert_eq!(duplicate_local_result, client_a_echo);
     assert_eq!(
         first_broadcast["payload"]["values"]["value_1"],
@@ -1231,7 +1259,7 @@ async fn realtime_control_idempotency_key_is_scoped_separately_from_presence() {
         float_message(7.0),
     )
     .await;
-    let control_ack = next_type(&mut client_a, "control.ack").await;
+    let control_ack = next_type(&mut client_a, "graph.ack").await;
     let control_broadcast = next_type(&mut client_b, "control.emitted").await;
 
     assert_eq!(presence_ack["payload"]["accepted"], true);
@@ -1261,11 +1289,11 @@ async fn realtime_control_silent_set_broadcasts_changed_durable_value() {
         set_float_message(32.0),
     )
     .await;
-    let ack = next_type(&mut client_a, "control.ack").await;
+    let ack = next_type(&mut client_a, "graph.ack").await;
     let broadcast = next_type(&mut client_b, "control.emitted").await;
 
     assert_eq!(ack["payload"]["status"], "accepted");
-    assert_eq!(ack["payload"]["changed"], true);
+    assert_eq!(ack["payload"]["node"]["input"]["changed"], true);
     assert_eq!(broadcast["payload"]["emitted"], json!([]));
     assert_eq!(
         broadcast["payload"]["values"]["value_1"],
@@ -1328,7 +1356,7 @@ async fn realtime_graph_change_set_broadcasts_compact_applied_event() {
     assert_eq!(ack["payload"]["status"], "accepted");
     assert_eq!(ack["payload"]["accepted"], true);
     assert_eq!(ack["payload"]["applied"], true);
-    assert_eq!(ack["payload"]["kind"], "collaboration.changeSet");
+    assert_eq!(ack["payload"]["kind"], "graph.changeSet");
     assert_eq!(ack["payload"]["baseGraphRevision"], "1");
     assert_eq!(ack["payload"]["graphRevision"], "2");
     assert_eq!(ack["payload"]["viewRevision"], 2);
@@ -1336,9 +1364,165 @@ async fn realtime_graph_change_set_broadcasts_compact_applied_event() {
     assert!(ack["payload"]["historySummary"]["latestEntryId"].is_string());
     assert_eq!(ack["payload"]["historySummary"]["canUndo"], true);
     assert_eq!(ack["payload"]["historySummary"]["canRedo"], false);
-    assert_eq!(broadcast["payload"]["kind"], "collaboration.changeSet");
+    assert_eq!(broadcast["payload"]["kind"], "graph.changeSet");
     assert_eq!(broadcast["payload"]["graphRevision"], "2");
     assert!(broadcast["payload"]["historyEntryId"].is_string());
+}
+
+#[tokio::test]
+async fn realtime_graph_paste_fragment_and_history_undo_redo_are_ws_commands() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_graph_command(
+        &mut client_a,
+        "paste-fragment-1",
+        "paste-fragment-key",
+        paste_fragment_payload("1", "pasted_ws"),
+    )
+    .await;
+    let paste_ack = next_type(&mut client_a, "graph.ack").await;
+    let paste_broadcast = next_type(&mut client_b, "graph.applied").await;
+
+    assert_eq!(paste_ack["payload"]["status"], "accepted");
+    assert_eq!(paste_ack["payload"]["kind"], "graph.pasteFragment");
+    assert_eq!(paste_ack["payload"]["operation"]["ok"], true);
+    assert_eq!(paste_ack["payload"]["operation"]["applied"], true);
+    assert_eq!(paste_ack["payload"]["historySummary"]["canUndo"], true);
+    assert_eq!(paste_broadcast["payload"]["kind"], "graph.pasteFragment");
+    assert_eq!(
+        paste_broadcast["payload"]["operation"]["revisionAfter"],
+        "2"
+    );
+
+    send_graph_command(
+        &mut client_a,
+        "history-undo-1",
+        "history-undo-key",
+        history_payload("history.undo"),
+    )
+    .await;
+    let undo_ack = next_type(&mut client_a, "graph.ack").await;
+    let undo_broadcast = next_type(&mut client_b, "graph.applied").await;
+    assert_eq!(undo_ack["payload"]["status"], "accepted");
+    assert_eq!(undo_ack["payload"]["kind"], "history.undo");
+    assert_eq!(undo_ack["payload"]["graphRevision"], "3");
+    assert_eq!(undo_ack["payload"]["historySummary"]["canRedo"], true);
+    assert_eq!(undo_broadcast["payload"]["kind"], "history.undo");
+
+    send_graph_command(
+        &mut client_a,
+        "history-redo-1",
+        "history-redo-key",
+        history_payload("history.redo"),
+    )
+    .await;
+    let redo_ack = next_type(&mut client_a, "graph.ack").await;
+    let redo_broadcast = next_type(&mut client_b, "graph.applied").await;
+    assert_eq!(redo_ack["payload"]["status"], "accepted");
+    assert_eq!(redo_ack["payload"]["kind"], "history.redo");
+    assert_eq!(redo_ack["payload"]["historySummary"]["canUndo"], true);
+    assert_eq!(redo_broadcast["payload"]["kind"], "history.redo");
+}
+
+#[tokio::test]
+async fn realtime_selection_update_broadcasts_selection_updated() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_json(
+        &mut client_a,
+        json!({
+            "schema": "skenion.runtime.realtime",
+            "schemaVersion": "0.1.0",
+            "type": "selection.update",
+            "messageId": "selection-1",
+            "sessionId": "default",
+            "commandId": "selection-1",
+            "correlationId": "selection-1",
+            "idempotencyKey": "selection-key",
+            "payload": {
+                "target": root_target("1"),
+                "selection": {
+                    "ranges": [
+                        { "kind": "nodes", "nodeIds": ["value_1"] }
+                    ],
+                    "activeRangeIndex": 0
+                },
+                "cursor": {
+                    "kind": "canvas",
+                    "x": 10.0,
+                    "y": 20.0
+                },
+                "ttlMs": 30000
+            }
+        }),
+    )
+    .await;
+
+    let ack = next_type(&mut client_a, "command.ack").await;
+    let broadcast = next_type(&mut client_b, "selection.updated").await;
+
+    assert_eq!(ack["payload"]["accepted"], true);
+    assert_eq!(broadcast["clientId"], attached_a["clientId"]);
+    assert_eq!(broadcast["payload"]["selection"]["sessionId"], "default");
+    assert_eq!(
+        broadcast["payload"]["selection"]["participantId"],
+        attached_a["clientId"]
+    );
+    assert_eq!(
+        broadcast["payload"]["selection"]["selection"]["ranges"][0]["nodeIds"][0],
+        "value_1"
+    );
+}
+
+#[tokio::test]
+async fn realtime_graph_duplicate_replays_all_cached_local_events_without_rebroadcast() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_graph_command(
+        &mut client_a,
+        "catalog-change-once",
+        "catalog-change-key",
+        project_patch_interface_node_add_payload("my-patcher", "1"),
+    )
+    .await;
+    let first_ack = next_type(&mut client_a, "graph.ack").await;
+    let first_applied = next_type(&mut client_a, "graph.applied").await;
+    let first_catalog = next_type(&mut client_a, "nodeCatalog.changed").await;
+    let _broadcast_applied = next_type(&mut client_b, "graph.applied").await;
+    let _broadcast_catalog = next_type(&mut client_b, "nodeCatalog.changed").await;
+
+    send_graph_command(
+        &mut client_a,
+        "catalog-change-duplicate",
+        "catalog-change-key",
+        project_patch_interface_node_add_payload("my-patcher", "1"),
+    )
+    .await;
+    let duplicate_ack = next_type(&mut client_a, "graph.ack").await;
+    let duplicate_applied = next_type(&mut client_a, "graph.applied").await;
+    let duplicate_catalog = next_type(&mut client_a, "nodeCatalog.changed").await;
+    let no_second_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+
+    assert_eq!(duplicate_ack["payload"]["cached"], true);
+    assert_eq!(
+        duplicate_ack["payload"]["eventCursor"],
+        first_ack["payload"]["eventCursor"]
+    );
+    assert_eq!(duplicate_applied, first_applied);
+    assert_eq!(duplicate_catalog, first_catalog);
+    assert!(no_second_broadcast.is_err());
 }
 
 #[tokio::test]
@@ -1483,7 +1667,9 @@ async fn node_catalog_revision_changes_when_project_patch_interface_changes() {
                 .method(Method::POST)
                 .uri("/v0/sessions/default/load")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(changed_project.to_string()))
+                .body(Body::from(
+                    session_load_request(changed_project).to_string(),
+                ))
                 .expect("load request builds"),
         )
         .await
@@ -2886,7 +3072,7 @@ async fn realtime_graph_unsupported_command_kind_returns_rejected_ack() {
         "graph-unsupported-1",
         "graph-unsupported-key",
         json!({
-            "kind": "history.undo",
+            "kind": "collaboration.changeSet",
             "baseSessionRevision": 1,
             "baseGraphRevision": "1",
             "baseViewRevision": 1,
@@ -3143,11 +3329,21 @@ async fn guessed_adjacent_resume_token_cannot_reuse_identity_or_idempotency_scop
     assert_eq!(guessed_ack["payload"]["cached"], false);
 }
 
+fn session_load_request(project: Value) -> Value {
+    json!({
+        "schema": "skenion.runtime.session-load-request",
+        "schemaVersion": "0.1.0",
+        "project": project,
+        "mode": "loadIfEmpty",
+    })
+}
+
 fn sample_project_document_current() -> Value {
     json!({
       "schema": "skenion.project",
       "schemaVersion": "0.1.0",
       "id": "minimal-value-project",
+      "documentId": "20000000-0000-0000-0000-000000000001",
       "revision": "1",
       "graph": {
         "schema": "skenion.graph",

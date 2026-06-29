@@ -58,21 +58,21 @@ Legend:
 | `GET` | `/v0/sessions/{session_id}/info` | `session_info_by_id` | none | `RuntimeSessionInfoResponse` | creates session record | Settings/debug/fallback. |
 | `GET` | `/v0/sessions/{session_id}/snapshot` | `session_snapshot_by_id` | none | `RuntimeSessionResponse` | creates session record, no graph mutation | Debug/CLI/fallback. Not live hydration. |
 | `GET` | `/v0/sessions/{session_id}/node-catalog` | `session_node_catalog_by_id` | none | `NodeCatalogSnapshotV01` or HTTP 404 diagnostic | no mutation; absent sessions return 404 | Debug/CLI/fallback. Not normal live hydration. |
-| `GET` | `/v0/sessions/{session_id}/events/stream` | `session_events_stream_by_id` | none | SSE stream | stream subscription | Cleanup candidate for live Studio. |
+| `GET` | `/v0/sessions/{session_id}/events/stream` | `disabled_session_events_stream_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy live channel. Use WS `session.hello` replay/resume. |
 | `POST` | `/v0/sessions/{session_id}/load` | `load_session_by_id` | project JSON | `RuntimeSessionResponse` | replaces loaded session project | Open/import/load only. |
 | `POST` | `/v0/sessions/{session_id}/validate` | `validate_session_by_id` | none | `RuntimeSessionResponse` | write lock, no graph mutation | Explicit validate command. |
 | `POST` | `/v0/sessions/{session_id}/plan` | `plan_session_by_id` | none | `RuntimeSessionResponse` | write lock, no graph mutation | Explicit plan command. |
 | `POST` | `/v0/sessions/{session_id}/run` | `run_session_by_id` | `SessionRunRequest` | `RuntimeSessionResponse` | write lock, no graph mutation expected | Explicit run/debug command. |
-| `POST` | `/v0/sessions/{session_id}/mutate` | `mutate_session_by_id` | `RuntimeMutationRequest` JSON | `RuntimePatchResponse` | graph mutation | Legacy/cleanup candidate. Live edits should use WS `graph.command`. |
-| `POST` | `/v0/sessions/{session_id}/operation` | `apply_session_operation_by_id` | `RuntimeOperationEnvelope` JSON | `PasteGraphFragmentResponse` | graph mutation | Paste/import fallback only if kept. Not normal live edit path. |
-| `POST` | `/v0/sessions/{session_id}/operations` | `apply_session_collaboration_operations_by_id` | operation, operation batch, or collaboration operation JSON | `CollaborationOperationResponse` | graph/collaboration mutation | Cleanup candidate after WS graph path is complete. |
-| `POST` | `/v0/sessions/{session_id}/collaboration/presence` | `update_session_collaboration_presence_by_id` | `RuntimeCollaborationPresenceEnvelope` | presence envelope or error response | collaboration presence mutation | Cleanup candidate. Live presence belongs on WS. |
-| `POST` | `/v0/sessions/{session_id}/collaboration/selection` | `update_session_collaboration_selection_by_id` | `RuntimeCollaborationSelectionEnvelope` | selection envelope or error response | collaboration selection mutation | Cleanup candidate. Live selection belongs on WS. |
-| `GET` | `/v0/sessions/{session_id}/collaboration/events/stream` | `session_collaboration_events_stream_by_id` | none | SSE stream | stream subscription | Cleanup candidate for live Studio. |
+| `POST` | `/v0/sessions/{session_id}/mutate` | `disabled_session_mutate_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy live mutation. Use WS `graph.command`. |
+| `POST` | `/v0/sessions/{session_id}/operation` | `disabled_session_operation_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy paste mutation. Use WS `graph.command` kind `graph.pasteFragment`. |
+| `POST` | `/v0/sessions/{session_id}/operations` | `disabled_session_operations_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy collaboration mutation multiplexer. Use WS `graph.command`. |
+| `POST` | `/v0/sessions/{session_id}/collaboration/presence` | `disabled_session_collaboration_presence_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy presence mutation. Use WS `presence.update`. |
+| `POST` | `/v0/sessions/{session_id}/collaboration/selection` | `disabled_session_collaboration_selection_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy selection mutation. Use WS `selection.update`. |
+| `GET` | `/v0/sessions/{session_id}/collaboration/events/stream` | `disabled_session_collaboration_events_stream_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy collaboration stream. Use WS realtime events. |
 | `GET` | `/v0/sessions/{session_id}/history` | `session_history_by_id` | none | `RuntimeHistory` | no graph mutation | History panel only. Do not drive graph repaint from this. |
-| `POST` | `/v0/sessions/{session_id}/undo` | `undo_session_by_id` | optional undo scope/action JSON | `RuntimePatchResponse` | graph mutation | Explicit undo command. |
-| `POST` | `/v0/sessions/{session_id}/redo` | `redo_session_by_id` | optional redo scope/action JSON | `RuntimePatchResponse` | graph mutation | Explicit redo command. |
-| `POST` | `/v0/sessions/{session_id}/control/event` | `control_event_by_id` | `RuntimeControlEventRequest` | `RuntimeControlEventResponse` | control state mutation, may update preview control state | HTTP fallback/debug. Live bang/slider/message should use WS `node.input` unless control path is deliberately retained. |
+| `POST` | `/v0/sessions/{session_id}/undo` | `disabled_session_undo_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy history mutation. Use WS `graph.command` kind `history.undo`. |
+| `POST` | `/v0/sessions/{session_id}/redo` | `disabled_session_redo_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy history mutation. Use WS `graph.command` kind `history.redo`. |
+| `POST` | `/v0/sessions/{session_id}/control/event` | `disabled_session_control_event_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy control mutation. Use WS `graph.command` kind `node.input`. |
 | `GET` | `/v0/sessions/{session_id}/control/state` | `control_state_by_id` | none | `RuntimeControlStateResponse` | no graph mutation | Inspector/debug/fallback snapshot. |
 | `POST` | `/v0/sessions/{session_id}/control/read` | `control_read_by_id` | `RuntimeControlReadRequest` | `RuntimeControlReadResponse` | no graph mutation | Inspector/debug read. |
 | `GET` | `/v0/sessions/{session_id}/preview` | `preview_status_by_id` | none | `RuntimePreviewStatusResponse` | preview manager read/update under lock | Preview panel. |
@@ -140,7 +140,8 @@ Optional fields:
 | --- | --- | --- | --- | --- | --- |
 | `session.hello` | attach/resume branch in `handle_runtime_realtime_socket` | none | optional `resumeToken`, `lastCursor`, `nodeCatalog` | creates/renews connection identity, may replay events | First frame after opening socket. |
 | `presence.update` | `handle_presence_update` | `session.hello` | `idempotencyKey`, presence payload | collaboration presence mutation | Live presence only if Studio owns presence UX. |
-| `control.command` | `handle_control_command` | `session.hello` | `idempotencyKey`, `RuntimeControlEventRequest` shape | control state mutation | Overlaps with `node.input`; needs cleanup decision. |
+| `selection.update` | `handle_selection_update` | `session.hello` | `idempotencyKey`, `target`, `selection`, optional `cursor`, `ttlMs` | collaboration selection mutation | Live selection path. Runtime derives session/participant/timestamps. |
+| `control.command` | disabled branch | `session.hello` | `tests/realtime.rs::websocket_rejects_invalid_frames_session_mismatch_and_pre_attach_commands` | none | Rejected. Use `graph.command` kind `node.input`. |
 | `graph.command` | `handle_graph_command` | `session.hello` | `idempotencyKey`, `payload.kind` | graph/view/node mutation or node input | Primary live graph/node path. |
 | `nodeCatalog.request` | `handle_node_catalog_request` | `session.hello` | optional `knownRevision` | no mutation | Request catalog snapshot only after `nodeCatalog.changed` or explicit refresh. |
 
@@ -157,11 +158,11 @@ If a command frame is sent before `session.hello`, Runtime returns
 | `session.attached` | successful `session.hello` | `connectionId`, `clientId`, `windowId`, `resumeToken`, `currentRevisions`, `snapshot`, `globalCursor`, `nodeCatalog` | attaching client | Hydrate live graph from `payload.snapshot`. |
 | `session.syncRequired` | failed resume/replay gap | same as attach plus `diagnostic` | attaching client | Replace local state from snapshot; do not patch over stale local state. |
 | `presence.updated` | presence handling and presence replay | presence payload | all live clients | Presence UI only. |
+| `selection.updated` | selection handling and replay | selection envelope plus TTL/replay metadata | all live clients | Selection UI only. |
 | `command.ack` | generic command ack helper | accepted/rejected payload | sender | Naming cleanup candidate; avoid using for graph state. |
-| `control.ack` | `control.command` | status, changed, control sequence/revision, diagnostics | sender | Sender feedback only. |
-| `graph.ack` | `graph.command` | status, applied/conflict, graph sequence, node result, revisions, diagnostics | sender | Sender feedback only. Do not treat as final multi-client graph sync. |
-| `graph.applied` | accepted `graph.command` | kind, target, node result, revisions, diagnostics | all live clients | Authoritative graph update event. |
-| `control.emitted` | successful `node.input` or control path | request, response, changed values | relevant live clients | Authoritative transient control feedback. |
+| `graph.ack` | `graph.command` | status, applied/conflict, graph sequence, node result, operation result, revisions, diagnostics | sender | Sender feedback only. Do not treat as final multi-client graph sync. |
+| `graph.applied` | accepted `graph.command` | kind, target, node result, operation result, revisions, diagnostics | all live clients | Authoritative graph update event. |
+| `control.emitted` | successful `node.input` | request, response, changed values | relevant live clients | Authoritative transient control feedback. |
 | `nodeCatalog.snapshot` | `nodeCatalog.request` | status `included`, `catalogRevision`, `snapshot` | requester | Replace cached catalog if revision differs. |
 | `nodeCatalog.unchanged` | `nodeCatalog.request` | status `unchanged`, `catalogRevision` | requester | Keep cached catalog. |
 | `nodeCatalog.changed` | graph command when catalog projection changed | new catalog revision and snapshot metadata | all live clients | Request or apply catalog refresh. Must not fire for ordinary edge/node usage edits. |
@@ -242,6 +243,8 @@ Node/object fields:
 | `params` | object | `node.create`, `node.update` |
 | `portId` | string | `node.input` |
 | `message` | `ControlMessage` | `node.input` |
+| `request` | `PasteGraphFragmentRequest` | `graph.pasteFragment` |
+| `scope` | `client` or `global` | `history.undo`, `history.redo`; defaults to `client` |
 | `unresolvedPolicy` | `reject` or `materialize-diagnostic` | object text materialization |
 | `interfaceIncidentEdgePolicy` | Contracts enum | `node.replace` |
 
@@ -250,14 +253,17 @@ View/collaboration fields:
 | Field | Type | Used by |
 | --- | --- | --- |
 | `viewPatch` | `RuntimeViewPatch` | `view.patch` |
-| `changes` | `RuntimeCollaborationChange[]` | `collaboration.changeSet` |
+| `changes` | `RuntimeCollaborationChange[]` | `graph.changeSet` |
 
 ## `graph.command.payload.kind`
 
 | Kind | Required fields | Applies persisted graph mutation | Control mutation | Success events |
 | --- | --- | --- | --- | --- |
 | `view.patch` | `viewPatch`; optional `target`; revision fields if supplied must match | yes | no | `graph.ack`, `graph.applied` |
-| `collaboration.changeSet` | `target`, non-empty `changes` | yes | no | `graph.ack`, `graph.applied` |
+| `graph.changeSet` | `target`, non-empty `changes` | yes | no | `graph.ack`, `graph.applied` |
+| `graph.pasteFragment` | `request` | yes | no | `graph.ack`, `graph.applied`; paste response appears under `payload.operation` |
+| `history.undo` | optional `scope` | yes if history entry is available | no | `graph.ack`, `graph.applied` |
+| `history.redo` | optional `scope` | yes if history entry is available | no | `graph.ack`, `graph.applied` |
 | `node.resolve` | `objectText`; valid target if supplied | no | no | `graph.ack` only |
 | `node.create` | `objectText`; optional `requestedNodeId`, `view`, `params`, target | yes if resolved/materialized | no | `graph.ack`, `graph.applied`; may emit `nodeCatalog.changed` if catalog projection changes |
 | `node.replace` | `objectText`, `nodeId`; optional `interfaceIncidentEdgePolicy` | yes if resolved/materialized | no | `graph.ack`, `graph.applied`; `node.droppedEdgeIds` in result when interface changed |
@@ -270,13 +276,16 @@ Supported kinds are exactly:
 
 ```text
 view.patch
-collaboration.changeSet
+graph.changeSet
+graph.pasteFragment
 node.resolve
 node.create
 node.replace
 node.delete
 node.update
 node.input
+history.undo
+history.redo
 ```
 
 Old draft object command names such as `object.resolve`, `object.create`,
@@ -354,19 +363,18 @@ Use WebSocket for:
 - view patch/node movement
 - live graph applied events
 - live catalog changed events
-- live presence/selection after the cleanup decision is made
+- live presence/selection through `presence.update` and `selection.update`
 
 Stop using in normal live Studio flow:
 
 - plain HTTP `GET /v0/sessions/{session_id}`
 - repeated HTTP `GET /v0/sessions/{session_id}/snapshot`
 - repeated HTTP `GET /v0/sessions/{session_id}/node-catalog`
-- HTTP `/mutate` for ordinary graph edits
-- HTTP `/operation` and `/operations` for ordinary live edits
-- HTTP collaboration presence/selection for live collaboration
-- session/collaboration SSE as the graph authority
-- HTTP `/control/event` for bang/slider/message if `node.input` is the chosen
-  live control path
+- HTTP `/mutate` for ordinary graph edits; it now returns HTTP 410
+- HTTP `/operation` and `/operations` for ordinary live edits; they now return HTTP 410
+- HTTP collaboration presence/selection for live collaboration; they now return HTTP 410
+- session/collaboration SSE as the graph authority; these routes now return HTTP 410
+- HTTP `/control/event` for bang/slider/message; it now returns HTTP 410 and points to `node.input`
 
 ## Concrete Cleanup Issues Found
 
@@ -374,14 +382,12 @@ Stop using in normal live Studio flow:
    non-WebSocket callers. Studio must not probe this route with HTTP.
 2. `/v0/io/devices` is not a pure read: it records IO diagnostics into runtime
    logs. It should not be used as a polling endpoint.
-3. There are overlapping live control paths: `control.command`, HTTP
-   `/control/event`, and `graph.command` `node.input`. Studio should pick one
-   live path; current direction is `node.input`.
-4. There are overlapping graph mutation surfaces: WS `graph.command`, HTTP
-   `/mutate`, HTTP `/operation`, and HTTP `/operations`. Studio live edits
-   should use WS `graph.command`.
-5. `command.ack`, `control.ack`, and `graph.ack` coexist. Studio must treat only
+3. `control.command` and HTTP `/control/event` are disabled live paths.
+   Studio live control should use `graph.command` kind `node.input`.
+4. HTTP `/mutate`, `/operation`, and `/operations` are disabled live graph
+   mutation surfaces. Studio live edits should use WS `graph.command`.
+5. `command.ack` and `graph.ack` coexist. Studio must treat only
    `graph.applied` as multi-client graph state, not generic ack frames.
-6. SSE session/collaboration streams duplicate part of the intended WS live
-   model. They should be retained only for explicit non-live/debug needs or
+6. SSE session/collaboration streams are disabled for live Runtime state.
+   They should be replaced by WS replay/resume for any remaining consumers or
    removed after Studio no longer depends on them.

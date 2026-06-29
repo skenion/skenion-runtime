@@ -448,11 +448,6 @@ impl PreviewManager {
         self.control_state_path_override = Some(path);
         self
     }
-
-    #[cfg(test)]
-    pub(crate) fn set_control_state_path_for_test(&mut self, path: PathBuf) {
-        self.status.control_state_path = Some(path);
-    }
 }
 
 impl PreviewStatus {
@@ -1339,6 +1334,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             "schema": "skenion.project",
             "schemaVersion": "0.1.0",
             "id": format!("{}-project", graph.id),
+            "documentId": "30000000-0000-0000-0000-000000000001",
             "revision": graph.revision.clone(),
             "graph": {
                 "schema": "skenion.graph",

@@ -981,6 +981,7 @@ mod tests {
             "schema": "skenion.project",
             "schemaVersion": "0.1.0",
             "id": format!("{}-project", graph.id),
+            "documentId": "30000000-0000-0000-0000-000000000002",
             "revision": graph.revision.clone(),
             "graph": {
                 "schema": "skenion.graph",

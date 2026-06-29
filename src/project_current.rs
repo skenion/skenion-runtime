@@ -1893,6 +1893,7 @@ mod tests {
           "schema": "skenion.project",
           "schemaVersion": "0.1.0",
           "id": "render-project",
+          "documentId": "30000000-0000-0000-0000-000000000003",
           "revision": "1",
           "graph": subpatch_graph(),
           "viewState": {

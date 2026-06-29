@@ -55,7 +55,10 @@ pub use skenion_contracts::{
     PatchContractV01 as PatchContractCurrent, PatchDefinitionV01 as PatchDefinitionCurrent,
     PatchPath, PortDirectionV01 as PortDirectionCurrent, PortRateV01 as PortRateCurrent,
     PortSpecV01 as PortSpecCurrent, ProjectDocumentV01 as ProjectDocumentCurrent,
-    ProjectMetadataV01 as ProjectMetadataCurrent, ViewStateV01 as ViewState,
+    ProjectMetadataV01 as ProjectMetadataCurrent,
+    RuntimeSessionLoadModeV01 as RuntimeSessionLoadModeCurrent,
+    RuntimeSessionLoadPreconditionV01 as RuntimeSessionLoadPreconditionCurrent,
+    RuntimeSessionLoadRequestV01 as RuntimeSessionLoadRequestCurrent, ViewStateV01 as ViewState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

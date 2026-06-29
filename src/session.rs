@@ -2669,6 +2669,7 @@ fn project_document_from_request_current(
         "schema": "skenion.project",
         "schemaVersion": "0.1.0",
         "id": graph.id.clone(),
+        "documentId": "00000000-0000-0000-0000-000000000001",
         "revision": graph.revision.clone(),
         "graph": graph,
         "viewState": view_state,

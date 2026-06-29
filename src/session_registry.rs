@@ -1,35 +1,32 @@
+#[cfg(test)]
+use std::convert::Infallible;
 use std::{
     collections::{BTreeMap, VecDeque},
-    convert::Infallible,
     sync::{Arc, Mutex, RwLock},
 };
 
+#[cfg(test)]
 use axum::{http::HeaderMap, response::sse::Event};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+#[cfg(test)]
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+#[cfg(test)]
+use crate::RuntimeEventReplayGapReason;
 use crate::{
     COLLABORATION_EVENT_REPLAY_LIMIT, PreviewManager, RUNTIME_REALTIME_REPLAY_LIMIT,
     RuntimeCollaborationLog, RuntimeConnectionProfile, RuntimeConnectionProfileMode,
-    RuntimeDiagnostic, RuntimeEventReplayGap, RuntimeEventReplayGapReason,
-    RuntimeEventReplayMetadata, RuntimeEventReplayWindow, RuntimeRealtimeState, RuntimeSession,
-    RuntimeSessionCapabilitySet, RuntimeSessionEvent, RuntimeSessionEventKind,
-    RuntimeSessionInfoResponse, RuntimeSessionLifecycleState, RuntimeSessionSnapshot,
-    RuntimeTransportHistory as ContractRuntimeHistory,
+    RuntimeDiagnostic, RuntimeEventReplayGap, RuntimeEventReplayMetadata, RuntimeEventReplayWindow,
+    RuntimeRealtimeState, RuntimeSession, RuntimeSessionCapabilitySet, RuntimeSessionEvent,
+    RuntimeSessionEventKind, RuntimeSessionInfoResponse, RuntimeSessionLifecycleState,
+    RuntimeSessionSnapshot, RuntimeTransportHistory as ContractRuntimeHistory,
     RuntimeTransportHistoryEntry as ContractRuntimeHistoryEntry, RuntimeTransportSessionSnapshot,
     runtime_time::created_at_now, validate_runtime_session_event,
 };
 
 pub const DEFAULT_SESSION_ID: &str = "default";
 const SESSION_EVENT_REPLAY_LIMIT: usize = 256;
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionEventsQuery {
-    pub after: Option<u64>,
-}
 
 #[derive(Clone)]
 pub struct RuntimeSessionRegistry {
@@ -122,6 +119,7 @@ pub struct RuntimeSessionRecord {
     replay_limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct RuntimeSessionReplay {
     pub events: Vec<RuntimeSessionEvent>,
@@ -245,6 +243,7 @@ fn session_event_from_session(
     event
 }
 
+#[cfg(test)]
 pub fn session_snapshot_event(
     record: &RuntimeSessionRecord,
     session: &RuntimeSession,
@@ -335,6 +334,7 @@ fn store_session_event(record: &RuntimeSessionRecord, event: RuntimeSessionEvent
     }
 }
 
+#[cfg(test)]
 pub fn capture_session_replay(
     record: &RuntimeSessionRecord,
     after: Option<u64>,
@@ -378,6 +378,7 @@ pub fn capture_session_replay(
     }
 }
 
+#[cfg(test)]
 fn replay_gap_event(
     mut snapshot: RuntimeSessionEvent,
     session_id: &str,
@@ -407,6 +408,7 @@ fn replay_gap_event(
     snapshot
 }
 
+#[cfg(test)]
 pub fn event_cursor_from_headers(headers: &HeaderMap) -> Option<u64> {
     match headers.get("last-event-id") {
         Some(value) => value.to_str().ok().and_then(|cursor| cursor.parse().ok()),
@@ -414,6 +416,7 @@ pub fn event_cursor_from_headers(headers: &HeaderMap) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 pub fn session_broadcast_event_after_high_water(
     result: Result<RuntimeSessionEvent, BroadcastStreamRecvError>,
     record: RuntimeSessionRecord,
@@ -428,6 +431,7 @@ pub fn session_broadcast_event_after_high_water(
     }
 }
 
+#[cfg(test)]
 pub fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
     Ok(Event::default()
         .event("session")
@@ -436,6 +440,7 @@ pub fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
         .expect("runtime session event should serialize"))
 }
 
+#[cfg(test)]
 pub fn session_lag_gap_event(record: &RuntimeSessionRecord, skipped: u64) -> RuntimeSessionEvent {
     let actual_sequence = oldest_retained_session_event_sequence(record)
         .unwrap_or_else(|| current_session_event_sequence(record))
@@ -470,6 +475,7 @@ pub fn session_lag_gap_event(record: &RuntimeSessionRecord, skipped: u64) -> Run
     )
 }
 
+#[cfg(test)]
 fn oldest_retained_session_event_sequence(record: &RuntimeSessionRecord) -> Option<u64> {
     record
         .event_store
@@ -479,6 +485,7 @@ fn oldest_retained_session_event_sequence(record: &RuntimeSessionRecord) -> Opti
         .map(|event| event.sequence)
 }
 
+#[cfg(test)]
 fn latest_stored_session_event_sequence(record: &RuntimeSessionRecord) -> Option<u64> {
     record
         .event_store

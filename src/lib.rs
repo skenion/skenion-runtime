@@ -79,7 +79,8 @@ pub use contract::{
     GraphValidationResultCurrent, IdConflictPolicy, MergePolicyCurrent, NodeDefinitionCurrent,
     PasteGraphFragmentRequest, PastePlacement, PatchContractCurrent, PatchContractPortCurrent,
     PatchDefinitionCurrent, PatchPath, PortDirectionCurrent, PortRateCurrent, PortSpecCurrent,
-    ProjectDocumentCurrent, ProjectMetadataCurrent, ViewState,
+    ProjectDocumentCurrent, ProjectMetadataCurrent, RuntimeSessionLoadModeCurrent,
+    RuntimeSessionLoadPreconditionCurrent, RuntimeSessionLoadRequestCurrent, ViewState,
 };
 pub use control_state::{
     ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,
@@ -200,9 +201,7 @@ pub use session::{
     RuntimePatchResponse, RuntimeSession, RuntimeSessionResponse, RuntimeSessionSnapshot,
     RuntimeViewPatch, RuntimeViewPatchOperation, SessionRunRequest,
 };
-pub use session_registry::{
-    DEFAULT_SESSION_ID, RuntimeSessionRecord, RuntimeSessionRegistry, SessionEventsQuery,
-};
+pub use session_registry::{DEFAULT_SESSION_ID, RuntimeSessionRecord, RuntimeSessionRegistry};
 pub use sidecar::{
     RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownInfo,
     RuntimeSidecarShutdownRequest, RuntimeSidecarShutdownResponse, RuntimeSidecarStartupResponse,
