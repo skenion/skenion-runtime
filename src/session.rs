@@ -7,8 +7,8 @@ use serde_json::{Map, Value, json};
 use skenion_contracts::{InterfaceIncidentEdgePolicyV01, NodeCatalogSnapshotV01};
 
 use crate::{
-    CanvasNodeView, CanvasViewState, ControlState, DummyExecutionReport, EdgeSpecCurrent,
-    ExecutionPlan, GraphDocument, GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent,
+    CanvasNodeView, ControlState, DummyExecutionReport, EdgeSpecCurrent, ExecutionPlan,
+    GraphDocument, GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent,
     GraphNodeCurrent, GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinitionCurrent,
     NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
     PlanError, PortDirectionCurrent, PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot,
@@ -27,6 +27,7 @@ mod history;
 mod node_catalog;
 mod projection;
 mod types;
+mod view_state;
 
 #[cfg(test)]
 use crate::GraphPatch;
@@ -53,6 +54,11 @@ pub use types::{
     RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
     RuntimePatchResponse, RuntimeSessionResponse, RuntimeSessionSnapshot, RuntimeViewPatch,
     RuntimeViewPatchOperation, SessionRunRequest,
+};
+use view_state::{
+    apply_view_patch_to_view_state, reconcile_view_state_with_execution_graph,
+    reconcile_view_state_with_graph_current, runtime_owned_view_state, target_supports_view_state,
+    unsupported_patch_view_change_diagnostic,
 };
 
 const UNRESOLVED_OBJECT_NODE_KIND: &str = "object.core.unresolved";
@@ -2061,113 +2067,6 @@ fn project_document_from_request_current(
     .expect("synthesized current project document should match contract shape")
 }
 
-fn reconcile_view_state_with_graph_current(
-    graph: &GraphDocumentCurrent,
-    view_state: Option<ViewState>,
-) -> ViewState {
-    let mut reconciled = default_view_state_for_graph_current(graph);
-    let Some(view_state) = view_state else {
-        return reconciled;
-    };
-
-    for node in &graph.nodes {
-        if let Some(node_view) = view_state.canvas.nodes.get(&node.id) {
-            reconciled
-                .canvas
-                .nodes
-                .insert(node.id.clone(), node_view.clone());
-        }
-    }
-    if view_state.canvas.viewport.is_some() {
-        reconciled.canvas.viewport = view_state.canvas.viewport;
-    }
-
-    reconciled
-}
-
-fn reconcile_view_state_with_execution_graph(
-    graph: &GraphDocument,
-    view_state: Option<ViewState>,
-) -> ViewState {
-    let mut reconciled = default_view_state_for_execution_graph(graph);
-    let Some(view_state) = view_state else {
-        return reconciled;
-    };
-
-    for node in &graph.nodes {
-        if let Some(node_view) = view_state.canvas.nodes.get(&node.id) {
-            reconciled
-                .canvas
-                .nodes
-                .insert(node.id.clone(), node_view.clone());
-        }
-    }
-    if view_state.canvas.viewport.is_some() {
-        reconciled.canvas.viewport = view_state.canvas.viewport;
-    }
-
-    reconciled
-}
-
-fn default_view_state_for_graph_current(graph: &GraphDocumentCurrent) -> ViewState {
-    ViewState {
-        schema: "skenion.view-state".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        canvas: CanvasViewState {
-            nodes: graph
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(index, node)| {
-                    (
-                        node.id.clone(),
-                        CanvasNodeView {
-                            x: 160.0 * (index as f64),
-                            y: 0.0,
-                            width: None,
-                            height: None,
-                            collapsed: None,
-                        },
-                    )
-                })
-                .collect(),
-            viewport: None,
-        },
-    }
-}
-
-fn default_view_state_for_execution_graph(graph: &GraphDocument) -> ViewState {
-    ViewState {
-        schema: "skenion.view-state".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        canvas: CanvasViewState {
-            nodes: graph
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(index, node)| {
-                    (
-                        node.id.clone(),
-                        CanvasNodeView {
-                            x: 160.0 * (index as f64),
-                            y: 0.0,
-                            width: None,
-                            height: None,
-                            collapsed: None,
-                        },
-                    )
-                })
-                .collect(),
-            viewport: None,
-        },
-    }
-}
-
-fn runtime_owned_view_state(mut view_state: ViewState) -> ViewState {
-    view_state.canvas.viewport = None;
-    view_state
-}
-
 fn normalize_mutation_base_revisions(
     mutation: &mut RuntimeMutationRequest,
     graph_revision: String,
@@ -2582,18 +2481,6 @@ fn apply_graph_to_project_current(
         patch.revision = patch.graph.revision.clone();
     }
     next_view_revision
-}
-
-fn target_supports_view_state(path: &PatchPath) -> bool {
-    matches!(path, PatchPath::Root | PatchPath::HelpWorkingCopy { .. })
-}
-
-fn unsupported_patch_view_change_diagnostic(target: &GraphTargetRef) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
-        "collaboration.patch-view-unsupported",
-        "project patch definition targets do not currently carry editable view state in Runtime",
-        serde_json::json!({ "target": target }),
-    )
 }
 
 fn graph_for_path_current(
@@ -3072,77 +2959,6 @@ fn operation_diagnostic_to_runtime_diagnostic(
         },
         _ => RuntimeDiagnostic::structured_error(diagnostic.code, diagnostic.message, details),
     }
-}
-
-fn apply_view_patch_to_view_state(
-    graph: &GraphDocument,
-    mut view_state: ViewState,
-    patch: &RuntimeViewPatch,
-) -> Result<(ViewState, RuntimeViewPatch), Vec<RuntimeDiagnostic>> {
-    let mut inverse_ops = Vec::new();
-    for op in &patch.ops {
-        match op {
-            RuntimeViewPatchOperation::SetNodeView { node_id, view } => {
-                if !graph.nodes.iter().any(|node| node.id == *node_id) {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
-                        "view patch node {node_id} does not exist"
-                    ))]);
-                }
-                let Some(previous) = view_state.canvas.nodes.get(node_id).cloned() else {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
-                        "view patch node {node_id} has no view state"
-                    ))]);
-                };
-                view_state
-                    .canvas
-                    .nodes
-                    .insert(node_id.clone(), view.clone());
-                inverse_ops.insert(
-                    0,
-                    RuntimeViewPatchOperation::SetNodeView {
-                        node_id: node_id.clone(),
-                        view: previous,
-                    },
-                );
-            }
-            RuntimeViewPatchOperation::MoveNodeView { node_id, from, to } => {
-                if !graph.nodes.iter().any(|node| node.id == *node_id) {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
-                        "view patch node {node_id} does not exist"
-                    ))]);
-                }
-                let Some(previous) = view_state.canvas.nodes.get(node_id).cloned() else {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
-                        "view patch node {node_id} has no view state"
-                    ))]);
-                };
-                if let Some(from) = from
-                    && from != &previous
-                {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
-                        "view patch node {node_id} from view does not match current view"
-                    ))]);
-                }
-                view_state.canvas.nodes.insert(node_id.clone(), to.clone());
-                inverse_ops.insert(
-                    0,
-                    RuntimeViewPatchOperation::MoveNodeView {
-                        node_id: node_id.clone(),
-                        from: Some(to.clone()),
-                        to: previous,
-                    },
-                );
-            }
-        }
-    }
-
-    Ok((
-        runtime_owned_view_state(view_state),
-        RuntimeViewPatch {
-            base_view_revision: patch.base_view_revision,
-            ops: inverse_ops,
-        },
-    ))
 }
 
 fn unresolved_object_diagnostics(graph: &GraphDocument) -> Vec<RuntimeDiagnostic> {
