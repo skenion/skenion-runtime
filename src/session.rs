@@ -7,18 +7,16 @@ use serde_json::{Map, Value, json};
 use skenion_contracts::{InterfaceIncidentEdgePolicyV01, NodeCatalogSnapshotV01};
 
 use crate::{
-    CanvasNodeView, CanvasViewState, ControlState, DataFlow, DataType, DummyExecutionReport, Edge,
-    EdgeSpecCurrent, ExecutionPlan, GraphDocument, GraphDocumentCurrent,
-    GraphFragmentOutsideEndpointPolicyCurrent, GraphNode, GraphNodeCurrent, GraphTargetRef,
-    IdConflictPolicy, IdRemapResult, NodeDefinition, NodeDefinitionCurrent, NodeRegistry,
-    PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath, PlanError,
-    Port, PortActivation, PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef,
-    PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot, ProjectDocumentCurrent,
-    ProjectRequestCurrent, RuntimeCollaborationChange, RuntimeControlEventRequest,
-    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic,
-    RuntimeOperationDiagnostic, RuntimeOperationEnvelope, StringOrStrings, ViewState,
-    build_execution_plan, build_execution_plan_request_current, object_text::ObjectRegistry,
+    CanvasNodeView, CanvasViewState, ControlState, DummyExecutionReport, EdgeSpecCurrent,
+    ExecutionPlan, GraphDocument, GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent,
+    GraphNodeCurrent, GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinitionCurrent,
+    NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
+    PlanError, PortDirectionCurrent, PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot,
+    ProjectDocumentCurrent, ProjectRequestCurrent, RuntimeCollaborationChange,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeControlReadRequest,
+    RuntimeControlReadResponse, RuntimeControlReadTarget, RuntimeControlStateResponse,
+    RuntimeDiagnostic, RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ViewState,
+    build_execution_plan, build_execution_plan_request_current,
     project_current::is_payload_identity_node_kind_current,
     project_document_validation_diagnostics_current, read_graph_param, read_graph_port,
     run_dummy_execution, server::registry_from_nodes, validate_project_request_current,
@@ -26,6 +24,8 @@ use crate::{
 
 mod binding_formats;
 mod history;
+mod node_catalog;
+mod projection;
 mod types;
 
 #[cfg(test)]
@@ -40,6 +40,14 @@ use history::{HistoryDirection, project_document_history_delta};
 use history::{
     redo_graph_history_delta_current, undo_graph_history_delta_current,
     view_state_history_delta_current,
+};
+use node_catalog::RuntimeNodeCatalogCache;
+pub(crate) use projection::{lower_edge_for_execution, lower_graph_node_for_execution};
+#[cfg(test)]
+use projection::{lower_execution_model_for_execution, lower_port_for_execution, remap_edge};
+use projection::{
+    lower_graph_for_execution, lower_node_definition_for_execution,
+    normalized_node_definitions_current,
 };
 pub use types::{
     RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
@@ -79,71 +87,6 @@ struct ObjectNodeReplaceCurrentEdit {
     view: Option<CanvasNodeView>,
     interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
     mutation: RuntimeMutationRequest,
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeNodeCatalogCache {
-    visible_key: Value,
-    snapshot: NodeCatalogSnapshotV01,
-}
-
-impl RuntimeNodeCatalogCache {
-    fn for_project(project: Option<&ProjectDocumentCurrent>) -> Self {
-        Self {
-            visible_key: node_catalog_visible_key(project),
-            snapshot: ObjectRegistry::for_project(project).catalog_projection(),
-        }
-    }
-
-    fn refresh(&mut self, project: Option<&ProjectDocumentCurrent>) {
-        let visible_key = node_catalog_visible_key(project);
-        if self.visible_key == visible_key {
-            return;
-        }
-        self.visible_key = visible_key;
-        self.snapshot = ObjectRegistry::for_project(project).catalog_projection();
-    }
-
-    fn snapshot(&self) -> NodeCatalogSnapshotV01 {
-        self.snapshot.clone()
-    }
-}
-
-impl Default for RuntimeNodeCatalogCache {
-    fn default() -> Self {
-        Self::for_project(None)
-    }
-}
-
-fn node_catalog_visible_key(project: Option<&ProjectDocumentCurrent>) -> Value {
-    let mut project_patches = project
-        .map(|project| {
-            project
-                .patch_library
-                .iter()
-                .map(|patch| {
-                    let metadata = patch.metadata.as_ref();
-                    json!({
-                        "id": &patch.id,
-                        "title": metadata.and_then(|metadata| metadata.title.as_deref()),
-                        "description": metadata.and_then(|metadata| metadata.description.as_deref()),
-                        "interfaceDigest": skenion_contracts::compute_patch_interface_digest_v01(patch),
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    project_patches.sort_by(|left, right| {
-        left.get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .cmp(right.get("id").and_then(Value::as_str).unwrap_or_default())
-    });
-
-    json!({
-        "providers": [],
-        "projectPatches": project_patches,
-    })
 }
 
 #[derive(Debug)]
@@ -2118,90 +2061,6 @@ fn project_document_from_request_current(
     .expect("synthesized current project document should match contract shape")
 }
 
-fn normalized_node_definitions_current(
-    document: &ProjectDocumentCurrent,
-    explicit_nodes: Vec<NodeDefinitionCurrent>,
-) -> Vec<NodeDefinitionCurrent> {
-    let mut nodes = explicit_nodes;
-    let mut seen = nodes
-        .iter()
-        .map(|definition| (definition.id.clone(), definition.version.clone()))
-        .collect::<HashSet<_>>();
-
-    for definition in ObjectRegistry::for_project(Some(document)).node_definition_projection() {
-        let key = (definition.id.clone(), definition.version.clone());
-        if seen.insert(key) {
-            nodes.push(definition);
-        }
-    }
-
-    nodes
-}
-
-fn lower_graph_for_execution(graph: &GraphDocumentCurrent) -> GraphDocument {
-    GraphDocument {
-        schema: "skenion.graph".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        id: graph.id.clone(),
-        revision: graph.revision.clone(),
-        nodes: graph
-            .nodes
-            .iter()
-            .map(|node| lower_graph_node_for_execution(node, &node.id))
-            .collect(),
-        edges: graph.edges.iter().map(lower_edge_for_execution).collect(),
-    }
-}
-
-fn lower_node_definition_for_execution(definition: &NodeDefinitionCurrent) -> NodeDefinition {
-    NodeDefinition {
-        schema: "skenion.node.definition".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        id: definition.id.clone(),
-        version: definition.version.clone(),
-        display_name: definition.display_name.clone(),
-        category: definition.category.clone(),
-        script_api_version: definition.script_api_version.clone(),
-        bundle_hash: definition.bundle_hash.clone(),
-        surface: definition
-            .surface
-            .as_ref()
-            .map(|surface| skenion_contracts::NodeSurfaceV01 {
-                palette: surface.palette.clone(),
-            }),
-        ports: definition
-            .ports
-            .iter()
-            .map(lower_port_for_execution)
-            .collect(),
-        execution: skenion_contracts::NodeExecutionV01 {
-            model: lower_execution_model_for_execution(&definition.execution.model),
-            clock: definition.execution.clock.clone(),
-        },
-        state: skenion_contracts::NodeStateV01 {
-            persistent: definition.state.persistent,
-        },
-        permissions: definition.permissions.clone(),
-        capabilities: definition.capabilities.clone(),
-    }
-}
-
-fn lower_execution_model_for_execution(
-    model: &skenion_contracts::ExecutionModelV01,
-) -> crate::ExecutionModel {
-    match model {
-        skenion_contracts::ExecutionModelV01::Event => crate::ExecutionModel::Event,
-        skenion_contracts::ExecutionModelV01::Control => crate::ExecutionModel::Control,
-        skenion_contracts::ExecutionModelV01::Frame => crate::ExecutionModel::Frame,
-        skenion_contracts::ExecutionModelV01::AudioBlock => crate::ExecutionModel::AudioBlock,
-        skenion_contracts::ExecutionModelV01::VideoFrame => crate::ExecutionModel::VideoFrame,
-        skenion_contracts::ExecutionModelV01::GpuPass => crate::ExecutionModel::GpuPass,
-        skenion_contracts::ExecutionModelV01::AsyncResource => crate::ExecutionModel::AsyncResource,
-        skenion_contracts::ExecutionModelV01::ScriptControl => crate::ExecutionModel::ScriptControl,
-        skenion_contracts::ExecutionModelV01::NativePlugin => crate::ExecutionModel::NativePlugin,
-    }
-}
-
 fn reconcile_view_state_with_graph_current(
     graph: &GraphDocumentCurrent,
     view_state: Option<ViewState>,
@@ -3063,104 +2922,6 @@ fn next_available_node_id(base: &str, used_node_ids: &HashSet<String>) -> String
         }
         index += 1;
     }
-}
-
-pub(crate) fn lower_graph_node_for_execution(
-    node: &GraphNodeCurrent,
-    pasted_id: &str,
-) -> GraphNode {
-    GraphNode {
-        id: pasted_id.to_owned(),
-        kind: node.kind.clone(),
-        kind_version: node.kind_version.clone(),
-        params: node.params.clone(),
-        ports: node.ports.iter().map(lower_port_for_execution).collect(),
-    }
-}
-
-fn lower_port_for_execution(port: &PortSpecCurrent) -> Port {
-    Port {
-        id: port.id.clone(),
-        direction: match port.direction {
-            PortDirectionCurrent::Input => PortDirection::Input,
-            PortDirectionCurrent::Output => PortDirection::Output,
-        },
-        label: port.label.clone(),
-        data_type: data_type_from_port_spec(port),
-        required: port.required,
-        default_value: port.default_value.clone(),
-        activation: port.trigger_mode.as_ref().map(|trigger| match trigger {
-            skenion_contracts::TriggerModeV01::Trigger => PortActivation::Trigger,
-            skenion_contracts::TriggerModeV01::Latched => PortActivation::Latched,
-            skenion_contracts::TriggerModeV01::Passive => PortActivation::Latched,
-        }),
-    }
-}
-
-fn data_type_from_port_spec(port: &PortSpecCurrent) -> DataType {
-    let (canonical_flow, data_kind) = current_port_type_parts(&port.port_type);
-    let format = match data_kind.as_str() {
-        "value.core.float32" => Some(StringOrStrings::One("f32".to_owned())),
-        "value.core.tensor" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
-        _ => None,
-    };
-    let color_space = (data_kind == "value.core.tensor").then(|| "srgb".to_owned());
-    DataType {
-        flow: canonical_flow.unwrap_or_else(|| match port.rate {
-            Some(PortRateCurrent::Event) => DataFlow::Event,
-            Some(PortRateCurrent::Audio) => DataFlow::Signal,
-            Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
-            Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
-            | None => {
-                if data_kind == "value.core.tensor" {
-                    DataFlow::Resource
-                } else {
-                    DataFlow::Control
-                }
-            }
-        }),
-        data_kind,
-        unit: None,
-        range: None,
-        shape: None,
-        channels: None,
-        sample_rate: None,
-        format,
-        color_space,
-        frame_rate: None,
-        alpha_policy: None,
-        values: None,
-    }
-}
-
-fn current_port_type_parts(port_type: &str) -> (Option<DataFlow>, String) {
-    match port_type {
-        value_type if value_type.starts_with("value.") => (None, value_type.to_owned()),
-        other => (None, other.to_owned()),
-    }
-}
-
-fn remap_edge(edge: &EdgeSpecCurrent, node_id_map: &BTreeMap<String, String>) -> Edge {
-    Edge {
-        from: PortRef {
-            node: node_id_map
-                .get(&edge.source.node_id)
-                .cloned()
-                .unwrap_or_else(|| edge.source.node_id.clone()),
-            port: edge.source.port_id.clone(),
-        },
-        to: PortRef {
-            node: node_id_map
-                .get(&edge.target.node_id)
-                .cloned()
-                .unwrap_or_else(|| edge.target.node_id.clone()),
-            port: edge.target.port_id.clone(),
-        },
-    }
-}
-
-pub(crate) fn lower_edge_for_execution(edge: &EdgeSpecCurrent) -> Edge {
-    remap_edge(edge, &BTreeMap::new())
 }
 
 fn lower_fragment_view_patch(
