@@ -4,8 +4,9 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use skenion_contracts::{InterfaceIncidentEdgePolicyV01, NodeCatalogSnapshotV01};
 
 use crate::{
     CanvasNodeView, CanvasViewState, ControlState, DataFlow, DataType, DummyExecutionReport, Edge,
@@ -20,7 +21,7 @@ use crate::{
     RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlReadTarget,
     RuntimeControlStateResponse, RuntimeDiagnostic, RuntimeOperationDiagnostic,
     RuntimeOperationEnvelope, StringOrStrings, ValueEndpointRef, ValueFormat, ViewState,
-    build_execution_plan, build_execution_plan_request_current,
+    build_execution_plan, build_execution_plan_request_current, object_text::ObjectRegistry,
     project_current::is_payload_identity_node_kind_current,
     project_document_validation_diagnostics_current, read_graph_param, read_graph_port,
     run_dummy_execution, server::registry_from_nodes, validate_project_request_current,
@@ -343,6 +344,71 @@ pub enum RuntimeHistoryEntryKind {
     Redo,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeNodeCatalogCache {
+    visible_key: Value,
+    snapshot: NodeCatalogSnapshotV01,
+}
+
+impl RuntimeNodeCatalogCache {
+    fn for_project(project: Option<&ProjectDocumentCurrent>) -> Self {
+        Self {
+            visible_key: node_catalog_visible_key(project),
+            snapshot: ObjectRegistry::for_project(project).catalog_projection(),
+        }
+    }
+
+    fn refresh(&mut self, project: Option<&ProjectDocumentCurrent>) {
+        let visible_key = node_catalog_visible_key(project);
+        if self.visible_key == visible_key {
+            return;
+        }
+        self.visible_key = visible_key;
+        self.snapshot = ObjectRegistry::for_project(project).catalog_projection();
+    }
+
+    fn snapshot(&self) -> NodeCatalogSnapshotV01 {
+        self.snapshot.clone()
+    }
+}
+
+impl Default for RuntimeNodeCatalogCache {
+    fn default() -> Self {
+        Self::for_project(None)
+    }
+}
+
+fn node_catalog_visible_key(project: Option<&ProjectDocumentCurrent>) -> Value {
+    let mut project_patches = project
+        .map(|project| {
+            project
+                .patch_library
+                .iter()
+                .map(|patch| {
+                    let metadata = patch.metadata.as_ref();
+                    json!({
+                        "id": &patch.id,
+                        "title": metadata.and_then(|metadata| metadata.title.as_deref()),
+                        "description": metadata.and_then(|metadata| metadata.description.as_deref()),
+                        "interfaceDigest": skenion_contracts::compute_patch_interface_digest_v01(patch),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    project_patches.sort_by(|left, right| {
+        left.get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .cmp(right.get("id").and_then(Value::as_str).unwrap_or_default())
+    });
+
+    json!({
+        "providers": [],
+        "projectPatches": project_patches,
+    })
+}
+
 #[derive(Debug)]
 pub struct RuntimeSession {
     project: Option<ProjectDocumentCurrent>,
@@ -361,6 +427,7 @@ pub struct RuntimeSession {
     redo_stack: Vec<HistoryEntry>,
     next_event_sequence: u64,
     package_registry_revision: Option<u64>,
+    node_catalog: RuntimeNodeCatalogCache,
 }
 
 impl Default for RuntimeSession {
@@ -382,6 +449,7 @@ impl Default for RuntimeSession {
             redo_stack: Vec::new(),
             next_event_sequence: 1,
             package_registry_revision: None,
+            node_catalog: RuntimeNodeCatalogCache::default(),
         }
     }
 }
@@ -450,6 +518,10 @@ impl RuntimeSession {
         }
     }
 
+    pub(crate) fn node_catalog_snapshot(&self) -> NodeCatalogSnapshotV01 {
+        self.node_catalog.snapshot()
+    }
+
     pub(crate) fn preview_context(&self) -> Result<PreviewContext, Vec<RuntimeDiagnostic>> {
         let Some(graph) = &self.graph else {
             return Err(vec![RuntimeDiagnostic::error(
@@ -485,7 +557,20 @@ impl RuntimeSession {
         request: ProjectRequestCurrent,
         package_registry_revision: Option<u64>,
     ) -> RuntimeSessionResponse {
-        let document = project_document_from_request_current(&request);
+        let mut document = project_document_from_request_current(&request);
+        let nodes_current = normalized_node_definitions_current(&document, request.nodes);
+        let view_state = runtime_owned_view_state(reconcile_view_state_with_graph_current(
+            &document.graph,
+            Some(document.view_state.clone()),
+        ));
+        document.view_state = view_state.clone();
+        let request = ProjectRequestCurrent {
+            document: Some(document.clone()),
+            graph: document.graph.clone(),
+            nodes: nodes_current.clone(),
+            patch_library: document.patch_library.clone(),
+            view_state: Some(view_state.clone()),
+        };
         if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
             let mut diagnostics =
                 project_document_validation_diagnostics_current(&document, &report);
@@ -512,12 +597,8 @@ impl RuntimeSession {
             Err(diagnostics) => return self.response(false, diagnostics, None),
         };
         let control_state = ControlState::from_graph(&graph);
-        let view_state = reconcile_view_state_with_graph_current(
-            &document.graph,
-            Some(document.view_state.clone()),
-        );
         self.project = Some(document);
-        self.nodes_current = request.nodes;
+        self.nodes_current = nodes_current;
         self.graph = Some(graph);
         self.registry = Some(registry);
         self.plan = Some(plan);
@@ -529,6 +610,7 @@ impl RuntimeSession {
         self.clear_history();
         self.revision += 1;
         self.package_registry_revision = package_registry_revision;
+        self.refresh_node_catalog_cache();
 
         self.response(true, diagnostics, None)
     }
@@ -717,6 +799,90 @@ impl RuntimeSession {
         )
     }
 
+    pub(crate) fn apply_object_node_create_current(
+        &mut self,
+        target: GraphTargetRef,
+        node: GraphNodeCurrent,
+        view: Option<CanvasNodeView>,
+        definition: Option<NodeDefinitionCurrent>,
+        actor_id: Option<String>,
+        client_id: Option<String>,
+        description: Option<String>,
+    ) -> RuntimePatchResponse {
+        let previous_nodes_current = self.nodes_current.clone();
+        self.ensure_object_node_definition_current(definition);
+        let response = self.apply_object_node_create_current_inner(
+            target,
+            node,
+            view,
+            actor_id,
+            client_id,
+            description,
+        );
+        if !response.applied {
+            self.nodes_current = previous_nodes_current;
+        }
+        response
+    }
+
+    pub(crate) fn apply_object_node_replace_current(
+        &mut self,
+        target: GraphTargetRef,
+        node: GraphNodeCurrent,
+        view: Option<CanvasNodeView>,
+        definition: Option<NodeDefinitionCurrent>,
+        interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
+        actor_id: Option<String>,
+        client_id: Option<String>,
+        description: Option<String>,
+    ) -> (RuntimePatchResponse, Vec<String>) {
+        let previous_nodes_current = self.nodes_current.clone();
+        self.ensure_object_node_definition_current(definition);
+        let (response, dropped_edge_ids) = self.apply_object_node_replace_current_inner(
+            target,
+            node,
+            view,
+            interface_incident_edge_policy,
+            actor_id,
+            client_id,
+            description,
+        );
+        if !response.applied {
+            self.nodes_current = previous_nodes_current;
+        }
+        (response, dropped_edge_ids)
+    }
+
+    pub(crate) fn apply_node_delete_current(
+        &mut self,
+        target: GraphTargetRef,
+        node_id: String,
+        actor_id: Option<String>,
+        client_id: Option<String>,
+        description: Option<String>,
+    ) -> (RuntimePatchResponse, Vec<String>) {
+        self.apply_node_delete_current_inner(target, node_id, actor_id, client_id, description)
+    }
+
+    pub(crate) fn apply_node_update_current(
+        &mut self,
+        target: GraphTargetRef,
+        node_id: String,
+        params: Map<String, Value>,
+        actor_id: Option<String>,
+        client_id: Option<String>,
+        description: Option<String>,
+    ) -> RuntimePatchResponse {
+        self.apply_node_update_current_inner(
+            target,
+            node_id,
+            params,
+            actor_id,
+            client_id,
+            description,
+        )
+    }
+
     pub fn history(&self) -> RuntimeHistory {
         RuntimeHistory {
             schema: "skenion.runtime.history",
@@ -727,6 +893,580 @@ impl RuntimeSession {
             undo_depth: self.undo_stack.len() as u64,
             redo_depth: self.redo_stack.len() as u64,
         }
+    }
+
+    fn ensure_object_node_definition_current(&mut self, definition: Option<NodeDefinitionCurrent>) {
+        let Some(definition) = definition else {
+            return;
+        };
+        if self
+            .nodes_current
+            .iter()
+            .any(|existing| existing.id == definition.id && existing.version == definition.version)
+        {
+            return;
+        }
+        self.nodes_current.push(definition);
+    }
+
+    fn apply_object_node_create_current_inner(
+        &mut self,
+        target: GraphTargetRef,
+        node: GraphNodeCurrent,
+        view: Option<CanvasNodeView>,
+        actor_id: Option<String>,
+        client_id: Option<String>,
+        description: Option<String>,
+    ) -> RuntimePatchResponse {
+        let Some(project) = self.project.as_ref().cloned() else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::structured_error(
+                    "node.target.no-project",
+                    "no project loaded in runtime session",
+                    json!({ "target": target }),
+                )],
+            );
+        };
+
+        let target_revision = match target_graph_revision_current(&project, &target) {
+            Ok(revision) => revision,
+            Err(diagnostic) => {
+                return self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                );
+            }
+        };
+        if target.base_revision != target_revision {
+            return node_target_revision_conflict_response(self, &target, &target_revision);
+        }
+
+        let mut graph = match graph_for_path_current(&project, &target.path) {
+            Some(graph) => graph,
+            None => {
+                return self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![RuntimeDiagnostic::structured_error(
+                        "node.target.missing-graph",
+                        "node target graph is not available in the active current 0.1 project",
+                        json!({ "target": target }),
+                    )],
+                );
+            }
+        };
+        if graph.nodes.iter().any(|existing| existing.id == node.id) {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::structured_error(
+                    "node.create.node-id-conflict",
+                    format!("node id {} already exists in target graph", node.id),
+                    json!({ "nodeId": node.id, "target": target }),
+                )],
+            );
+        }
+
+        let mut next_project = project.clone();
+        let mut view_state = project.view_state.clone();
+        let mut view_changed = false;
+        if let Some(view) = view {
+            if target_supports_view_state(&target.path) {
+                view_state.canvas.nodes.insert(node.id.clone(), view);
+                view_changed = true;
+            } else {
+                return self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![unsupported_patch_view_change_diagnostic(&target)],
+                );
+            }
+        }
+        graph.nodes.push(node);
+        graph.revision = next_graph_revision(&graph.revision);
+        let next_view_revision = apply_graph_to_project_current(
+            &mut next_project,
+            graph,
+            view_state,
+            view_changed,
+            &target.path,
+            self.view_revision,
+        );
+
+        self.apply_project_document_update(
+            project,
+            next_project,
+            next_view_revision,
+            RuntimeMutationRequest {
+                graph_patch: None,
+                view_patch: None,
+                actor_id,
+                client_id,
+                description,
+            },
+            None,
+        )
+    }
+
+    fn apply_object_node_replace_current_inner(
+        &mut self,
+        target: GraphTargetRef,
+        node: GraphNodeCurrent,
+        view: Option<CanvasNodeView>,
+        interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
+        actor_id: Option<String>,
+        client_id: Option<String>,
+        description: Option<String>,
+    ) -> (RuntimePatchResponse, Vec<String>) {
+        let Some(project) = self.project.as_ref().cloned() else {
+            return (
+                self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![RuntimeDiagnostic::structured_error(
+                        "node.target.no-project",
+                        "no project loaded in runtime session",
+                        json!({ "target": target }),
+                    )],
+                ),
+                Vec::new(),
+            );
+        };
+
+        let target_revision = match target_graph_revision_current(&project, &target) {
+            Ok(revision) => revision,
+            Err(diagnostic) => {
+                return (
+                    self.patch_response(
+                        false,
+                        false,
+                        false,
+                        vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                    ),
+                    Vec::new(),
+                );
+            }
+        };
+        if target.base_revision != target_revision {
+            return (
+                node_target_revision_conflict_response(self, &target, &target_revision),
+                Vec::new(),
+            );
+        }
+
+        let mut graph = match graph_for_path_current(&project, &target.path) {
+            Some(graph) => graph,
+            None => {
+                return (
+                    self.patch_response(
+                        false,
+                        false,
+                        false,
+                        vec![RuntimeDiagnostic::structured_error(
+                            "node.target.missing-graph",
+                            "node target graph is not available in the active current 0.1 project",
+                            json!({ "target": target }),
+                        )],
+                    ),
+                    Vec::new(),
+                );
+            }
+        };
+        let Some(node_index) = graph
+            .nodes
+            .iter()
+            .position(|existing| existing.id == node.id)
+        else {
+            return (
+                self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![RuntimeDiagnostic::structured_error(
+                        "node.replace.node-missing",
+                        format!("node {} does not exist in target graph", node.id),
+                        json!({ "nodeId": node.id, "target": target }),
+                    )],
+                ),
+                Vec::new(),
+            );
+        };
+
+        let previous_node = graph.nodes[node_index].clone();
+        graph.nodes[node_index] = node.clone();
+        let invalid_incident_edge_ids = invalid_incident_edge_ids_current(&graph, &node.id);
+        let policy = interface_incident_edge_policy.unwrap_or(InterfaceIncidentEdgePolicyV01::Drop);
+        let mut diagnostics = Vec::new();
+        if !invalid_incident_edge_ids.is_empty() {
+            match policy {
+                InterfaceIncidentEdgePolicyV01::Drop => {
+                    let invalid = invalid_incident_edge_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<HashSet<_>>();
+                    graph
+                        .edges
+                        .retain(|edge| !invalid.contains(edge.id.as_str()));
+                    diagnostics.push(RuntimeDiagnostic::structured_warning(
+                        "node.replace.incident-edges-dropped",
+                        format!(
+                            "node.replace dropped {} incident edge(s) that no longer match node {}'s interface",
+                            invalid_incident_edge_ids.len(),
+                            node.id
+                        ),
+                        json!({
+                            "target": target,
+                            "nodeId": node.id,
+                            "droppedEdgeIds": invalid_incident_edge_ids,
+                            "interfaceIncidentEdgePolicy": policy,
+                        }),
+                    ));
+                }
+                InterfaceIncidentEdgePolicyV01::Reject => {
+                    return (
+                        self.patch_response(
+                            false,
+                            false,
+                            false,
+                            vec![RuntimeDiagnostic::structured_error(
+                                "node.replace.invalid-incident-edge",
+                                format!(
+                                    "node.replace would leave {} invalid incident edge(s) on node {}",
+                                    invalid_incident_edge_ids.len(),
+                                    node.id
+                                ),
+                                json!({
+                                    "target": target,
+                                    "nodeId": node.id,
+                                    "edgeIds": invalid_incident_edge_ids,
+                                    "interfaceIncidentEdgePolicy": policy,
+                                }),
+                            )],
+                        ),
+                        Vec::new(),
+                    );
+                }
+                InterfaceIncidentEdgePolicyV01::PreserveDiagnostic => {
+                    return (
+                        self.patch_response(
+                            false,
+                            false,
+                            false,
+                            vec![RuntimeDiagnostic::structured_error(
+                                "node.replace.preserve-diagnostic-unsupported",
+                                "node.replace cannot preserve invalid incident edges in the current Runtime graph substrate",
+                                json!({
+                                    "target": target,
+                                    "nodeId": node.id,
+                                    "edgeIds": invalid_incident_edge_ids,
+                                    "interfaceIncidentEdgePolicy": policy,
+                                }),
+                            )],
+                        ),
+                        Vec::new(),
+                    );
+                }
+            }
+        }
+
+        let mut next_project = project.clone();
+        let mut view_state = project.view_state.clone();
+        let mut view_changed = false;
+        if let Some(view) = view {
+            if target_supports_view_state(&target.path) {
+                let previous = view_state
+                    .canvas
+                    .nodes
+                    .insert(node.id.clone(), view.clone());
+                view_changed = previous.as_ref() != Some(&view);
+            } else {
+                return (
+                    self.patch_response(
+                        false,
+                        false,
+                        false,
+                        vec![unsupported_patch_view_change_diagnostic(&target)],
+                    ),
+                    Vec::new(),
+                );
+            }
+        }
+
+        let graph_changed =
+            previous_node != graph.nodes[node_index] || !invalid_incident_edge_ids.is_empty();
+        if !graph_changed && !view_changed {
+            return (
+                self.patch_response(true, false, false, diagnostics),
+                Vec::new(),
+            );
+        }
+        graph.revision = next_graph_revision(&graph.revision);
+        let next_view_revision = apply_graph_to_project_current(
+            &mut next_project,
+            graph,
+            view_state,
+            view_changed,
+            &target.path,
+            self.view_revision,
+        );
+
+        let mut response = self.apply_project_document_update(
+            project,
+            next_project,
+            next_view_revision,
+            RuntimeMutationRequest {
+                graph_patch: None,
+                view_patch: None,
+                actor_id,
+                client_id,
+                description,
+            },
+            None,
+        );
+        if response.applied {
+            response.diagnostics.extend(diagnostics);
+        }
+        (response, invalid_incident_edge_ids)
+    }
+
+    fn apply_node_delete_current_inner(
+        &mut self,
+        target: GraphTargetRef,
+        node_id: String,
+        actor_id: Option<String>,
+        client_id: Option<String>,
+        description: Option<String>,
+    ) -> (RuntimePatchResponse, Vec<String>) {
+        let Some(project) = self.project.as_ref().cloned() else {
+            return (
+                self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![RuntimeDiagnostic::structured_error(
+                        "node.target.no-project",
+                        "no project loaded in runtime session",
+                        json!({ "target": target }),
+                    )],
+                ),
+                Vec::new(),
+            );
+        };
+
+        let target_revision = match target_graph_revision_current(&project, &target) {
+            Ok(revision) => revision,
+            Err(diagnostic) => {
+                return (
+                    self.patch_response(
+                        false,
+                        false,
+                        false,
+                        vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                    ),
+                    Vec::new(),
+                );
+            }
+        };
+        if target.base_revision != target_revision {
+            return (
+                node_target_revision_conflict_response(self, &target, &target_revision),
+                Vec::new(),
+            );
+        }
+
+        let mut graph = match graph_for_path_current(&project, &target.path) {
+            Some(graph) => graph,
+            None => {
+                return (
+                    self.patch_response(
+                        false,
+                        false,
+                        false,
+                        vec![RuntimeDiagnostic::structured_error(
+                            "node.target.missing-graph",
+                            "node target graph is not available in the active current 0.1 project",
+                            json!({ "target": target }),
+                        )],
+                    ),
+                    Vec::new(),
+                );
+            }
+        };
+        let Some(node_index) = graph.nodes.iter().position(|node| node.id == node_id) else {
+            return (
+                self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![RuntimeDiagnostic::structured_error(
+                        "node.delete.node-missing",
+                        format!("node {node_id} does not exist in target graph"),
+                        json!({ "nodeId": node_id, "target": target }),
+                    )],
+                ),
+                Vec::new(),
+            );
+        };
+
+        graph.nodes.remove(node_index);
+        let dropped_edge_ids = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.source.node_id == node_id || edge.target.node_id == node_id)
+            .map(|edge| edge.id.clone())
+            .collect::<Vec<_>>();
+        let dropped = dropped_edge_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        graph
+            .edges
+            .retain(|edge| !dropped.contains(edge.id.as_str()));
+        graph.revision = next_graph_revision(&graph.revision);
+
+        let mut next_project = project.clone();
+        let mut view_state = project.view_state.clone();
+        let view_changed = target_supports_view_state(&target.path)
+            && view_state.canvas.nodes.remove(&node_id).is_some();
+        let next_view_revision = apply_graph_to_project_current(
+            &mut next_project,
+            graph,
+            view_state,
+            view_changed,
+            &target.path,
+            self.view_revision,
+        );
+
+        let response = self.apply_project_document_update(
+            project,
+            next_project,
+            next_view_revision,
+            RuntimeMutationRequest {
+                graph_patch: None,
+                view_patch: None,
+                actor_id,
+                client_id,
+                description,
+            },
+            None,
+        );
+        (response, dropped_edge_ids)
+    }
+
+    fn apply_node_update_current_inner(
+        &mut self,
+        target: GraphTargetRef,
+        node_id: String,
+        params: Map<String, Value>,
+        actor_id: Option<String>,
+        client_id: Option<String>,
+        description: Option<String>,
+    ) -> RuntimePatchResponse {
+        if params.is_empty() {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::structured_error(
+                    "node.update.params-required",
+                    "node.update requires at least one payload.params entry",
+                    json!({ "nodeId": node_id, "target": target }),
+                )],
+            );
+        }
+        let Some(project) = self.project.as_ref().cloned() else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::structured_error(
+                    "node.target.no-project",
+                    "no project loaded in runtime session",
+                    json!({ "target": target }),
+                )],
+            );
+        };
+
+        let target_revision = match target_graph_revision_current(&project, &target) {
+            Ok(revision) => revision,
+            Err(diagnostic) => {
+                return self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                );
+            }
+        };
+        if target.base_revision != target_revision {
+            return node_target_revision_conflict_response(self, &target, &target_revision);
+        }
+
+        let mut graph = match graph_for_path_current(&project, &target.path) {
+            Some(graph) => graph,
+            None => {
+                return self.patch_response(
+                    false,
+                    false,
+                    false,
+                    vec![RuntimeDiagnostic::structured_error(
+                        "node.target.missing-graph",
+                        "node target graph is not available in the active current 0.1 project",
+                        json!({ "target": target }),
+                    )],
+                );
+            }
+        };
+        let Some(node) = graph.nodes.iter_mut().find(|node| node.id == node_id) else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::structured_error(
+                    "node.update.node-missing",
+                    format!("node {node_id} does not exist in target graph"),
+                    json!({ "nodeId": node_id, "target": target }),
+                )],
+            );
+        };
+
+        for (key, value) in params {
+            node.params.insert(key, value);
+        }
+        graph.revision = next_graph_revision(&graph.revision);
+
+        let mut next_project = project.clone();
+        let next_view_revision = apply_graph_to_project_current(
+            &mut next_project,
+            graph,
+            project.view_state.clone(),
+            false,
+            &target.path,
+            self.view_revision,
+        );
+
+        self.apply_project_document_update(
+            project,
+            next_project,
+            next_view_revision,
+            RuntimeMutationRequest {
+                graph_patch: None,
+                view_patch: None,
+                actor_id,
+                client_id,
+                description,
+            },
+            None,
+        )
     }
 
     pub fn undo(&mut self) -> RuntimePatchResponse {
@@ -849,6 +1589,7 @@ impl RuntimeSession {
         self.clear_history();
         self.revision += 1;
         self.package_registry_revision = None;
+        self.refresh_node_catalog_cache();
         self.response(true, Vec::new(), None)
     }
 
@@ -995,6 +1736,10 @@ impl RuntimeSession {
 
     pub fn project_document_current(&self) -> Option<ProjectDocumentCurrent> {
         self.project.clone()
+    }
+
+    fn refresh_node_catalog_cache(&mut self) {
+        self.node_catalog.refresh(self.project.as_ref());
     }
 
     pub fn target_revision_current(&self, target: &GraphTargetRef) -> Option<String> {
@@ -1353,6 +2098,7 @@ impl RuntimeSession {
         };
 
         self.project = Some(after);
+        self.refresh_node_catalog_cache();
         self.graph = Some(graph.clone());
         self.registry = Some(registry);
         self.plan = Some(plan);
@@ -1553,6 +2299,7 @@ impl RuntimeSession {
         );
 
         self.project = Some(project);
+        self.refresh_node_catalog_cache();
         self.graph = Some(graph.clone());
         self.registry = Some(registry);
         self.plan = Some(plan);
@@ -1907,6 +2654,26 @@ fn project_document_from_request_current(
         "patchLibrary": request.patch_library.clone(),
     }))
     .expect("synthesized current project document should match contract shape")
+}
+
+fn normalized_node_definitions_current(
+    document: &ProjectDocumentCurrent,
+    explicit_nodes: Vec<NodeDefinitionCurrent>,
+) -> Vec<NodeDefinitionCurrent> {
+    let mut nodes = explicit_nodes;
+    let mut seen = nodes
+        .iter()
+        .map(|definition| (definition.id.clone(), definition.version.clone()))
+        .collect::<HashSet<_>>();
+
+    for definition in ObjectRegistry::for_project(Some(document)).node_definition_projection() {
+        let key = (definition.id.clone(), definition.version.clone());
+        if seen.insert(key) {
+            nodes.push(definition);
+        }
+    }
+
+    nodes
 }
 
 fn lower_graph_for_execution(graph: &GraphDocumentCurrent) -> GraphDocument {
@@ -2440,6 +3207,62 @@ fn apply_collaboration_changes_to_project_current(
     Ok((project, next_view_revision))
 }
 
+fn node_target_revision_conflict_response(
+    session: &RuntimeSession,
+    target: &GraphTargetRef,
+    actual_revision: &str,
+) -> RuntimePatchResponse {
+    session.patch_response(
+        false,
+        false,
+        true,
+        vec![RuntimeDiagnostic::structured_error(
+            "node.command.target-revision-conflict",
+            format!(
+                "target baseRevision {} does not match target graph revision {}",
+                target.base_revision, actual_revision
+            ),
+            json!({
+                "expectedRevision": target.base_revision,
+                "actualRevision": actual_revision,
+                "target": target,
+            }),
+        )],
+    )
+}
+
+fn apply_graph_to_project_current(
+    project: &mut ProjectDocumentCurrent,
+    graph: GraphDocumentCurrent,
+    view_state: ViewState,
+    view_changed: bool,
+    path: &PatchPath,
+    view_revision: u64,
+) -> u64 {
+    let mut next_view_revision = view_revision;
+    if matches!(path, PatchPath::Root | PatchPath::HelpWorkingCopy { .. }) {
+        let execution_graph = lower_graph_for_execution(&graph);
+        project.graph = graph;
+        project.revision = project.graph.revision.clone();
+        project.view_state = runtime_owned_view_state(reconcile_view_state_with_execution_graph(
+            &execution_graph,
+            Some(view_state),
+        ));
+        if view_changed {
+            next_view_revision += 1;
+        }
+    } else if let PatchPath::ProjectPatchDefinition { patch_id } = path {
+        let patch = project
+            .patch_library
+            .iter_mut()
+            .find(|patch| patch.id == *patch_id)
+            .expect("project patch definition lookup was already proven");
+        patch.graph = graph;
+        patch.revision = patch.graph.revision.clone();
+    }
+    next_view_revision
+}
+
 fn target_supports_view_state(path: &PatchPath) -> bool {
     matches!(path, PatchPath::Root | PatchPath::HelpWorkingCopy { .. })
 }
@@ -2470,6 +3293,59 @@ fn graph_for_path_current(
         | PatchPath::PackagePatchDefinition { .. }
         | PatchPath::EmbeddedPatchInstance { .. } => None,
     }
+}
+
+fn invalid_incident_edge_ids_current(graph: &GraphDocumentCurrent, node_id: &str) -> Vec<String> {
+    graph
+        .edges
+        .iter()
+        .filter(|edge| edge.source.node_id == node_id || edge.target.node_id == node_id)
+        .filter(|edge| !edge_is_valid_current(graph, edge))
+        .map(|edge| edge.id.clone())
+        .collect()
+}
+
+fn edge_is_valid_current(graph: &GraphDocumentCurrent, edge: &EdgeSpecCurrent) -> bool {
+    let Some(source_node) = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == edge.source.node_id)
+    else {
+        return false;
+    };
+    let Some(target_node) = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == edge.target.node_id)
+    else {
+        return false;
+    };
+    let Some(source_port) = source_node
+        .ports
+        .iter()
+        .find(|port| port.id == edge.source.port_id)
+    else {
+        return false;
+    };
+    let Some(target_port) = target_node
+        .ports
+        .iter()
+        .find(|port| port.id == edge.target.port_id)
+    else {
+        return false;
+    };
+
+    source_port.direction == PortDirectionCurrent::Output
+        && target_port.direction == PortDirectionCurrent::Input
+        && port_types_compatible_current(source_port, target_port)
+}
+
+fn port_types_compatible_current(source: &PortSpecCurrent, target: &PortSpecCurrent) -> bool {
+    source.port_type == target.port_type
+        || target
+            .accepts
+            .as_ref()
+            .is_some_and(|accepted| accepted.iter().any(|kind| kind == &source.port_type))
 }
 
 fn paste_graph_fragment_into_graph_current(

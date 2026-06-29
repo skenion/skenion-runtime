@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
-    DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeDefinitionCurrent, PreviewFrameLimit,
+    DEFAULT_HOST, DEFAULT_PORT, DiagnosticSeverity, ExecutionPlan, PreviewFrameLimit,
     ProjectDocumentCurrent, ProjectRequestCurrent, RunProjectRequestCurrent, RuntimeDiagnostic,
     ServeRuntimeOptions, build_execution_plan_request_current,
     build_execution_plan_run_request_current, format_dummy_execution_text,
@@ -278,15 +278,22 @@ fn validate_project_document_schema_version(
 fn decode_project_document_request_current(
     mut value: serde_json::Value,
 ) -> Result<ProjectRequestCurrent, Box<dyn std::error::Error>> {
+    if value.get("nodes").is_some() {
+        return Err(diagnostics_error(vec![RuntimeDiagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: "ProjectDocument payloads must not include top-level nodes; node definitions must come from Runtime registry/catalog sources or an explicit legacy ProjectRequest wrapper".to_owned(),
+            code: Some("project.document.top-level-nodes-rejected".to_owned()),
+            details: Some(serde_json::json!({
+                "surface": "project",
+                "field": "nodes",
+                "schema": "skenion.project",
+            })),
+        }]));
+    }
     let schema_diagnostics = project_document_payload_schema_diagnostics(&value);
     if !schema_diagnostics.is_empty() {
         return Err(diagnostics_error(schema_diagnostics));
     }
-    let nodes = value
-        .as_object_mut()
-        .and_then(|object| object.remove("nodes"))
-        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-    let nodes = serde_json::from_value::<Vec<NodeDefinitionCurrent>>(nodes)?;
     if let Some(object) = value.as_object_mut() {
         object.remove("frames");
     }
@@ -297,7 +304,8 @@ fn decode_project_document_request_current(
         ));
     }
     Ok(ProjectRequestCurrent::from_project_document(
-        document, nodes,
+        document,
+        Vec::new(),
     ))
 }
 

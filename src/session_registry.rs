@@ -69,6 +69,18 @@ impl RuntimeSessionRegistry {
         self.get_or_create(self.default_session_id())
     }
 
+    pub fn get_existing(&self, session_id: &str) -> Option<RuntimeSessionRecord> {
+        assert!(
+            !session_id.is_empty(),
+            "session_id must be explicit; use default_record() for the built-in default session"
+        );
+        self.sessions
+            .read()
+            .expect("runtime session registry lock should not be poisoned")
+            .get(session_id)
+            .cloned()
+    }
+
     pub fn get_or_create(&self, session_id: &str) -> RuntimeSessionRecord {
         assert!(
             !session_id.is_empty(),

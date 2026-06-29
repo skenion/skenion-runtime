@@ -37,8 +37,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     CURRENT_SCHEMA_VERSION, DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse,
-    NodeDefinition, NodeDefinitionCurrent, NodeRegistry, PackageRegistryListResponseV01,
-    PreviewDocument, ProjectDocumentCurrent, ProjectRequestCurrent, RunProjectRequestCurrent,
+    NodeDefinition, NodeRegistry, PackageRegistryListResponseV01, PreviewDocument,
+    ProjectDocumentCurrent, ProjectRequestCurrent, RunProjectRequestCurrent,
     RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata, RuntimeCollaborationChange,
     RuntimeCollaborationConflict, RuntimeCollaborationNack, RuntimeCollaborationNackReason,
     RuntimeCollaborationOperationBatch, RuntimeCollaborationOperationBatchResult,
@@ -59,7 +59,7 @@ use crate::{
     collaboration_broadcast_event_after_high_water, collaboration_event,
     generated_shader_response_from_preview_document, project_document_payload_schema_diagnostics,
     project_document_validation_diagnostics_current,
-    realtime::handle_runtime_realtime_socket,
+    realtime::{handle_runtime_realtime_socket, node_catalog_snapshot_for_record},
     run_dummy_execution,
     runtime_time::created_at_now,
     schema_version_diagnostic,
@@ -277,6 +277,10 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
             get(session_snapshot_by_id),
         )
         .route(
+            "/v0/sessions/{session_id}/node-catalog",
+            get(session_node_catalog_by_id),
+        )
+        .route(
             "/v0/sessions/{session_id}/events/stream",
             get(session_events_stream_by_id),
         )
@@ -399,12 +403,23 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.realtime.v0",
             "session.project",
             "session.project.v0.1",
+            "session.nodeCatalog",
+            "session.nodeCatalog.v0.1",
+            "session.nodeCatalog.realtime.v0.1",
+            "session.node.resolve",
+            "session.node.create",
+            "session.node.replace",
+            "session.node.delete",
+            "session.node.update",
+            "session.node.input",
             "session.events.stream",
             "session.validate",
             "session.plan",
             "session.run",
             "session.mutate",
             "session.operation",
+            "session.pasteGraphFragment",
+            "session.pasteGraphFragment.v0.1",
             "session.collaboration.operations",
             "session.collaboration.operationBatch",
             "session.collaboration.events.stream",
@@ -750,11 +765,12 @@ async fn realtime_session_by_id(
     Path(session_id): Path<String>,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    let record = state.sessions.get_or_create(&session_id);
     match ws {
-        Ok(ws) => ws
-            .on_upgrade(move |socket| handle_runtime_realtime_socket(record, socket))
-            .into_response(),
+        Ok(ws) => {
+            let record = state.sessions.get_or_create(&session_id);
+            ws.on_upgrade(move |socket| handle_runtime_realtime_socket(record, socket))
+                .into_response()
+        }
         Err(_) => (
             StatusCode::UPGRADE_REQUIRED,
             [(UPGRADE, HeaderValue::from_static("websocket"))],
@@ -811,6 +827,29 @@ fn session_snapshot_for(
         .read()
         .expect("runtime session lock should not be poisoned");
     session_json(state, session.response(true, Vec::new(), None))
+}
+
+async fn session_node_catalog_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let Some(record) = state.sessions.get_existing(&session_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "schema": "skenion.runtime.sessionNotFound",
+                "schemaVersion": "0.1.0",
+                "ok": false,
+                "sessionId": session_id,
+                "diagnostic": {
+                    "code": "runtime.session-not-found",
+                    "message": "No Runtime session exists for the requested sessionId."
+                }
+            })),
+        )
+            .into_response();
+    };
+    Json(node_catalog_snapshot_for_record(&record)).into_response()
 }
 
 async fn load_session_by_id(
@@ -2653,22 +2692,25 @@ fn decode_run_project_payload_current(
 fn decode_project_document_request_current(
     mut value: serde_json::Value,
 ) -> Result<ProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
-    let nodes = take_node_definitions_current(&mut value)?;
+    reject_top_level_nodes_current(&value)?;
     let _ = take_frames_current(&mut value)?;
     let document = decode_project_document_current(value)?;
     Ok(ProjectRequestCurrent::from_project_document(
-        document, nodes,
+        document,
+        Vec::new(),
     ))
 }
 
 fn decode_run_project_document_request_current(
     mut value: serde_json::Value,
 ) -> Result<RunProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
-    let nodes = take_node_definitions_current(&mut value)?;
+    reject_top_level_nodes_current(&value)?;
     let frames = take_frames_current(&mut value)?;
     let document = decode_project_document_current(value)?;
     Ok(RunProjectRequestCurrent::from_project_document(
-        document, nodes, frames,
+        document,
+        Vec::new(),
+        frames,
     ))
 }
 
@@ -2689,14 +2731,20 @@ fn decode_project_document_current(
     Ok(document)
 }
 
-fn take_node_definitions_current(
-    value: &mut serde_json::Value,
-) -> Result<Vec<NodeDefinitionCurrent>, Vec<RuntimeDiagnostic>> {
-    let nodes = value
-        .as_object_mut()
-        .and_then(|object| object.remove("nodes"))
-        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-    serde_json::from_value(nodes).map_err(invalid_project_payload)
+fn reject_top_level_nodes_current(value: &serde_json::Value) -> Result<(), Vec<RuntimeDiagnostic>> {
+    if value.get("nodes").is_none() {
+        return Ok(());
+    }
+
+    Err(vec![RuntimeDiagnostic::structured_error(
+        "project.document.top-level-nodes-rejected",
+        "ProjectDocument payloads must not include top-level nodes; node definitions must come from Runtime registry/catalog sources or an explicit legacy ProjectRequest wrapper",
+        serde_json::json!({
+            "surface": "project",
+            "field": "nodes",
+            "schema": "skenion.project",
+        }),
+    )])
 }
 
 fn take_frames_current(
@@ -2894,6 +2942,7 @@ mod tests {
             "dummy.run",
             "session.load",
             "session.load.v0.1",
+            "session.nodeCatalog.realtime.v0.1",
             "session.mutate",
             "session.operation",
             "session.history",
@@ -4276,6 +4325,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_document_ingest_rejects_top_level_nodes() {
+        let mut project = sample_project_document_current();
+        project["nodes"] = json!([value_f32_node_definition_current_json()]);
+
+        for path in [
+            "/v0/validate",
+            "/v0/plan",
+            "/v0/run",
+            "/v0/sessions/default/load",
+        ] {
+            let response = post_json(path, project.clone()).await;
+            assert_eq!(response["ok"], false, "{path}");
+            assert_eq!(
+                response["diagnostics"][0]["code"], "project.document.top-level-nodes-rejected",
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn session_endpoint_returns_empty_state() {
         let response = get_json("/v0/sessions/default/snapshot").await;
 
@@ -4536,11 +4605,9 @@ mod tests {
             "minimal-value"
         );
         assert_eq!(response["snapshot"]["sessionRevision"], 1);
-        assert!(
-            response["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("missing node definition")
+        assert_eq!(
+            response["diagnostics"][0]["code"],
+            "project.document.top-level-nodes-rejected"
         );
 
         let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
@@ -5274,7 +5341,7 @@ mod tests {
                 vec![json!({
                   "op": "node.add",
                   "changeId": "change-add-patch-debug",
-                  "node": render_clear_color_node_current_json("patch_debug_collab")
+                  "node": value_float_node_current_json("patch_debug_collab")
                 })],
             ),
         )
@@ -5301,7 +5368,7 @@ mod tests {
                 vec![json!({
                   "op": "node.add",
                   "changeId": "change-add-patch-debug-rebased",
-                  "node": render_clear_color_node_current_json("patch_debug_rebased")
+                  "node": value_float_node_current_json("patch_debug_rebased")
                 })],
             ),
         )
@@ -7129,36 +7196,35 @@ mod tests {
               }
             }
           },
-          "patchLibrary": [],
-          "nodes": [
-            {
-              "schema": "skenion.node.definition",
-              "schemaVersion": "0.1.0",
-              "id": "object.core.float",
-              "version": "0.1.0",
-              "displayName": "Float",
-              "category": "Typed Controls",
-              "ports": value_f32_ports_current_json(),
-              "execution": { "model": "control" },
-              "state": { "persistent": false },
-              "permissions": [],
-              "capabilities": ["value.core.float32.v0.1"]
-            }
-          ]
+          "patchLibrary": []
         })
     }
 
     fn sample_project_request_current() -> ProjectRequestCurrent {
-        let mut value = sample_project_document_current();
-        let nodes = value
-            .as_object_mut()
-            .and_then(|object| object.remove("nodes"))
-            .expect("sample project document should carry node definitions");
-        let nodes = serde_json::from_value::<Vec<NodeDefinitionCurrent>>(nodes)
-            .expect("nodes should parse");
+        let value = sample_project_document_current();
+        let nodes = serde_json::from_value::<Vec<crate::NodeDefinitionCurrent>>(json!([
+            value_f32_node_definition_current_json()
+        ]))
+        .expect("nodes should parse");
         let document =
             serde_json::from_value::<ProjectDocumentCurrent>(value).expect("document should parse");
         ProjectRequestCurrent::from_project_document(document, nodes)
+    }
+
+    fn value_f32_node_definition_current_json() -> Value {
+        json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "object.core.float",
+          "version": "0.1.0",
+          "displayName": "Float",
+          "category": "Typed Controls",
+          "ports": value_f32_ports_current_json(),
+          "execution": { "model": "control" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": ["value.core.float32.v0.1"]
+        })
     }
 
     fn value_f32_ports_json() -> Value {
@@ -7370,12 +7436,10 @@ mod tests {
             "nodes": [
               {
                 "id": "clear_color",
-                "kind": "object.core.render.clear-color",
+                "kind": "object.core.float",
                 "kindVersion": "0.1.0",
-                "params": { "color": [0.12, 0.2, 0.34, 1] },
-                "ports": [
-                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
-                ]
+                "params": { "value": 0.25 },
+                "ports": value_f32_ports_current_json()
               },
               {
                 "id": "fx",
@@ -7383,32 +7447,30 @@ mod tests {
                 "kindVersion": "0.1.0",
                 "params": { "patchRef": "identity" },
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
-                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
+                  { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control", "required": true },
+                  { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
                 ]
               },
               {
                 "id": "output",
-                "kind": "object.core.render.output",
+                "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": [
-                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
-                ]
+                "ports": value_f32_ports_current_json()
               }
             ],
             "edges": [
               {
                 "id": "edge_clear_fx",
-                "source": { "nodeId": "clear_color", "portId": "out" },
+                "source": { "nodeId": "clear_color", "portId": "value" },
                 "target": { "nodeId": "fx", "portId": "in" },
-                "resolvedType": "value.core.tensor"
+                "resolvedType": "value.core.float32"
               },
               {
                 "id": "edge_fx_output",
                 "source": { "nodeId": "fx", "portId": "out" },
-                "target": { "nodeId": "output", "portId": "in" },
-                "resolvedType": "value.core.tensor"
+                "target": { "nodeId": "output", "portId": "cold" },
+                "resolvedType": "value.core.float32"
               }
             ]
           },
@@ -7434,18 +7496,15 @@ mod tests {
                     "kindVersion": "0.1.0",
                     "params": { "portId": "in", "label": "Input" },
                     "ports": [
-                      { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "description": "Frame entering the patch" }
+                      { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control", "description": "Value entering the patch" }
                     ]
                   },
                   {
                     "id": "pass",
-                    "kind": "test.pass",
+                    "kind": "object.core.float",
                     "kindVersion": "0.1.0",
                     "params": {},
-                    "ports": [
-                      { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
-                      { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
-                    ]
+                    "ports": value_f32_ports_current_json()
                   },
                   {
                     "id": "patch_out",
@@ -7453,7 +7512,7 @@ mod tests {
                     "kindVersion": "0.1.0",
                     "params": { "portId": "out", "label": "Output" },
                     "ports": [
-                      { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true, "description": "Frame leaving the patch" }
+                      { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control", "required": true, "description": "Value leaving the patch" }
                     ]
                   }
                 ],
@@ -7462,64 +7521,16 @@ mod tests {
                     "id": "edge_in_pass",
                     "source": { "nodeId": "patch_in", "portId": "out" },
                     "target": { "nodeId": "pass", "portId": "in" },
-                    "resolvedType": "value.core.tensor"
+                    "resolvedType": "value.core.float32"
                   },
                   {
                     "id": "edge_pass_out",
-                    "source": { "nodeId": "pass", "portId": "out" },
+                    "source": { "nodeId": "pass", "portId": "value" },
                     "target": { "nodeId": "patch_out", "portId": "in" },
-                    "resolvedType": "value.core.tensor"
+                    "resolvedType": "value.core.float32"
                   }
                 ]
               }
-            }
-          ],
-          "nodes": [
-            {
-              "schema": "skenion.node.definition",
-              "schemaVersion": "0.1.0",
-              "id": "object.core.render.clear-color",
-              "version": "0.1.0",
-              "displayName": "Clear Color",
-              "category": "Render",
-              "ports": [
-                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
-              ],
-              "execution": { "model": "gpu_pass", "clock": "frame" },
-              "state": { "persistent": false },
-              "permissions": [],
-              "capabilities": ["value.core.tensor.v0.1"]
-            },
-            {
-              "schema": "skenion.node.definition",
-              "schemaVersion": "0.1.0",
-              "id": "object.core.render.output",
-              "version": "0.1.0",
-              "displayName": "Render Output",
-              "category": "Render",
-              "ports": [
-                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
-              ],
-              "execution": { "model": "gpu_pass", "clock": "frame" },
-              "state": { "persistent": false },
-              "permissions": [],
-              "capabilities": ["object.core.render.output.v0.1"]
-            },
-            {
-              "schema": "skenion.node.definition",
-              "schemaVersion": "0.1.0",
-              "id": "test.pass",
-              "version": "0.1.0",
-              "displayName": "Pass",
-              "category": "Test",
-              "ports": [
-                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
-                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
-              ],
-              "execution": { "model": "gpu_pass", "clock": "frame" },
-              "state": { "persistent": false },
-              "permissions": [],
-              "capabilities": []
             }
           ]
         })
@@ -7680,7 +7691,7 @@ mod tests {
               "schema": "skenion.graph.fragment",
               "schemaVersion": "0.1.0",
               "nodes": [
-                render_clear_color_node_current_json(node_id)
+                value_float_node_current_json(node_id)
               ],
               "edges": []
             },
@@ -7839,15 +7850,13 @@ mod tests {
         })
     }
 
-    fn render_clear_color_node_current_json(node_id: &str) -> Value {
+    fn value_float_node_current_json(node_id: &str) -> Value {
         json!({
           "id": node_id,
-          "kind": "object.core.render.clear-color",
+          "kind": "object.core.float",
           "kindVersion": "0.1.0",
-          "params": { "color": [0.02, 0.04, 0.08, 1.0] },
-          "ports": [
-            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
-          ]
+          "params": {},
+          "ports": value_f32_ports_current_json()
         })
     }
 

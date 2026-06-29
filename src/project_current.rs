@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::object_text::{is_payload_identity_kind, resolve_object_text_v01};
+use crate::object_text::{
+    ObjectRegistry, PROJECT_PATCH_OBJECT_KIND_PREFIX, is_payload_identity_kind,
+    resolve_object_text_v01,
+};
 use crate::{
     CycleValidationCurrent, DataFlow, DataType, EdgeEndpointCurrent, EdgeSpecCurrent,
     ExecutionGroup, ExecutionModel, ExecutionModelCurrent, FanOutPolicyCurrent,
@@ -182,7 +185,8 @@ pub fn expand_project_graph_current(
 pub fn validate_project_request_current(request: &ProjectRequestCurrent) -> CurrentValidation {
     validate_patch_library_current(&request.patch_library)?;
     let graph = expand_project_graph_current(&request.graph, &request.patch_library)?;
-    validate_project_current(&graph, &request.nodes)
+    let nodes = normalized_node_definitions_current(&request.nodes, &request.patch_library);
+    validate_project_current(&graph, &nodes)
 }
 
 pub fn build_execution_plan_request_current(
@@ -190,7 +194,8 @@ pub fn build_execution_plan_request_current(
 ) -> Result<(crate::ExecutionPlan, Vec<RuntimeDiagnostic>), Vec<RuntimeDiagnostic>> {
     validate_patch_library_current(&request.patch_library)?;
     let graph = expand_project_graph_current(&request.graph, &request.patch_library)?;
-    build_execution_plan_current(&graph, &request.nodes)
+    let nodes = normalized_node_definitions_current(&request.nodes, &request.patch_library);
+    build_execution_plan_current(&graph, &nodes)
 }
 
 pub fn build_execution_plan_run_request_current(
@@ -198,7 +203,29 @@ pub fn build_execution_plan_run_request_current(
 ) -> Result<(crate::ExecutionPlan, Vec<RuntimeDiagnostic>), Vec<RuntimeDiagnostic>> {
     validate_patch_library_current(&request.patch_library)?;
     let graph = expand_project_graph_current(&request.graph, &request.patch_library)?;
-    build_execution_plan_current(&graph, &request.nodes)
+    let nodes = normalized_node_definitions_current(&request.nodes, &request.patch_library);
+    build_execution_plan_current(&graph, &nodes)
+}
+
+fn normalized_node_definitions_current(
+    explicit_nodes: &[NodeDefinitionCurrent],
+    patch_library: &[PatchDefinitionCurrent],
+) -> Vec<NodeDefinitionCurrent> {
+    let mut nodes = explicit_nodes.to_vec();
+    let mut seen = nodes
+        .iter()
+        .map(|definition| (definition.id.clone(), definition.version.clone()))
+        .collect::<HashSet<_>>();
+
+    for definition in ObjectRegistry::for_patch_library(patch_library).node_definition_projection()
+    {
+        let key = (definition.id.clone(), definition.version.clone());
+        if seen.insert(key) {
+            nodes.push(definition);
+        }
+    }
+
+    nodes
 }
 
 fn validate_patch_library_current(
@@ -678,6 +705,11 @@ fn subpatch_ref(node: &GraphNodeCurrent) -> Option<String> {
         .into_iter()
         .find_map(|key| string_param(&node.params, key))
         .or_else(|| subpatch_object_text(node).and_then(|text| parse_subpatch_object_text(&text)))
+        .or_else(|| {
+            node.kind
+                .strip_prefix(PROJECT_PATCH_OBJECT_KIND_PREFIX)
+                .map(ToOwned::to_owned)
+        })
 }
 
 fn parse_subpatch_object_text(text: &str) -> Option<String> {
@@ -718,6 +750,7 @@ fn string_param(params: &Map<String, Value>, key: &str) -> Option<String> {
 
 fn is_subpatch_node(node: &GraphNodeCurrent) -> bool {
     matches!(node.kind.as_str(), SUBPATCH_KIND | SUBPATCH_SHORTHAND_KIND)
+        || node.kind.starts_with(PROJECT_PATCH_OBJECT_KIND_PREFIX)
 }
 
 fn is_inlet_node(node: &GraphNodeCurrent) -> bool {
@@ -942,6 +975,7 @@ fn object_text_diagnostics_current(
         && let Some(resolved_kind) = resolution.resolved_kind.as_deref()
         && resolved_kind != node.kind
         && node.kind != "object.core.unresolved"
+        && !is_subpatch_node(node)
     {
         diagnostics.push(RuntimeDiagnostic::structured_error(
             "object-text.kind-mismatch",

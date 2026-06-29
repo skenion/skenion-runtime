@@ -36,8 +36,8 @@ jobs:
           SKENION_RELEASE_PUBLIC_BASE_URL: https://cdn.dsub.io/skenion/releases
           SOURCE_COMMIT: "0000000000000000000000000000000000000000"
           RELEASE_TIER: release-blocking
-          CONTRACTS_VERSION: "0.52.0"
-          CONTRACTS_LINE: "0.52"
+          CONTRACTS_VERSION: "0.53.0"
+          CONTRACTS_LINE: "0.53"
         run: |
           mkdir -p dist
           asset="dist/skenion-runtime-v0.0.0-linux-x64"
@@ -70,7 +70,7 @@ jobs:
           assert manifest["platformSlug"] == "linux-x64"
           assert manifest["tier"] == "release-blocking"
           assert manifest["sourceCommit"] == "0000000000000000000000000000000000000000"
-          assert manifest["contracts"] == {"version": "0.52.0", "line": "0.52"}
+          assert manifest["contracts"] == {"version": "0.53.0", "line": "0.53"}
           assert manifest["artifact"]["binaryFormat"] == "raw-binary"
           assert manifest["artifact"]["executableName"] == "skenion-runtime-v0.0.0-linux-x64"
           assert manifest["artifact"]["s3"] == {
