@@ -106,6 +106,35 @@ fn session_snapshot_derives_endpoint_binding_value_formats() {
 }
 
 #[test]
+fn legacy_session_plan_errors_include_surface_and_graph_context() {
+    let graph = sample_internal_graph();
+    let diagnostics =
+        super::build_session_execution_plan(&graph, &NodeRegistry::new(), "session.legacy-plan")
+            .expect_err("empty registry should reject graph nodes without definitions");
+
+    let invalid_project = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code.as_deref() == Some("session.plan.invalid-project"))
+        .expect("invalid project diagnostic should be preserved");
+    assert_eq!(
+        invalid_project
+            .details
+            .as_ref()
+            .and_then(|details| details.get("surface"))
+            .and_then(|surface| surface.as_str()),
+        Some("session.legacy-plan")
+    );
+    assert_eq!(
+        invalid_project
+            .details
+            .as_ref()
+            .and_then(|details| details.get("graphId"))
+            .and_then(|graph_id| graph_id.as_str()),
+        Some("minimal-value")
+    );
+}
+
+#[test]
 fn plan_current_reports_invalid_stored_project() {
     let mut session = RuntimeSession {
         graph: Some(sample_internal_graph()),
