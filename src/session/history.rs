@@ -56,6 +56,118 @@ impl HistoryApplyOutcome {
     }
 }
 
+impl RuntimeSession {
+    pub fn history(&self) -> RuntimeHistory {
+        RuntimeHistory {
+            schema: "skenion.runtime.history",
+            schema_version: "0.1.0",
+            entries: self.history_entries.clone(),
+            can_undo: !self.undo_stack.is_empty(),
+            can_redo: !self.redo_stack.is_empty(),
+            undo_depth: self.undo_stack.len() as u64,
+            redo_depth: self.redo_stack.len() as u64,
+        }
+    }
+
+    pub fn undo(&mut self) -> RuntimePatchResponse {
+        let Some(entry) = self.undo_stack.pop() else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::error("no patch event available to undo")],
+            );
+        };
+        let outcome = self.apply_history_entry(entry.clone(), HistoryDirection::Undo);
+        if outcome.applied {
+            let response = outcome.response;
+            self.redo_stack.push(entry);
+            self.patch_response(true, true, false, response.diagnostics)
+        } else {
+            let response = outcome.response;
+            self.undo_stack.push(entry);
+            self.patch_response(false, false, response.conflict, response.diagnostics)
+        }
+    }
+
+    pub fn undo_for_actor(&mut self, actor_id: &str) -> RuntimePatchResponse {
+        let Some(index) = self
+            .undo_stack
+            .iter()
+            .rposition(|entry| entry.actor_id() == Some(actor_id))
+        else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::error(format!(
+                    "no patch event available to undo for actor {actor_id}"
+                ))],
+            );
+        };
+        let entry = self.undo_stack.remove(index);
+        let outcome = self.apply_history_entry(entry.clone(), HistoryDirection::Undo);
+        if outcome.applied {
+            let response = outcome.response;
+            self.redo_stack.push(entry);
+            self.patch_response(true, true, false, response.diagnostics)
+        } else {
+            let response = outcome.response;
+            self.undo_stack.insert(index, entry);
+            self.patch_response(false, false, response.conflict, response.diagnostics)
+        }
+    }
+
+    pub fn redo(&mut self) -> RuntimePatchResponse {
+        let Some(entry) = self.redo_stack.pop() else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::error("no patch event available to redo")],
+            );
+        };
+        let outcome = self.apply_history_entry(entry.clone(), HistoryDirection::Redo);
+        if outcome.applied {
+            let response = outcome.response;
+            self.undo_stack.push(entry);
+            self.patch_response(true, true, false, response.diagnostics)
+        } else {
+            let response = outcome.response;
+            self.redo_stack.push(entry);
+            self.patch_response(false, false, response.conflict, response.diagnostics)
+        }
+    }
+
+    pub fn redo_for_actor(&mut self, actor_id: &str) -> RuntimePatchResponse {
+        let Some(index) = self
+            .redo_stack
+            .iter()
+            .rposition(|entry| entry.actor_id() == Some(actor_id))
+        else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeDiagnostic::error(format!(
+                    "no patch event available to redo for actor {actor_id}"
+                ))],
+            );
+        };
+        let entry = self.redo_stack.remove(index);
+        let outcome = self.apply_history_entry(entry.clone(), HistoryDirection::Redo);
+        if outcome.applied {
+            let response = outcome.response;
+            self.undo_stack.push(entry);
+            self.patch_response(true, true, false, response.diagnostics)
+        } else {
+            let response = outcome.response;
+            self.redo_stack.insert(index, entry);
+            self.patch_response(false, false, response.conflict, response.diagnostics)
+        }
+    }
+}
+
 pub(super) fn project_document_history_delta(
     current: &ProjectDocumentCurrent,
     before: &ProjectDocumentCurrent,
