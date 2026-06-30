@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.49.0](https://github.com/skenion/skenion-runtime/compare/v0.48.0...v0.49.0) (2026-06-29)
+
+
+### Features
+
+* **runtime:** add realtime node catalog hydration ([#206](https://github.com/skenion/skenion-runtime/issues/206)) ([79e17d4](https://github.com/skenion/skenion-runtime/commit/79e17d4012761a2e19e2d67466aec6499e543475))
+
 ## [0.48.0](https://github.com/skenion/skenion-runtime/compare/v0.47.10...v0.48.0) (2026-06-27)
 
 
