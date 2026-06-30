@@ -9,6 +9,7 @@ use skenion_contracts::{
 use crate::{
     GraphNodeCurrent, NodeDefinitionCurrent, PatchDefinitionCurrent, PortDirectionCurrent,
     PortRateCurrent, PortSpecCurrent, ProjectDocumentCurrent,
+    nodes::{CoreNodeConstructor, CoreNodeImplementation, first_party_core_nodes},
 };
 
 const CURRENT_KIND_VERSION: &str = "0.1.0";
@@ -115,6 +116,8 @@ struct ObjectRegistryCandidate {
     kind: String,
     kind_version: String,
     display_name: String,
+    constructor: Option<CoreNodeConstructor>,
+    catalog_category: Option<&'static str>,
     project_patch: Option<ProjectPatchCandidate>,
 }
 
@@ -280,126 +283,25 @@ impl ObjectRegistry {
     }
 
     fn register_first_party_core(&mut self) {
-        self.register_core_candidate(
-            "object.core.operator.add",
-            "Add",
-            &["+", "add", "object.core.operator.add"],
-        );
-        self.register_core_candidate(
-            "object.core.operator.sub",
-            "Subtract",
-            &["-", "sub", "object.core.operator.sub"],
-        );
-        self.register_core_candidate(
-            "object.core.operator.mul",
-            "Multiply",
-            &["*", "mul", "object.core.operator.mul"],
-        );
-        self.register_core_candidate(
-            "object.core.operator.div",
-            "Divide",
-            &["/", "div", "object.core.operator.div"],
-        );
-        self.register_core_candidate(
-            "object.core.operator.pow",
-            "Power",
-            &["pow", "object.core.operator.pow"],
-        );
-        self.register_core_candidate(
-            "object.core.operator.min",
-            "Minimum",
-            &["min", "object.core.operator.min"],
-        );
-        self.register_core_candidate(
-            "object.core.operator.max",
-            "Maximum",
-            &["max", "object.core.operator.max"],
-        );
-        self.register_core_candidate(
-            "object.core.operator.sqrt",
-            "Square Root",
-            &["sqrt", "object.core.operator.sqrt"],
-        );
-        self.register_core_candidate(
-            "object.core.float",
-            "Float",
-            &["f", "float", "number", "object.core.float"],
-        );
-        self.register_core_candidate(
-            "object.core.int",
-            "Integer",
-            &["i", "int", "object.core.int"],
-        );
-        self.register_core_candidate(
-            "object.core.uint",
-            "Unsigned Integer",
-            &["u", "uint", "object.core.uint"],
-        );
-        self.register_core_candidate(
-            "object.core.bang",
-            "Bang",
-            &["b", "bang", "object.core.bang"],
-        );
-        self.register_core_candidate(
-            "object.core.message",
-            "Message",
-            &["msg", "message", "object.core.message"],
-        );
-        self.register_core_candidate(
-            "object.core.comment",
-            "Comment",
-            &["comment", "object.core.comment"],
-        );
-        self.register_core_candidate(
-            "object.core.audio.sig",
-            "Signal",
-            &["sig~", "object.core.audio.sig"],
-        );
-        self.register_core_candidate(
-            "object.core.audio.osc",
-            "Oscillator",
-            &["osc~", "object.core.audio.osc"],
-        );
-        self.register_core_candidate(
-            "object.core.audio.operator.mul",
-            "Audio Multiply",
-            &["*~", "object.core.audio.operator.mul"],
-        );
-        self.register_core_candidate(
-            "object.core.audio.input",
-            "Audio Input",
-            &["adc~", "object.core.audio.input"],
-        );
-        self.register_core_candidate(
-            "object.core.audio.output",
-            "Audio Output",
-            &["dac~", "object.core.audio.output"],
-        );
-        self.register_core_candidate(
-            "object.core.subpatch",
-            "Subpatch",
-            &["p", "object.core.subpatch"],
-        );
-        self.register_core_candidate(
-            "object.core.inlet",
-            "Inlet",
-            &["inlet", "object.core.inlet"],
-        );
-        self.register_core_candidate(
-            "object.core.outlet",
-            "Outlet",
-            &["outlet", "object.core.outlet"],
-        );
+        for node in first_party_core_nodes() {
+            self.register_core_candidate(*node);
+        }
     }
 
-    fn register_core_candidate(&mut self, kind: &str, display_name: &str, aliases: &[&str]) {
+    fn register_core_candidate(&mut self, node: &'static dyn CoreNodeImplementation) {
         self.candidates.push(ObjectRegistryCandidate {
-            id: kind.to_owned(),
+            id: node.kind().to_owned(),
             source: ObjectRegistrySource::FirstPartyCore,
-            aliases: aliases.iter().map(|alias| (*alias).to_owned()).collect(),
-            kind: kind.to_owned(),
+            aliases: node
+                .aliases()
+                .iter()
+                .map(|alias| (*alias).to_owned())
+                .collect(),
+            kind: node.kind().to_owned(),
             kind_version: CURRENT_KIND_VERSION.to_owned(),
-            display_name: display_name.to_owned(),
+            display_name: node.display_name().to_owned(),
+            constructor: Some(node.constructor()),
+            catalog_category: Some(node.catalog_category()),
             project_patch: None,
         });
     }
@@ -418,6 +320,8 @@ impl ObjectRegistry {
                     .as_ref()
                     .and_then(|metadata| metadata.title.clone())
                     .unwrap_or_else(|| patch.id.clone()),
+                constructor: None,
+                catalog_category: None,
                 project_patch: Some(ProjectPatchCandidate {
                     patch_id: patch.id.clone(),
                     revision: patch.revision.clone(),
@@ -478,6 +382,8 @@ impl ObjectRegistry {
             kind: "object.core.subpatch".to_owned(),
             kind_version: CURRENT_KIND_VERSION.to_owned(),
             display_name: patch_id.clone(),
+            constructor: Some(CoreNodeConstructor::Subpatch),
+            catalog_category: Some("Core"),
             project_patch: Some(ProjectPatchCandidate {
                 patch_id,
                 revision: CURRENT_KIND_VERSION.to_owned(),
@@ -619,11 +525,7 @@ fn project_patch_catalog_definition(
 }
 
 fn core_catalog_category(candidate: &ObjectRegistryCandidate) -> &'static str {
-    if candidate.kind.starts_with("object.core.audio.") {
-        "Core Audio"
-    } else {
-        "Core"
-    }
+    candidate.catalog_category.unwrap_or("Core")
 }
 
 fn catalog_id_for_core_candidate(candidate: &ObjectRegistryCandidate) -> String {
@@ -721,61 +623,56 @@ fn construct_first_party_core(
         creation_args,
     } = parsed;
 
-    if candidate.kind.starts_with("object.core.operator.") {
-        return resolve_control_operator(
-            &input,
-            display_text,
-            &class_symbol,
-            creation_args,
-            candidate,
-        );
-    }
-    if matches!(
-        candidate.kind.as_str(),
-        "object.core.float"
-            | "object.core.int"
-            | "object.core.uint"
-            | "object.core.bang"
-            | "object.core.message"
-            | "object.core.comment"
-    ) {
-        return resolve_control_value(
-            &input,
-            display_text,
-            &class_symbol,
-            creation_args,
-            candidate,
-        );
-    }
-    if candidate.kind.starts_with("object.core.audio.") {
-        return resolve_audio_object(
-            &input,
-            display_text,
-            &class_symbol,
-            creation_args,
-            candidate,
-        );
-    }
-    if candidate.kind == "object.core.subpatch" {
-        return resolve_named_ref_object(
-            &input,
-            display_text,
-            &class_symbol,
-            creation_args,
-            candidate,
-            "patchRef",
-            "subpatch object text requires exactly one patch reference",
-        );
-    }
-    if candidate.kind == "object.core.inlet" || candidate.kind == "object.core.outlet" {
-        return resolve_optional_named_ref_object(
-            &input,
-            display_text,
-            &class_symbol,
-            creation_args,
-            candidate,
-            "portId",
-        );
+    match candidate.constructor {
+        Some(CoreNodeConstructor::ControlOperator) => {
+            return resolve_control_operator(
+                &input,
+                display_text,
+                &class_symbol,
+                creation_args,
+                candidate,
+            );
+        }
+        Some(CoreNodeConstructor::ControlValue) => {
+            return resolve_control_value(
+                &input,
+                display_text,
+                &class_symbol,
+                creation_args,
+                candidate,
+            );
+        }
+        Some(CoreNodeConstructor::Audio) => {
+            return resolve_audio_object(
+                &input,
+                display_text,
+                &class_symbol,
+                creation_args,
+                candidate,
+            );
+        }
+        Some(CoreNodeConstructor::Subpatch) => {
+            return resolve_named_ref_object(
+                &input,
+                display_text,
+                &class_symbol,
+                creation_args,
+                candidate,
+                "patchRef",
+                "subpatch object text requires exactly one patch reference",
+            );
+        }
+        Some(CoreNodeConstructor::BoundaryPort) => {
+            return resolve_optional_named_ref_object(
+                &input,
+                display_text,
+                &class_symbol,
+                creation_args,
+                candidate,
+                "portId",
+            );
+        }
+        None => {}
     }
 
     failure_with_candidates(
@@ -2501,6 +2398,8 @@ mod tests {
                 kind: project_patch_object_kind("my-patcher"),
                 kind_version: CURRENT_KIND_VERSION.to_owned(),
                 display_name: "Patch my-patcher".to_owned(),
+                constructor: None,
+                catalog_category: None,
                 project_patch: Some(ProjectPatchCandidate {
                     patch_id: "my-patcher".to_owned(),
                     revision: "7".to_owned(),
@@ -2523,6 +2422,8 @@ mod tests {
                 kind: "object.vendor.node".to_owned(),
                 kind_version: CURRENT_KIND_VERSION.to_owned(),
                 display_name: "Vendor Node".to_owned(),
+                constructor: None,
+                catalog_category: None,
                 project_patch: None,
             }],
             allow_unchecked_project_patch_refs: false,
@@ -2541,6 +2442,8 @@ mod tests {
                     kind: "object.vendor.shared".to_owned(),
                     kind_version: CURRENT_KIND_VERSION.to_owned(),
                     display_name: "Package Shared".to_owned(),
+                    constructor: None,
+                    catalog_category: None,
                     project_patch: None,
                 },
                 ObjectRegistryCandidate {
@@ -2550,6 +2453,8 @@ mod tests {
                     kind: "object.native.shared".to_owned(),
                     kind_version: CURRENT_KIND_VERSION.to_owned(),
                     display_name: "Native Shared".to_owned(),
+                    constructor: None,
+                    catalog_category: None,
                     project_patch: None,
                 },
             ],
@@ -2568,6 +2473,8 @@ mod tests {
                 kind: project_patch_object_kind("broken"),
                 kind_version: CURRENT_KIND_VERSION.to_owned(),
                 display_name: "Broken".to_owned(),
+                constructor: None,
+                catalog_category: None,
                 project_patch: None,
             }],
             allow_unchecked_project_patch_refs: false,
@@ -2585,6 +2492,8 @@ mod tests {
                 kind: "object.core.future".to_owned(),
                 kind_version: CURRENT_KIND_VERSION.to_owned(),
                 display_name: "Future".to_owned(),
+                constructor: None,
+                catalog_category: Some("Core"),
                 project_patch: None,
             }],
             allow_unchecked_project_patch_refs: false,
