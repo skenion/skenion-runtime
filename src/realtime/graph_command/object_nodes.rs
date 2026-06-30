@@ -7,9 +7,7 @@ use super::{
 };
 use crate::object_spec::{
     ObjectRegistry, ObjectSpecPortActivation, ObjectSpecPortDirection, ObjectSpecPortRate,
-    ObjectSpecResolution, materialize_object_spec_node_v01,
-    materialize_unresolved_object_spec_node_v01, object_spec_node_definition_v01,
-    unresolved_object_spec_node_definition_v01,
+    ObjectSpecResolution, materialize_object_spec_node_v01, object_spec_node_definition_v01,
 };
 use crate::session::{ApplyObjectNodeCreateCurrentRequest, ApplyObjectNodeReplaceCurrentRequest};
 use crate::{
@@ -22,7 +20,9 @@ fn resolve_object_command_text(
     object_spec: &str,
 ) -> ObjectSpecResolution {
     let project = session.project_document_current();
-    ObjectRegistry::for_project(project.as_ref()).resolve(object_spec)
+    let packages = session.package_registry_current();
+    ObjectRegistry::for_project_with_packages(project.as_ref(), Some(&packages))
+        .resolve(object_spec)
 }
 
 pub(in crate::realtime) fn apply_object_resolve_graph_command(
@@ -109,7 +109,7 @@ pub(in crate::realtime) fn apply_object_create_graph_command(
                         "target": target,
                         "objectSpec": object_spec,
                         "unresolvedPolicy": object_unresolved_policy(payload),
-                        "resolution": object_resolution_json(&resolution),
+                        "objectResolution": resolution.object_resolution,
                     }),
                 ),
             ),
@@ -198,7 +198,7 @@ pub(in crate::realtime) fn apply_object_replace_graph_command(
                         "nodeId": node_id,
                         "objectSpec": object_spec,
                         "unresolvedPolicy": object_unresolved_policy(payload),
-                        "resolution": object_resolution_json(&resolution),
+                        "objectResolution": resolution.object_resolution,
                     }),
                 ),
             ),
@@ -505,11 +505,6 @@ pub(in crate::realtime) fn materialize_object_command_node(
         let definition = object_spec_node_definition_v01(resolution)?;
         return Some((node, definition));
     }
-    if object_unresolved_policy(payload) == ObjectUnresolvedPolicy::MaterializeDiagnostic {
-        let mut node = materialize_unresolved_object_spec_node_v01(resolution, node_id);
-        merge_payload_params(&mut node.params, payload.params.as_ref());
-        return Some((node, unresolved_object_spec_node_definition_v01()));
-    }
     None
 }
 
@@ -564,10 +559,15 @@ pub(in crate::realtime) fn node_command_result(
         "requestedNodeId": payload.requested_node_id,
         "target": payload.target,
         "objectSpec": payload.object_spec,
+        "implementation": resolution.and_then(|resolution| resolution.implementation.clone()),
+        "objectResolution": resolution.map(|resolution| resolution.object_resolution.clone()),
+        "params": resolution.map(|resolution| resolution.params.clone()),
+        "ports": resolution.map(|resolution| resolution.instance_ports.iter().map(object_spec_port_json).collect::<Vec<_>>()),
+        "candidates": resolution.map(|resolution| resolution.candidates.iter().map(object_spec_candidate_json).collect::<Vec<_>>()),
+        "diagnostics": resolution.map(|resolution| resolution.diagnostics.iter().map(object_spec_diagnostic_json).collect::<Vec<_>>()),
         "unresolvedPolicy": object_unresolved_policy(payload),
         "interfaceIncidentEdgePolicy": payload.interface_incident_edge_policy,
         "droppedEdgeIds": dropped_edge_ids,
-        "resolution": resolution.map(object_resolution_json),
         "input": input,
     })
 }
@@ -587,33 +587,20 @@ pub(in crate::realtime) fn node_input_result(
     })
 }
 
-fn object_resolution_json(resolution: &ObjectSpecResolution) -> Value {
-    json!({
-        "input": resolution.input,
-        "displayText": resolution.display_text,
-        "classSymbol": resolution.class_symbol,
-        "resolved": resolution.ok(),
-        "resolvedKind": resolution.resolved_kind,
-        "resolvedKindVersion": resolution.resolved_kind_version,
-        "candidateCount": resolution.candidates.len(),
-        "candidates": resolution.candidates.iter().map(object_spec_candidate_json).collect::<Vec<_>>(),
-        "params": resolution.params,
-        "ports": resolution.instance_ports.iter().map(object_spec_port_json).collect::<Vec<_>>(),
-        "diagnostics": resolution.diagnostics.iter().map(|diagnostic| {
-            json!({
-                "code": diagnostic.code,
-                "message": diagnostic.message,
-            })
-        }).collect::<Vec<_>>(),
-    })
-}
-
 fn object_spec_candidate_json(candidate: &crate::object_spec::ObjectSpecCandidateSummary) -> Value {
     json!({
         "id": candidate.id,
         "source": candidate.source,
-        "kind": candidate.kind,
+        "implementation": candidate.implementation,
+        "objectSpec": candidate.object_spec,
         "displayName": candidate.display_name,
+    })
+}
+
+fn object_spec_diagnostic_json(diagnostic: &crate::object_spec::ObjectSpecDiagnostic) -> Value {
+    json!({
+        "code": diagnostic.code,
+        "message": diagnostic.message,
     })
 }
 

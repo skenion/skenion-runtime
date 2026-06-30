@@ -47,6 +47,67 @@ impl RuntimeIoDeviceRegistry for ServerFakeIoDeviceRegistry {
     }
 }
 
+fn current_core_node_json(id: &str, object_id: &str, params: Value, ports: Value) -> Value {
+    json!({
+      "id": id,
+      "implementation": {
+        "provider": { "kind": "core" },
+        "objectId": object_id,
+        "version": "0.1.0"
+      },
+      "objectSpec": object_id,
+      "objectResolution": {
+        "status": "resolved",
+        "candidates": [],
+        "diagnostics": []
+      },
+      "params": params,
+      "ports": ports
+    })
+}
+
+fn normalize_current_fixture_value(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                normalize_current_fixture_value(item);
+            }
+        }
+        Value::Object(object) => {
+            if object.contains_key("kind")
+                && object.contains_key("kindVersion")
+                && object.contains_key("ports")
+            {
+                let id = object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("node")
+                    .to_owned();
+                let kind = object
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let params = object.remove("params").unwrap_or_else(|| json!({}));
+                let ports = object.remove("ports").unwrap_or_else(|| json!([]));
+                if let Some(object_id) = kind.strip_prefix("object.core.") {
+                    *value = current_core_node_json(&id, object_id, params, ports);
+                }
+                return;
+            }
+            for child in object.values_mut() {
+                normalize_current_fixture_value(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn current_fixture_value(mut value: Value) -> Value {
+    normalize_current_fixture_value(&mut value);
+    value
+}
+
 #[tokio::test]
 async fn health_response() {
     let response = get_json("/health").await;
@@ -2371,7 +2432,7 @@ fn sample_project() -> Value {
 }
 
 fn sample_project_document_current() -> Value {
-    json!({
+    current_fixture_value(json!({
       "schema": "skenion.project",
       "schemaVersion": "0.1.0",
       "id": "minimal-value-project",
@@ -2418,7 +2479,7 @@ fn sample_project_document_current() -> Value {
         }
       },
       "patchLibrary": []
-    })
+    }))
 }
 
 fn value_f32_node_definition_current_json() -> Value {
@@ -2465,7 +2526,7 @@ fn value_f32_ports_json() -> Value {
 }
 
 fn sample_shader_project_current() -> Value {
-    json!({
+    current_fixture_value(json!({
       "schema": "skenion.project",
       "schemaVersion": "0.1.0",
       "id": "shader-diagnostics-project",
@@ -2551,11 +2612,11 @@ fn sample_shader_project_current() -> Value {
         }
       },
       "patchLibrary": []
-    })
+    }))
 }
 
 fn sample_project_current() -> Value {
-    json!({
+    current_fixture_value(json!({
       "graph": {
         "schema": "skenion.graph",
         "schemaVersion": "0.1.0",
@@ -2644,11 +2705,11 @@ fn sample_project_current() -> Value {
           "capabilities": ["object.core.render.output.v0.1"]
         }
       ]
-    })
+    }))
 }
 
 fn sample_subpatch_project_document_current() -> Value {
-    json!({
+    current_fixture_value(json!({
       "schema": "skenion.project",
       "schemaVersion": "0.1.0",
       "id": "subpatch-project",
@@ -2759,11 +2820,11 @@ fn sample_subpatch_project_document_current() -> Value {
           }
         }
       ]
-    })
+    }))
 }
 
 fn sample_ambiguous_loop_project_current() -> Value {
-    json!({
+    current_fixture_value(json!({
       "graph": {
         "schema": "skenion.graph",
         "schemaVersion": "0.1.0",
@@ -2822,7 +2883,7 @@ fn sample_ambiguous_loop_project_current() -> Value {
           "capabilities": ["value.core.float32.v0.1"]
         }
       ]
-    })
+    }))
 }
 
 fn value_f32_ports_current_json() -> Value {

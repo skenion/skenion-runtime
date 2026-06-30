@@ -1,101 +1,127 @@
-use crate::nodes::CoreNodeConstructor;
-
 use super::CoreNodeDescriptor;
 
 pub(super) static ADD: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.operator.add",
+    "operator.add",
     "Add",
     &["+", "add", "object.core.operator.add"],
-    CoreNodeConstructor::ControlOperator,
+    crate::object_spec::resolve_core_control_operator,
+    "Core",
 );
 
 pub(super) static SUBTRACT: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.operator.sub",
+    "operator.sub",
     "Subtract",
     &["-", "sub", "object.core.operator.sub"],
-    CoreNodeConstructor::ControlOperator,
+    crate::object_spec::resolve_core_control_operator,
+    "Core",
 );
 
 pub(super) static MULTIPLY: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.operator.mul",
+    "operator.mul",
     "Multiply",
     &["*", "mul", "object.core.operator.mul"],
-    CoreNodeConstructor::ControlOperator,
+    crate::object_spec::resolve_core_control_operator,
+    "Core",
 );
 
 pub(super) static DIVIDE: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.operator.div",
+    "operator.div",
     "Divide",
     &["/", "div", "object.core.operator.div"],
-    CoreNodeConstructor::ControlOperator,
+    crate::object_spec::resolve_core_control_operator,
+    "Core",
 );
 
 pub(super) static POWER: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.operator.pow",
+    "operator.pow",
     "Power",
     &["pow", "object.core.operator.pow"],
-    CoreNodeConstructor::ControlOperator,
+    crate::object_spec::resolve_core_control_operator,
+    "Core",
 );
 
 pub(super) static MINIMUM: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.operator.min",
+    "operator.min",
     "Minimum",
     &["min", "object.core.operator.min"],
-    CoreNodeConstructor::ControlOperator,
+    crate::object_spec::resolve_core_control_operator,
+    "Core",
 );
 
 pub(super) static MAXIMUM: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.operator.max",
+    "operator.max",
     "Maximum",
     &["max", "object.core.operator.max"],
-    CoreNodeConstructor::ControlOperator,
+    crate::object_spec::resolve_core_control_operator,
+    "Core",
 );
 
 pub(super) static SQUARE_ROOT: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.operator.sqrt",
+    "operator.sqrt",
     "Square Root",
     &["sqrt", "object.core.operator.sqrt"],
-    CoreNodeConstructor::ControlOperator,
+    crate::object_spec::resolve_core_control_operator,
+    "Core",
 );
 
 pub(super) static FLOAT: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.float",
+    "float",
     "Float",
     &["f", "float", "number", "object.core.float"],
-    CoreNodeConstructor::ControlValue,
+    crate::object_spec::resolve_core_control_value,
+    "Core",
 );
 
 pub(super) static INTEGER: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.int",
+    "int",
     "Integer",
     &["i", "int", "object.core.int"],
-    CoreNodeConstructor::ControlValue,
+    crate::object_spec::resolve_core_control_value,
+    "Core",
 );
 
 pub(super) static UNSIGNED_INTEGER: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.uint",
+    "uint",
     "Unsigned Integer",
     &["u", "uint", "object.core.uint"],
-    CoreNodeConstructor::ControlValue,
+    crate::object_spec::resolve_core_control_value,
+    "Core",
 );
 
 pub(super) static BANG: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.bang",
+    "bang",
     "Bang",
     &["b", "bang", "object.core.bang"],
-    CoreNodeConstructor::ControlValue,
+    crate::object_spec::resolve_core_control_value,
+    "Core",
 );
 
 pub(super) static MESSAGE: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.message",
+    "message",
     "Message",
     &["msg", "message", "object.core.message"],
-    CoreNodeConstructor::ControlValue,
+    crate::object_spec::resolve_core_control_value,
+    "Core",
 );
 
 pub(super) static COMMENT: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.comment",
+    "comment",
     "Comment",
     &["comment", "object.core.comment"],
-    CoreNodeConstructor::ControlValue,
+    crate::object_spec::resolve_core_control_value,
+    "Core",
 );

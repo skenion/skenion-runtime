@@ -10,10 +10,11 @@ use crate::{
     CanvasNodeView, ControlState, DummyExecutionReport, EdgeSpecCurrent, ExecutionPlan,
     GraphDocument, GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent, GraphTargetRef,
     IdConflictPolicy, IdRemapResult, NodeDefinitionCurrent, NodeRegistry,
-    PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
-    PreviewContext, ProjectDocumentCurrent, ProjectRequestCurrent, RuntimeCollaborationChange,
-    RuntimeDiagnostic, RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ViewState,
-    build_execution_plan_request_current, project_current::is_payload_identity_node_kind_current,
+    PackageRegistryListResponseV01, PasteGraphFragmentRequest, PasteGraphFragmentResponse,
+    PastePlacement, PatchPath, PreviewContext, ProjectDocumentCurrent, ProjectRequestCurrent,
+    RuntimeCollaborationChange, RuntimeDiagnostic, RuntimeOperationDiagnostic,
+    RuntimeOperationEnvelope, ViewState, build_execution_plan_request_current,
+    project_current::is_payload_identity_node_kind_current,
     project_document_validation_diagnostics_current, run_dummy_execution,
     server::registry_from_nodes, validate_project_request_current,
 };
@@ -97,6 +98,7 @@ pub struct RuntimeSession {
     redo_stack: Vec<HistoryEntry>,
     next_event_sequence: u64,
     package_registry_revision: Option<u64>,
+    package_registry: PackageRegistryListResponseV01,
     node_catalog: RuntimeNodeCatalogCache,
 }
 
@@ -119,6 +121,11 @@ impl Default for RuntimeSession {
             redo_stack: Vec::new(),
             next_event_sequence: 1,
             package_registry_revision: None,
+            package_registry: PackageRegistryListResponseV01 {
+                ok: true,
+                packages: Vec::new(),
+                diagnostics: Vec::new(),
+            },
             node_catalog: RuntimeNodeCatalogCache::default(),
         }
     }
@@ -169,7 +176,7 @@ impl RuntimeSession {
         &mut self,
         request: ProjectRequestCurrent,
     ) -> RuntimeSessionResponse {
-        self.load_project_current_with_package_registry_revision(request, None)
+        self.load_project_current_with_package_registry(request, None, None)
     }
 
     pub fn load_project_current_with_package_registry_revision(
@@ -177,8 +184,23 @@ impl RuntimeSession {
         request: ProjectRequestCurrent,
         package_registry_revision: Option<u64>,
     ) -> RuntimeSessionResponse {
+        self.load_project_current_with_package_registry(request, package_registry_revision, None)
+    }
+
+    pub fn load_project_current_with_package_registry(
+        &mut self,
+        request: ProjectRequestCurrent,
+        package_registry_revision: Option<u64>,
+        package_registry: Option<PackageRegistryListResponseV01>,
+    ) -> RuntimeSessionResponse {
+        let package_registry = package_registry.unwrap_or_else(|| PackageRegistryListResponseV01 {
+            ok: true,
+            packages: Vec::new(),
+            diagnostics: Vec::new(),
+        });
         let mut document = project_document_from_request_current(&request);
-        let nodes_current = normalized_node_definitions_current(&document, request.nodes);
+        let nodes_current =
+            normalized_node_definitions_current(&document, request.nodes, Some(&package_registry));
         let view_state = runtime_owned_view_state(reconcile_view_state_with_graph_current(
             &document.graph,
             Some(document.view_state.clone()),
@@ -230,6 +252,7 @@ impl RuntimeSession {
         self.clear_history();
         self.revision += 1;
         self.package_registry_revision = package_registry_revision;
+        self.package_registry = package_registry;
         self.refresh_node_catalog_cache();
 
         self.response(true, diagnostics, None)
@@ -342,6 +365,11 @@ impl RuntimeSession {
         self.clear_history();
         self.revision += 1;
         self.package_registry_revision = None;
+        self.package_registry = PackageRegistryListResponseV01 {
+            ok: true,
+            packages: Vec::new(),
+            diagnostics: Vec::new(),
+        };
         self.refresh_node_catalog_cache();
         self.response(true, Vec::new(), None)
     }
@@ -370,8 +398,13 @@ impl RuntimeSession {
         self.project.clone()
     }
 
+    pub(crate) fn package_registry_current(&self) -> PackageRegistryListResponseV01 {
+        self.package_registry.clone()
+    }
+
     fn refresh_node_catalog_cache(&mut self) {
-        self.node_catalog.refresh(self.project.as_ref());
+        self.node_catalog
+            .refresh(self.project.as_ref(), Some(&self.package_registry));
     }
 
     pub fn target_revision_current(&self, target: &GraphTargetRef) -> Option<String> {

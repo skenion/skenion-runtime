@@ -1,10 +1,10 @@
 use super::{ObjectRegistryCandidate, ObjectSpecResolution, ParsedObjectSpec};
-use crate::nodes::CoreNodeConstructor;
 
 mod atoms;
 mod audio;
 mod control;
 mod outcome;
+mod package;
 mod parser;
 mod project_patch;
 mod reference;
@@ -14,6 +14,7 @@ pub(super) use audio::unsupported_first_party_audio_message;
 use control::{resolve_control_operator, resolve_control_value};
 pub(super) use outcome::failure;
 use outcome::failure_with_candidates;
+pub(super) use package::construct_package_object;
 pub(super) use parser::parse_object_spec_input_v01;
 pub(super) use project_patch::{construct_project_patch, explicit_project_patch_ref};
 use reference::{resolve_named_ref_object, resolve_optional_named_ref_object};
@@ -27,64 +28,16 @@ pub(super) fn construct_first_party_core(
     parsed: ParsedObjectSpec,
     candidate: &ObjectRegistryCandidate,
 ) -> ObjectSpecResolution {
+    if let Some(core) = candidate.core {
+        return core.resolve(parsed, candidate);
+    }
+
     let ParsedObjectSpec {
         input,
         display_text,
         class_symbol,
         creation_args,
     } = parsed;
-
-    match candidate.constructor {
-        Some(CoreNodeConstructor::ControlOperator) => {
-            return resolve_control_operator(
-                &input,
-                display_text,
-                &class_symbol,
-                creation_args,
-                candidate,
-            );
-        }
-        Some(CoreNodeConstructor::ControlValue) => {
-            return resolve_control_value(
-                &input,
-                display_text,
-                &class_symbol,
-                creation_args,
-                candidate,
-            );
-        }
-        Some(CoreNodeConstructor::Audio) => {
-            return resolve_audio_object(
-                &input,
-                display_text,
-                &class_symbol,
-                creation_args,
-                candidate,
-            );
-        }
-        Some(CoreNodeConstructor::Subpatch) => {
-            return resolve_named_ref_object(
-                &input,
-                display_text,
-                &class_symbol,
-                creation_args,
-                candidate,
-                "patchRef",
-                "subpatch object spec requires exactly one patch reference",
-            );
-        }
-        Some(CoreNodeConstructor::BoundaryPort) => {
-            return resolve_optional_named_ref_object(
-                &input,
-                display_text,
-                &class_symbol,
-                creation_args,
-                candidate,
-                "portId",
-            );
-        }
-        None => {}
-    }
 
     failure_with_candidates(
         &input,
@@ -95,8 +48,106 @@ pub(super) fn construct_first_party_core(
         "object-spec.unresolved",
         format!(
             "{} is registered but has no Runtime constructor",
-            candidate.kind
+            candidate.implementation.object_id
         ),
+    )
+}
+
+pub(crate) fn resolve_core_control_operator(
+    parsed: ParsedObjectSpec,
+    candidate: &ObjectRegistryCandidate,
+) -> ObjectSpecResolution {
+    let ParsedObjectSpec {
+        input,
+        display_text,
+        class_symbol,
+        creation_args,
+    } = parsed;
+    resolve_control_operator(
+        &input,
+        display_text,
+        &class_symbol,
+        creation_args,
+        candidate,
+    )
+}
+
+pub(crate) fn resolve_core_control_value(
+    parsed: ParsedObjectSpec,
+    candidate: &ObjectRegistryCandidate,
+) -> ObjectSpecResolution {
+    let ParsedObjectSpec {
+        input,
+        display_text,
+        class_symbol,
+        creation_args,
+    } = parsed;
+    resolve_control_value(
+        &input,
+        display_text,
+        &class_symbol,
+        creation_args,
+        candidate,
+    )
+}
+
+pub(crate) fn resolve_core_audio(
+    parsed: ParsedObjectSpec,
+    candidate: &ObjectRegistryCandidate,
+) -> ObjectSpecResolution {
+    let ParsedObjectSpec {
+        input,
+        display_text,
+        class_symbol,
+        creation_args,
+    } = parsed;
+    resolve_audio_object(
+        &input,
+        display_text,
+        &class_symbol,
+        creation_args,
+        candidate,
+    )
+}
+
+pub(crate) fn resolve_core_subpatch(
+    parsed: ParsedObjectSpec,
+    candidate: &ObjectRegistryCandidate,
+) -> ObjectSpecResolution {
+    let ParsedObjectSpec {
+        input,
+        display_text,
+        class_symbol,
+        creation_args,
+    } = parsed;
+    resolve_named_ref_object(
+        &input,
+        display_text,
+        &class_symbol,
+        creation_args,
+        candidate,
+        "patchRef",
+        "subpatch object spec requires exactly one patch reference",
+    )
+}
+
+pub(crate) fn resolve_core_boundary_port(
+    parsed: ParsedObjectSpec,
+    candidate: &ObjectRegistryCandidate,
+) -> ObjectSpecResolution {
+    let ParsedObjectSpec {
+        input,
+        display_text,
+        class_symbol,
+        creation_args,
+    } = parsed;
+    resolve_optional_named_ref_object(
+        &input,
+        display_text,
+        &class_symbol,
+        creation_args,
+        candidate,
+        "portId",
     )
 }
 

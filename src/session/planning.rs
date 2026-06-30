@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use crate::{
-    ExecutionPlan, GraphDocument, GraphDocumentCurrent, NodeRegistry, PlanError, RuntimeDiagnostic,
-    build_execution_plan,
+    ExecutionPlan, GraphDocument, GraphDocumentCurrent, NodeRegistry,
+    ObjectResolutionStatusCurrent, PlanError, RuntimeDiagnostic, build_execution_plan,
 };
 
 const UNRESOLVED_OBJECT_NODE_KIND: &str = "object.core.unresolved";
@@ -36,17 +36,18 @@ pub(super) fn unresolved_object_diagnostics_current(
     graph
         .nodes
         .iter()
-        .filter(|node| node.kind == UNRESOLVED_OBJECT_NODE_KIND)
+        .filter(|node| {
+            node.object_resolution.as_ref().is_some_and(|resolution| {
+                resolution.status != ObjectResolutionStatusCurrent::Resolved
+            })
+        })
         .map(|node| {
-            let object_spec = node
-                .params
-                .get("objectSpec")
-                .and_then(|value| value.as_str())
-                .unwrap_or(node.id.as_str());
+            let object_spec = node.object_spec.as_deref().unwrap_or(node.id.as_str());
             let diagnostic_message = node
-                .params
-                .get("diagnosticMessage")
-                .and_then(|value| value.as_str())
+                .object_resolution
+                .as_ref()
+                .and_then(|resolution| resolution.diagnostics.first())
+                .map(|diagnostic| diagnostic.message.as_str())
                 .unwrap_or("object spec could not be resolved");
             RuntimeDiagnostic::error(format!(
                 "unresolved object {object_spec}: {diagnostic_message}"

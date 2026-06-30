@@ -1,31 +1,32 @@
+#[cfg(test)]
 use serde_json::{Map, Value, json};
 use skenion_contracts::MessageKeyPolicyV01;
 
+#[cfg(test)]
+use super::ObjectSpecCandidateSummary;
 use super::ports::message_key_policy;
 use super::{
-    CURRENT_KIND_VERSION, ObjectSpecCandidateSummary, ObjectSpecDiagnostic, ObjectSpecPort,
-    ObjectSpecPortActivation, ObjectSpecPortDirection, ObjectSpecPortRate, ObjectSpecResolution,
+    CURRENT_KIND_VERSION, ObjectSpecDiagnostic, ObjectSpecPort, ObjectSpecPortActivation,
+    ObjectSpecPortDirection, ObjectSpecPortRate, ObjectSpecResolution,
 };
 use crate::{
-    GraphNodeCurrent, NodeDefinitionCurrent, PortDirectionCurrent, PortRateCurrent, PortSpecCurrent,
+    GraphNodeCurrent, NodeDefinitionCurrent, PortDirectionCurrent, PortRateCurrent,
+    PortSpecCurrent, current_node_identity::implementation_executable_kind,
 };
 
 pub(crate) fn materialize_object_spec_node_v01(
     resolution: &ObjectSpecResolution,
     node_id: impl Into<String>,
 ) -> Result<GraphNodeCurrent, ObjectSpecDiagnostic> {
-    let Some(resolved_kind) = resolution.resolved_kind.clone() else {
-        return Err(primary_resolution_diagnostic(resolution));
-    };
-    let Some(resolved_kind_version) = resolution.resolved_kind_version.clone() else {
+    let Some(implementation) = resolution.implementation.clone() else {
         return Err(primary_resolution_diagnostic(resolution));
     };
 
     Ok(GraphNodeCurrent {
         id: node_id.into(),
-        kind: resolved_kind,
-        kind_version: resolved_kind_version,
+        implementation: Some(implementation),
         object_spec: Some(resolution.display_text.clone()),
+        object_resolution: Some(resolution.object_resolution.clone()),
         binding_ref: None,
         params: resolution.params.clone(),
         ports: resolution
@@ -40,8 +41,11 @@ pub(crate) fn materialize_object_spec_node_v01(
 pub(crate) fn object_spec_node_definition_v01(
     resolution: &ObjectSpecResolution,
 ) -> Option<NodeDefinitionCurrent> {
-    let resolved_kind = resolution.resolved_kind.as_ref()?;
-    let resolved_kind_version = resolution.resolved_kind_version.as_ref()?;
+    let implementation = resolution.implementation.as_ref()?;
+    let version = implementation
+        .version
+        .clone()
+        .unwrap_or_else(|| CURRENT_KIND_VERSION.to_owned());
     let ports = resolution
         .instance_ports
         .iter()
@@ -54,10 +58,10 @@ pub(crate) fn object_spec_node_definition_v01(
     Some(NodeDefinitionCurrent {
         schema: "skenion.node.definition".to_owned(),
         schema_version: CURRENT_KIND_VERSION.to_owned(),
-        id: resolved_kind.clone(),
-        version: resolved_kind_version.clone(),
-        display_name: object_spec_definition_display_name(resolved_kind),
-        category: object_spec_definition_category(resolved_kind).to_owned(),
+        id: implementation_executable_kind(implementation),
+        version,
+        display_name: object_spec_definition_display_name(&implementation.object_id),
+        category: object_spec_definition_category(&implementation.object_id).to_owned(),
         script_api_version: None,
         bundle_hash: None,
         surface: None,
@@ -77,6 +81,7 @@ pub(crate) fn object_spec_node_definition_v01(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn materialize_unresolved_object_spec_node_v01(
     resolution: &ObjectSpecResolution,
     node_id: impl Into<String>,
@@ -115,9 +120,9 @@ pub(crate) fn materialize_unresolved_object_spec_node_v01(
 
     GraphNodeCurrent {
         id: node_id.into(),
-        kind: "object.core.unresolved".to_owned(),
-        kind_version: CURRENT_KIND_VERSION.to_owned(),
+        implementation: None,
         object_spec: Some(resolution.display_text.clone()),
+        object_resolution: Some(resolution.object_resolution.clone()),
         binding_ref: None,
         params,
         ports: Vec::new(),
@@ -125,11 +130,13 @@ pub(crate) fn materialize_unresolved_object_spec_node_v01(
     }
 }
 
+#[cfg(test)]
 fn object_spec_candidate_json(candidate: &ObjectSpecCandidateSummary) -> Value {
     json!({
         "id": candidate.id,
         "source": candidate.source,
-        "kind": candidate.kind,
+        "implementation": candidate.implementation,
+        "objectSpec": candidate.object_spec,
         "displayName": candidate.display_name,
     })
 }
@@ -257,7 +264,7 @@ fn object_spec_definition_display_name(kind: &str) -> String {
 }
 
 fn object_spec_definition_category(kind: &str) -> &'static str {
-    if kind.starts_with("object.core.audio.") {
+    if kind.starts_with("object.core.audio.") || kind.starts_with("audio.") {
         "Runtime Audio"
     } else {
         "Runtime Objects"

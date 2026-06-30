@@ -990,8 +990,17 @@ mod tests {
                 "revision": graph.revision.clone(),
                 "nodes": graph.nodes.iter().map(|node| json!({
                     "id": node.id.clone(),
-                    "kind": node.kind.clone(),
-                    "kindVersion": node.kind_version.clone(),
+                    "implementation": {
+                        "provider": { "kind": "core" },
+                        "objectId": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str()),
+                        "version": node.kind_version.clone()
+                    },
+                    "objectSpec": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str()),
+                    "objectResolution": {
+                        "status": "resolved",
+                        "candidates": [],
+                        "diagnostics": []
+                    },
                     "params": node.params.clone(),
                     "ports": []
                 })).collect::<Vec<_>>(),

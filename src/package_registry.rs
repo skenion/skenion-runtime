@@ -11,9 +11,10 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use skenion_contracts::{
     PackageChecksumAlgorithmV01, PackageChecksumV01, PackageContractsSupportV01,
-    PackageDiagnosticSeverityV01, PackageDiagnosticV01, PackageManifestV01, PackageProvidedRefV01,
-    PackageProvidesV01, PackageRootKindV01, PackageSourceV01, PackageTargetTripleV01,
-    PackageTrustV01, SKENION_PACKAGE_MANIFEST_FILE_NAME, validate_package_manifest_v01,
+    PackageDiagnosticSeverityV01, PackageDiagnosticV01, PackageManifestV01, PackageObjectExportV01,
+    PackageProvidedRefV01, PackageProvidesV01, PackageRootKindV01, PackageSourceV01,
+    PackageTargetTripleV01, PackageTrustV01, SKENION_PACKAGE_MANIFEST_FILE_NAME,
+    validate_package_manifest_v01,
 };
 
 use crate::{DiagnosticSeverity, RuntimeDiagnostic};
@@ -40,6 +41,8 @@ pub struct PackageRegistryEntryV01 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<PackageTargetTripleV01>,
     pub manifest_path: String,
+    #[serde(skip)]
+    pub(crate) root_path: Option<PathBuf>,
     pub manifest_checksum: PackageChecksumV01,
     pub provides: PackageProvidesV01,
     pub diagnostics: Vec<PackageDiagnosticV01>,
@@ -396,6 +399,7 @@ fn package_entry_from_manifest(
         runtime_abi_range: manifest.runtime_abi_range,
         targets: manifest.targets,
         manifest_path: RUNTIME_PACKAGE_MANIFEST_FILE.to_owned(),
+        root_path: Some(root_canonical.to_path_buf()),
         manifest_checksum: manifest_checksum(manifest_contents.as_bytes()),
         provides: public_package_provides(manifest.provides),
         diagnostics,
@@ -405,6 +409,7 @@ fn package_entry_from_manifest(
 fn public_package_provides(mut provides: PackageProvidesV01) -> PackageProvidesV01 {
     sanitize_provided_paths(&mut provides.patches);
     sanitize_provided_paths(&mut provides.nodes);
+    sanitize_object_definition_paths(&mut provides.objects);
     sanitize_provided_paths(&mut provides.resources);
     sanitize_provided_paths(&mut provides.help);
     provides
@@ -413,6 +418,12 @@ fn public_package_provides(mut provides: PackageProvidesV01) -> PackageProvidesV
 fn sanitize_provided_paths(provided: &mut [PackageProvidedRefV01]) {
     for provided in provided {
         provided.path = public_manifest_path(&provided.path);
+    }
+}
+
+fn sanitize_object_definition_paths(objects: &mut [PackageObjectExportV01]) {
+    for object in objects {
+        object.definition_path = public_manifest_path(&object.definition_path);
     }
 }
 
@@ -467,6 +478,9 @@ fn package_path_diagnostics(
     }
     for provided in &manifest.provides.nodes {
         check_path(&provided.path, "provided-node");
+    }
+    for object in &manifest.provides.objects {
+        check_path(&object.definition_path, "provided-object-definition");
     }
     for provided in &manifest.provides.resources {
         check_path(&provided.path, "provided-resource");
@@ -1273,6 +1287,7 @@ mod tests {
                 "/absolute/patch.skenion.json",
             )],
             nodes: vec![provided_ref("example.node", "nodes/node.json")],
+            objects: Vec::new(),
             resources: vec![provided_ref("example.resource", "/absolute/resource.bin")],
             help: vec![provided_ref("example.help", "help/help.skenion.json")],
         };
@@ -1346,6 +1361,7 @@ mod tests {
                 runtime_abi_range: None,
                 targets: Vec::new(),
                 manifest_path: RUNTIME_PACKAGE_MANIFEST_FILE.to_owned(),
+                root_path: None,
                 manifest_checksum: PackageChecksumV01 {
                     algorithm: PackageChecksumAlgorithmV01::Sha256,
                     value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

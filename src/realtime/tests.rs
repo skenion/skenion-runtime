@@ -233,7 +233,13 @@ fn object_spec_resolution_with_all_port_variants() -> ObjectSpecResolution {
     resolution.candidates = vec![crate::object_spec::ObjectSpecCandidateSummary {
         id: "object.core.sig".to_owned(),
         source: "core".to_owned(),
-        kind: "object.core.sig".to_owned(),
+        implementation: crate::ObjectImplementationRefCurrent {
+            provider: crate::ObjectProviderRefCurrent::Core,
+            object_id: "audio.sig".to_owned(),
+            version: Some("0.1.0".to_owned()),
+            interface_digest: None,
+        },
+        object_spec: Some("sig~".to_owned()),
         display_name: "Signal".to_owned(),
     }];
     resolution
@@ -668,7 +674,7 @@ fn node_command_result_serializes_resolution_ports_diagnostics_and_input() {
     assert_eq!(node_result["requestedNodeId"], "requested-oscillator");
     assert_eq!(node_result["interfaceIncidentEdgePolicy"], "reject");
     assert_eq!(node_result["droppedEdgeIds"], json!(["stale-edge"]));
-    let rates = node_result["resolution"]["ports"]
+    let rates = node_result["ports"]
         .as_array()
         .expect("ports should serialize")
         .iter()
@@ -680,7 +686,7 @@ fn node_command_result_serializes_resolution_ports_diagnostics_and_input() {
             "event", "control", "audio", "render", "gpu", "resource", "io"
         ]
     );
-    let activations = node_result["resolution"]["ports"]
+    let activations = node_result["ports"]
         .as_array()
         .expect("ports should serialize")
         .iter()
@@ -695,7 +701,7 @@ fn node_command_result_serializes_resolution_ports_diagnostics_and_input() {
         ]
     );
     assert_eq!(
-        node_result["resolution"]["diagnostics"][0]["code"],
+        node_result["diagnostics"][0]["code"],
         "object-spec.test-warning"
     );
 
@@ -755,11 +761,10 @@ fn object_command_materialization_respects_params_and_unresolved_policy() {
         "objectSpec": "missingObject 1",
         "params": { "label": "keep me" }
     }));
-    let diagnostic_node =
+    assert!(
         materialize_object_command_node(&session, &diagnostic_payload, &unresolved, "missing_1")
-            .expect("default unresolved policy should materialize a diagnostic node");
-    assert_eq!(diagnostic_node.0.id, "missing_1");
-    assert_eq!(diagnostic_node.0.params["label"], "keep me");
+            .is_none()
+    );
 
     let reject_payload = graph_payload(json!({
         "kind": "node.create",

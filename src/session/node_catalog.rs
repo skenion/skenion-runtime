@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use skenion_contracts::NodeCatalogSnapshotV01;
 
-use crate::{ProjectDocumentCurrent, object_spec::ObjectRegistry};
+use crate::{PackageRegistryListResponseV01, ProjectDocumentCurrent, object_spec::ObjectRegistry};
 
 #[derive(Debug, Clone)]
 pub(super) struct RuntimeNodeCatalogCache {
@@ -11,19 +11,32 @@ pub(super) struct RuntimeNodeCatalogCache {
 
 impl RuntimeNodeCatalogCache {
     pub(super) fn for_project(project: Option<&ProjectDocumentCurrent>) -> Self {
+        Self::for_project_with_packages(project, None)
+    }
+
+    pub(super) fn for_project_with_packages(
+        project: Option<&ProjectDocumentCurrent>,
+        packages: Option<&PackageRegistryListResponseV01>,
+    ) -> Self {
         Self {
-            visible_key: node_catalog_visible_key(project),
-            snapshot: ObjectRegistry::for_project(project).catalog_projection(),
+            visible_key: node_catalog_visible_key(project, packages),
+            snapshot: ObjectRegistry::for_project_with_packages(project, packages)
+                .catalog_projection(),
         }
     }
 
-    pub(super) fn refresh(&mut self, project: Option<&ProjectDocumentCurrent>) {
-        let visible_key = node_catalog_visible_key(project);
+    pub(super) fn refresh(
+        &mut self,
+        project: Option<&ProjectDocumentCurrent>,
+        packages: Option<&PackageRegistryListResponseV01>,
+    ) {
+        let visible_key = node_catalog_visible_key(project, packages);
         if self.visible_key == visible_key {
             return;
         }
         self.visible_key = visible_key;
-        self.snapshot = ObjectRegistry::for_project(project).catalog_projection();
+        self.snapshot =
+            ObjectRegistry::for_project_with_packages(project, packages).catalog_projection();
     }
 
     pub(super) fn snapshot(&self) -> NodeCatalogSnapshotV01 {
@@ -37,7 +50,10 @@ impl Default for RuntimeNodeCatalogCache {
     }
 }
 
-fn node_catalog_visible_key(project: Option<&ProjectDocumentCurrent>) -> Value {
+fn node_catalog_visible_key(
+    project: Option<&ProjectDocumentCurrent>,
+    packages: Option<&PackageRegistryListResponseV01>,
+) -> Value {
     let mut project_patches = project
         .map(|project| {
             project
@@ -62,8 +78,29 @@ fn node_catalog_visible_key(project: Option<&ProjectDocumentCurrent>) -> Value {
             .cmp(right.get("id").and_then(Value::as_str).unwrap_or_default())
     });
 
+    let package_objects = packages
+        .map(|packages| {
+            packages
+                .packages
+                .iter()
+                .flat_map(|package| {
+                    package.provides.objects.iter().map(|object| {
+                        json!({
+                            "packageId": &package.package_id,
+                            "packageVersion": &package.version,
+                            "objectId": &object.object_id,
+                            "primaryObjectSpec": &object.primary_object_spec,
+                            "aliases": &object.aliases,
+                            "definitionPath": &object.definition_path,
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     json!({
-        "providers": [],
+        "providers": package_objects,
         "projectPatches": project_patches,
     })
 }

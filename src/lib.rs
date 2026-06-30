@@ -6,6 +6,7 @@ mod contract;
 mod control_state;
 mod control_value;
 mod conversion;
+mod current_node_identity;
 mod diagnostic;
 mod dsp;
 mod extension_manager;
@@ -83,10 +84,13 @@ pub use contract::{
     FeedbackPolicyCurrent, GraphDocumentCurrent, GraphFragmentCurrent,
     GraphFragmentOutsideEndpointPolicyCurrent, GraphNodeCurrent, GraphTargetRef,
     GraphValidationResultCurrent, IdConflictPolicy, MergePolicyCurrent, NodeDefinitionCurrent,
-    PasteGraphFragmentRequest, PastePlacement, PatchContractCurrent, PatchContractPortCurrent,
-    PatchDefinitionCurrent, PatchPath, PortDirectionCurrent, PortRateCurrent, PortSpecCurrent,
-    ProjectDocumentCurrent, ProjectMetadataCurrent, RuntimeSessionLoadModeCurrent,
-    RuntimeSessionLoadPreconditionCurrent, RuntimeSessionLoadRequestCurrent, ViewState,
+    ObjectImplementationRefCurrent, ObjectProviderRefCurrent, ObjectResolutionCandidateCurrent,
+    ObjectResolutionCurrent, ObjectResolutionDiagnosticCodeCurrent,
+    ObjectResolutionDiagnosticCurrent, ObjectResolutionStatusCurrent, PasteGraphFragmentRequest,
+    PastePlacement, PatchContractCurrent, PatchContractPortCurrent, PatchDefinitionCurrent,
+    PatchPath, PortDirectionCurrent, PortRateCurrent, PortSpecCurrent, ProjectDocumentCurrent,
+    ProjectMetadataCurrent, RuntimeSessionLoadModeCurrent, RuntimeSessionLoadPreconditionCurrent,
+    RuntimeSessionLoadRequestCurrent, ViewState,
 };
 pub use control_state::{
     ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,

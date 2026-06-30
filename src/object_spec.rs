@@ -1,13 +1,15 @@
 use skenion_contracts::{
     NodeCatalogDiagnosticNodeDefinitionReasonV01, NodeCatalogDiagnosticNodeDefinitionV01,
     NodeCatalogDisplayPaletteV01, NodeCatalogDisplayV01, NodeCatalogEntryV01,
-    NodeCatalogSnapshotV01, NodeCatalogSourceV01, PackageChecksumAlgorithmV01, PackageChecksumV01,
+    NodeCatalogSnapshotV01, PackageChecksumAlgorithmV01, PackageChecksumV01,
 };
+use std::fs;
 
 use crate::{
-    NodeDefinitionCurrent, PatchDefinitionCurrent, PortDirectionCurrent, PortRateCurrent,
+    NodeDefinitionCurrent, ObjectImplementationRefCurrent, ObjectProviderRefCurrent,
+    PackageRegistryListResponseV01, PatchDefinitionCurrent, PortDirectionCurrent, PortRateCurrent,
     PortSpecCurrent, ProjectDocumentCurrent,
-    nodes::{CoreNodeConstructor, CoreNodeImplementation, first_party_core_nodes},
+    nodes::{CoreNodeImplementation, first_party_core_nodes},
 };
 
 mod ports;
@@ -16,14 +18,13 @@ mod resolver;
 mod types;
 
 pub(crate) use types::{
-    ObjectRegistry, ObjectSpecAtom, ObjectSpecCandidateSummary, ObjectSpecDiagnostic,
-    ObjectSpecPort, ObjectSpecPortActivation, ObjectSpecPortDirection, ObjectSpecPortRate,
-    ObjectSpecResolution,
+    ObjectRegistry, ObjectRegistryCandidate, ObjectSpecAtom, ObjectSpecCandidateSummary,
+    ObjectSpecDiagnostic, ObjectSpecPort, ObjectSpecPortActivation, ObjectSpecPortDirection,
+    ObjectSpecPortRate, ObjectSpecResolution, ParsedObjectSpec,
 };
 
-use types::{
-    ObjectRegistryCandidate, ObjectRegistrySource, ParsedObjectSpec, ProjectPatchCandidate,
-};
+use types::ObjectRegistrySource;
+use types::{PackageObjectCandidate, ProjectPatchCandidate, core_implementation};
 
 const CURRENT_KIND_VERSION: &str = "0.1.0";
 pub(crate) const PROJECT_PATCH_OBJECT_KIND_PREFIX: &str = "object.project.patch.";
@@ -40,6 +41,17 @@ impl ObjectRegistry {
 
     pub(crate) fn for_project(project: Option<&ProjectDocumentCurrent>) -> Self {
         Self::for_patch_library(project.map_or(&[], |project| project.patch_library.as_slice()))
+    }
+
+    pub(crate) fn for_project_with_packages(
+        project: Option<&ProjectDocumentCurrent>,
+        packages: Option<&PackageRegistryListResponseV01>,
+    ) -> Self {
+        let mut registry = Self::for_project(project);
+        if let Some(packages) = packages {
+            registry.register_package_objects(packages);
+        }
+        registry
     }
 
     pub(crate) fn for_patch_library(patch_library: &[PatchDefinitionCurrent]) -> Self {
@@ -93,16 +105,16 @@ impl ObjectRegistry {
     }
 
     pub(crate) fn catalog_projection(&self) -> NodeCatalogSnapshotV01 {
-        let mut entries =
-            self.candidates
-                .iter()
-                .filter_map(|candidate| match candidate.source {
-                    ObjectRegistrySource::FirstPartyCore => self.core_catalog_entry(candidate),
-                    ObjectRegistrySource::ProjectPatch => project_patch_catalog_entry(candidate),
-                    ObjectRegistrySource::PackageProvider
-                    | ObjectRegistrySource::NativeProvider => None,
-                })
-                .collect::<Vec<_>>();
+        let mut entries = self
+            .candidates
+            .iter()
+            .filter_map(|candidate| match candidate.source {
+                ObjectRegistrySource::FirstPartyCore => self.core_catalog_entry(candidate),
+                ObjectRegistrySource::ProjectPatch => project_patch_catalog_entry(candidate),
+                ObjectRegistrySource::PackageProvider => package_catalog_entry(candidate),
+                ObjectRegistrySource::NativeProvider => None,
+            })
+            .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.catalog_id.cmp(&right.catalog_id));
 
         let mut snapshot = NodeCatalogSnapshotV01 {
@@ -141,7 +153,7 @@ impl ObjectRegistry {
         &self,
         candidate: &ObjectRegistryCandidate,
     ) -> Option<NodeCatalogEntryV01> {
-        if candidate.kind == "object.core.subpatch" {
+        if candidate.executable_kind == "object.core.subpatch" {
             return None;
         }
 
@@ -156,9 +168,10 @@ impl ObjectRegistry {
 
         Some(NodeCatalogEntryV01 {
             catalog_id: catalog_id_for_core_candidate(candidate),
-            canonical_object_spec,
+            object_id: candidate.implementation.object_id.clone(),
+            primary_object_spec: canonical_object_spec,
             aliases: None,
-            source: NodeCatalogSourceV01::Core,
+            provider: ObjectProviderRefCurrent::Core,
             definition,
             creatable: true,
             display: NodeCatalogDisplayV01 {
@@ -166,7 +179,7 @@ impl ObjectRegistry {
                 category: Some(core_catalog_category(candidate).to_owned()),
                 palette: Some(NodeCatalogDisplayPaletteV01::Text),
                 description: None,
-                help_id: Some(candidate.kind.clone()),
+                help_id: Some(candidate.executable_kind.clone()),
             },
             diagnostics: None,
         })
@@ -187,12 +200,13 @@ impl ObjectRegistry {
                 .iter()
                 .map(|alias| (*alias).to_owned())
                 .collect(),
-            kind: node.kind().to_owned(),
-            kind_version: CURRENT_KIND_VERSION.to_owned(),
+            implementation: core_implementation(node.object_id()),
+            executable_kind: node.kind().to_owned(),
             display_name: node.display_name().to_owned(),
-            constructor: Some(node.constructor()),
+            core: Some(node),
             catalog_category: Some(node.catalog_category()),
             project_patch: None,
+            package: None,
         });
     }
 
@@ -203,14 +217,28 @@ impl ObjectRegistry {
                 id: format!("project-patch:{}", patch.id),
                 source: ObjectRegistrySource::ProjectPatch,
                 aliases: vec![patch.id.clone()],
-                kind,
-                kind_version: CURRENT_KIND_VERSION.to_owned(),
+                implementation: ObjectImplementationRefCurrent {
+                    provider: ObjectProviderRefCurrent::ProjectPatch {
+                        patch_id: patch.id.clone(),
+                        revision: Some(patch.revision.clone()),
+                        interface_revision: None,
+                        interface_digest: Some(
+                            skenion_contracts::compute_patch_interface_digest_v01(patch),
+                        ),
+                    },
+                    object_id: patch.id.clone(),
+                    version: Some(CURRENT_KIND_VERSION.to_owned()),
+                    interface_digest: Some(skenion_contracts::compute_patch_interface_digest_v01(
+                        patch,
+                    )),
+                },
+                executable_kind: kind,
                 display_name: patch
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.title.clone())
                     .unwrap_or_else(|| patch.id.clone()),
-                constructor: None,
+                core: None,
                 catalog_category: None,
                 project_patch: Some(ProjectPatchCandidate {
                     patch_id: patch.id.clone(),
@@ -222,7 +250,43 @@ impl ObjectRegistry {
                     interface_digest: skenion_contracts::compute_patch_interface_digest_v01(patch),
                     ports: project_patch_ports(patch),
                 }),
+                package: None,
             });
+        }
+    }
+
+    fn register_package_objects(&mut self, packages: &PackageRegistryListResponseV01) {
+        for package in &packages.packages {
+            for object in &package.provides.objects {
+                let mut aliases = Vec::with_capacity(object.aliases.len() + 1);
+                aliases.push(object.primary_object_spec.clone());
+                aliases.extend(object.aliases.clone());
+                self.candidates.push(ObjectRegistryCandidate {
+                    id: format!("package:{}:{}", package.package_id, object.object_id),
+                    source: ObjectRegistrySource::PackageProvider,
+                    aliases,
+                    implementation: ObjectImplementationRefCurrent {
+                        provider: ObjectProviderRefCurrent::Package {
+                            package_id: package.package_id.clone(),
+                            lock_entry_id: None,
+                            version: Some(package.version.clone()),
+                        },
+                        object_id: object.object_id.clone(),
+                        version: Some(package.version.clone()),
+                        interface_digest: None,
+                    },
+                    executable_kind: object.object_id.clone(),
+                    display_name: object.object_id.clone(),
+                    core: None,
+                    catalog_category: None,
+                    project_patch: None,
+                    package: Some(PackageObjectCandidate {
+                        package_id: package.package_id.clone(),
+                        root_path: package.root_path.clone(),
+                        definition_path: object.definition_path.clone(),
+                    }),
+                });
+            }
         }
     }
 
@@ -269,10 +333,12 @@ impl ObjectRegistry {
             id: format!("project-patch:{patch_id}"),
             source: ObjectRegistrySource::ProjectPatch,
             aliases: vec![patch_id.clone()],
-            kind: "object.core.subpatch".to_owned(),
-            kind_version: CURRENT_KIND_VERSION.to_owned(),
+            implementation: core_implementation("subpatch"),
+            executable_kind: "object.core.subpatch".to_owned(),
             display_name: patch_id.clone(),
-            constructor: Some(CoreNodeConstructor::Subpatch),
+            core: self
+                .core_candidate("object.core.subpatch")
+                .and_then(|candidate| candidate.core),
             catalog_category: Some("Core"),
             project_patch: Some(ProjectPatchCandidate {
                 patch_id,
@@ -281,6 +347,7 @@ impl ObjectRegistry {
                 interface_digest: zero_catalog_revision_checksum(),
                 ports: Vec::new(),
             }),
+            package: None,
         }]
     }
 
@@ -288,7 +355,8 @@ impl ObjectRegistry {
         self.candidates
             .iter()
             .find(|candidate| {
-                candidate.source == ObjectRegistrySource::FirstPartyCore && candidate.kind == kind
+                candidate.source == ObjectRegistrySource::FirstPartyCore
+                    && candidate.executable_kind == kind
             })
             .cloned()
     }
@@ -301,16 +369,15 @@ impl ObjectRegistry {
         match candidate.source {
             ObjectRegistrySource::FirstPartyCore => construct_first_party_core(parsed, candidate),
             ObjectRegistrySource::ProjectPatch => construct_project_patch(parsed, candidate),
-            ObjectRegistrySource::PackageProvider | ObjectRegistrySource::NativeProvider => {
-                failure(
-                    &parsed.input,
-                    parsed.display_text,
-                    &parsed.class_symbol,
-                    parsed.creation_args,
-                    "object-spec.provider-unavailable",
-                    "package and native object providers are reserved but not loaded in this Runtime tranche",
-                )
-            }
+            ObjectRegistrySource::PackageProvider => construct_package_object(parsed, candidate),
+            ObjectRegistrySource::NativeProvider => failure(
+                &parsed.input,
+                parsed.display_text,
+                &parsed.class_symbol,
+                parsed.creation_args,
+                "object-spec.provider-unavailable",
+                "package and native object providers are reserved but not loaded in this Runtime tranche",
+            ),
         }
     }
 }
@@ -330,7 +397,8 @@ impl ObjectRegistryCandidate {
                 ObjectRegistrySource::NativeProvider => "native-provider",
             }
             .to_owned(),
-            kind: self.kind.clone(),
+            implementation: self.implementation.clone(),
+            object_spec: self.canonical_object_spec(),
             display_name: self.display_name.clone(),
         }
     }
@@ -352,12 +420,14 @@ fn project_patch_catalog_entry(candidate: &ObjectRegistryCandidate) -> Option<No
             "project.{}",
             skenion_contracts::sanitize_project_patch_id_v01(&patch.patch_id)
         ),
-        canonical_object_spec: patch.patch_id.clone(),
+        object_id: candidate.implementation.object_id.clone(),
+        primary_object_spec: patch.patch_id.clone(),
         aliases: None,
-        source: NodeCatalogSourceV01::ProjectPatch {
+        provider: ObjectProviderRefCurrent::ProjectPatch {
             patch_id: patch.patch_id.clone(),
-            patch_revision: None,
-            interface_digest: patch.interface_digest.clone(),
+            revision: None,
+            interface_revision: None,
+            interface_digest: Some(patch.interface_digest.clone()),
         },
         definition,
         creatable: true,
@@ -370,6 +440,69 @@ fn project_patch_catalog_entry(candidate: &ObjectRegistryCandidate) -> Option<No
         },
         diagnostics: None,
     })
+}
+
+fn package_catalog_entry(candidate: &ObjectRegistryCandidate) -> Option<NodeCatalogEntryV01> {
+    let package = candidate.package.as_ref()?;
+    let definition = load_package_object_definition(candidate)?;
+    let primary_object_spec = candidate.canonical_object_spec()?;
+    let aliases = candidate
+        .aliases
+        .iter()
+        .filter(|alias| *alias != &primary_object_spec)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Some(NodeCatalogEntryV01 {
+        catalog_id: format!(
+            "package.{}.{}",
+            catalog_slug(&package.package_id),
+            catalog_slug(&candidate.implementation.object_id)
+        ),
+        object_id: candidate.implementation.object_id.clone(),
+        primary_object_spec,
+        aliases: (!aliases.is_empty()).then_some(aliases),
+        provider: candidate.implementation.provider.clone(),
+        definition,
+        creatable: true,
+        display: NodeCatalogDisplayV01 {
+            title: candidate.display_name.clone(),
+            category: Some("Package".to_owned()),
+            palette: Some(NodeCatalogDisplayPaletteV01::Direct),
+            description: None,
+            help_id: None,
+        },
+        diagnostics: None,
+    })
+}
+
+pub(crate) fn load_package_object_definition(
+    candidate: &ObjectRegistryCandidate,
+) -> Option<NodeDefinitionCurrent> {
+    let package = candidate.package.as_ref()?;
+    let root_path = package.root_path.as_ref()?;
+    let definition_path = root_path.join(&package.definition_path);
+    fs::read_to_string(definition_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<NodeDefinitionCurrent>(&contents).ok())
+}
+
+fn catalog_slug(input: &str) -> String {
+    let slug = input
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if slug.is_empty() {
+        "object".to_owned()
+    } else {
+        slug
+    }
 }
 
 fn project_patch_catalog_definition(
@@ -420,9 +553,9 @@ fn core_catalog_category(candidate: &ObjectRegistryCandidate) -> &'static str {
 
 fn catalog_id_for_core_candidate(candidate: &ObjectRegistryCandidate) -> String {
     let suffix = candidate
-        .kind
+        .executable_kind
         .strip_prefix("object.core.")
-        .unwrap_or(candidate.kind.as_str());
+        .unwrap_or(candidate.executable_kind.as_str());
     format!("core.{suffix}")
 }
 
@@ -463,7 +596,7 @@ fn project_patch_ports(patch: &PatchDefinitionCurrent) -> Vec<ObjectSpecPort> {
         .collect()
 }
 
-fn object_spec_port_from_current(port: &PortSpecCurrent) -> ObjectSpecPort {
+pub(crate) fn object_spec_port_from_current(port: &PortSpecCurrent) -> ObjectSpecPort {
     ObjectSpecPort {
         id: port.id.clone(),
         direction: match &port.direction {
@@ -513,18 +646,24 @@ pub(crate) fn is_payload_identity_kind(kind: &str) -> bool {
 
 #[cfg(test)]
 use ports::input_port;
+#[cfg(test)]
+pub(crate) use projection::materialize_unresolved_object_spec_node_v01;
 use projection::object_spec_port_to_current;
 pub(crate) use projection::{
-    materialize_object_spec_node_v01, materialize_unresolved_object_spec_node_v01,
-    object_spec_node_definition_v01, unresolved_object_spec_node_definition_v01,
+    materialize_object_spec_node_v01, object_spec_node_definition_v01,
+    unresolved_object_spec_node_definition_v01,
 };
 use resolver::{
-    ambiguous_resolution, construct_first_party_core, construct_project_patch,
-    explicit_project_patch_ref, failure, parse_object_spec_input_v01, unresolved_resolution,
-    unsupported_first_party_audio_message,
+    ambiguous_resolution, construct_first_party_core, construct_package_object,
+    construct_project_patch, explicit_project_patch_ref, failure, parse_object_spec_input_v01,
+    unresolved_resolution, unsupported_first_party_audio_message,
 };
 #[cfg(test)]
 use resolver::{contract_object_spec_atom_to_runtime, runtime_object_spec_diagnostic_code};
+pub(crate) use resolver::{
+    resolve_core_audio, resolve_core_boundary_port, resolve_core_control_operator,
+    resolve_core_control_value, resolve_core_subpatch,
+};
 
 #[cfg(test)]
 mod tests;

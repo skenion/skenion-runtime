@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use crate::current_node_identity::{
+    CURRENT_OBJECT_VERSION, graph_node_executable_kind, graph_node_executable_kind_version,
+    graph_node_object_id,
+};
 use crate::object_spec::{
     ObjectRegistry, PROJECT_PATCH_OBJECT_KIND_PREFIX, is_payload_identity_kind,
     resolve_object_spec_v01,
@@ -268,7 +272,7 @@ fn validate_patch_library_current(
         }
 
         for node in &patch.graph.nodes {
-            if is_payload_identity_node_kind_current(&node.kind) {
+            if graph_node_object_id(node).is_some_and(is_payload_identity_node_kind_current) {
                 diagnostics.push(payload_identity_node_kind_diagnostic_current(
                     Some(&patch.id),
                     &patch.graph,
@@ -706,7 +710,7 @@ fn subpatch_ref(node: &GraphNodeCurrent) -> Option<String> {
         .find_map(|key| string_param(&node.params, key))
         .or_else(|| subpatch_object_spec(node).and_then(|text| parse_subpatch_object_spec(&text)))
         .or_else(|| {
-            node.kind
+            graph_node_executable_kind(node)?
                 .strip_prefix(PROJECT_PATCH_OBJECT_KIND_PREFIX)
                 .map(ToOwned::to_owned)
         })
@@ -714,7 +718,16 @@ fn subpatch_ref(node: &GraphNodeCurrent) -> Option<String> {
 
 fn parse_subpatch_object_spec(text: &str) -> Option<String> {
     let resolution = resolve_object_spec_v01(text);
-    if resolution.resolved_kind.as_deref() != Some(SUBPATCH_KIND) || !resolution.ok() {
+    if resolution
+        .implementation
+        .as_ref()
+        .map(|implementation| {
+            crate::current_node_identity::implementation_executable_kind(implementation)
+        })
+        .as_deref()
+        != Some(SUBPATCH_KIND)
+        || !resolution.ok()
+    {
         return None;
     }
     resolution
@@ -741,16 +754,18 @@ fn string_param(params: &Map<String, Value>, key: &str) -> Option<String> {
 }
 
 fn is_subpatch_node(node: &GraphNodeCurrent) -> bool {
-    matches!(node.kind.as_str(), SUBPATCH_KIND | SUBPATCH_SHORTHAND_KIND)
-        || node.kind.starts_with(PROJECT_PATCH_OBJECT_KIND_PREFIX)
+    graph_node_executable_kind(node).is_some_and(|kind| {
+        matches!(kind.as_str(), SUBPATCH_KIND | SUBPATCH_SHORTHAND_KIND)
+            || kind.starts_with(PROJECT_PATCH_OBJECT_KIND_PREFIX)
+    })
 }
 
 fn is_inlet_node(node: &GraphNodeCurrent) -> bool {
-    node.kind == INLET_KIND
+    graph_node_executable_kind(node).as_deref() == Some(INLET_KIND)
 }
 
 fn is_outlet_node(node: &GraphNodeCurrent) -> bool {
-    node.kind == OUTLET_KIND
+    graph_node_executable_kind(node).as_deref() == Some(OUTLET_KIND)
 }
 
 fn namespaced_id(namespace: &str, id: &str) -> String {
@@ -804,7 +819,8 @@ fn subpatch_diagnostic_with_path(
         message,
         json!({
             "nodeId": namespaced_id(namespace, &node.id),
-            "kind": node.kind.as_str(),
+            "implementation": node.implementation,
+            "kind": graph_node_executable_kind(node),
             "patchRef": patch_ref,
             "depth": depth,
             "path": path,
@@ -897,24 +913,35 @@ pub fn validate_project_current(
 
     for node in &graph.nodes {
         diagnostics.extend(object_spec_diagnostics_current(graph, node));
-        if is_payload_identity_node_kind_current(&node.kind) {
+        if graph_node_object_id(node).is_some_and(is_payload_identity_node_kind_current) {
             diagnostics.push(payload_identity_node_kind_diagnostic_current(
                 None, graph, node,
             ));
         }
-        match registry.get(&(node.kind.as_str(), node.kind_version.as_str())) {
+        if node_has_non_resolved_object_resolution(node) {
+            continue;
+        }
+        let kind = graph_node_executable_kind(node);
+        let kind_version = graph_node_executable_kind_version(node);
+        match kind
+            .as_deref()
+            .zip(kind_version.as_deref())
+            .and_then(|key| registry.get(&key))
+        {
             Some(definition) => validate_node_snapshot_current(node, definition, &mut diagnostics),
             None => diagnostics.push(RuntimeDiagnostic::structured_error(
                 "node-definition.missing",
                 format!(
                     "missing node definition: {}@{}",
-                    node.kind, node.kind_version
+                    kind.as_deref().unwrap_or("<missing-implementation>"),
+                    kind_version.as_deref().unwrap_or(CURRENT_OBJECT_VERSION)
                 ),
                 json!({
                     "surface": "node-definition",
                     "nodeId": node.id,
-                    "kind": node.kind,
-                    "kindVersion": node.kind_version,
+                    "implementation": node.implementation,
+                    "kind": kind,
+                    "kindVersion": kind_version,
                 }),
             )),
         }
@@ -929,6 +956,12 @@ pub fn validate_project_current(
     } else {
         Ok((diagnostics, graph_analysis))
     }
+}
+
+fn node_has_non_resolved_object_resolution(node: &GraphNodeCurrent) -> bool {
+    node.object_resolution.as_ref().is_some_and(|resolution| {
+        resolution.status != crate::ObjectResolutionStatusCurrent::Resolved
+    })
 }
 
 pub(crate) fn is_payload_identity_node_kind_current(kind: &str) -> bool {
@@ -955,7 +988,7 @@ fn object_spec_diagnostics_current(
                     "surface": "object-spec",
                     "graphId": graph.id,
                     "nodeId": node.id,
-                    "kind": node.kind,
+                    "implementation": node.implementation,
                     "objectSpec": object_spec,
                     "classSymbol": resolution.class_symbol,
                 }),
@@ -964,16 +997,19 @@ fn object_spec_diagnostics_current(
         .collect::<Vec<_>>();
 
     if diagnostics.is_empty()
-        && let Some(resolved_kind) = resolution.resolved_kind.as_deref()
-        && resolved_kind != node.kind
-        && node.kind != "object.core.unresolved"
+        && let Some(resolved_implementation) = resolution.implementation.as_ref()
+        && let Some(node_implementation) = node.implementation.as_ref()
+        && resolved_implementation != node_implementation
         && !is_subpatch_node(node)
     {
         diagnostics.push(RuntimeDiagnostic::structured_error(
-            "object-spec.kind-mismatch",
+            "object-spec.implementation-mismatch",
             format!(
-                "object spec {} resolves to {}, but node {} uses kind {}",
-                object_spec, resolved_kind, node.id, node.kind
+                "object spec {} resolves to implementation {}, but node {} uses implementation {}",
+                object_spec,
+                resolved_implementation.object_id,
+                node.id,
+                node_implementation.object_id
             ),
             json!({
                 "surface": "object-spec",
@@ -981,8 +1017,8 @@ fn object_spec_diagnostics_current(
                 "nodeId": node.id,
                 "objectSpec": object_spec,
                 "classSymbol": resolution.class_symbol,
-                "resolvedKind": resolved_kind,
-                "nodeKind": node.kind,
+                "resolvedImplementation": resolved_implementation,
+                "nodeImplementation": node_implementation,
             }),
         ));
     }
@@ -999,8 +1035,8 @@ fn payload_identity_node_kind_diagnostic_current(
         "surface": "graph-node",
         "graphId": graph.id,
         "nodeId": node.id,
-        "kind": node.kind,
-        "kindVersion": node.kind_version,
+        "implementation": node.implementation,
+        "objectId": graph_node_object_id(node),
     });
     if let Some(patch_id) = patch_id {
         details["patchId"] = json!(patch_id);
@@ -1009,8 +1045,9 @@ fn payload_identity_node_kind_diagnostic_current(
     RuntimeDiagnostic::structured_error(
         "graph.payload-node-kind",
         format!(
-            "node {} uses payload identity {} as an executable kind",
-            node.id, node.kind
+            "node {} uses payload identity {} as an executable implementation",
+            node.id,
+            graph_node_object_id(node).unwrap_or("<missing>")
         ),
         details,
     )
@@ -1238,14 +1275,18 @@ pub fn build_execution_plan_current(
         let node = graph_nodes
             .get(node_id.as_str())
             .expect("current 0.1 planning order should only contain graph nodes");
+        let kind =
+            graph_node_executable_kind(node).unwrap_or_else(|| "object.core.unresolved".to_owned());
+        let kind_version = graph_node_executable_kind_version(node)
+            .unwrap_or_else(|| CURRENT_OBJECT_VERSION.to_owned());
         let definition = registry
-            .get(&(node.kind.as_str(), node.kind_version.as_str()))
+            .get(&(kind.as_str(), kind_version.as_str()))
             .expect("current 0.1 validation should resolve definitions");
         let execution_model = map_execution_model_current(&definition.execution.model);
         plan_nodes.push(PlanNode {
             node_id: node.id.clone(),
-            kind: node.kind.clone(),
-            kind_version: node.kind_version.clone(),
+            kind,
+            kind_version,
             execution_model: execution_model.clone(),
             order,
         });
@@ -1534,8 +1575,9 @@ fn node_snapshot_diagnostic(
         json!({
             "surface": "node-snapshot",
             "nodeId": node.id,
-            "kind": node.kind,
-            "kindVersion": node.kind_version,
+            "implementation": node.implementation,
+            "kind": graph_node_executable_kind(node),
+            "kindVersion": graph_node_executable_kind_version(node),
             "portId": port_id,
         }),
     )

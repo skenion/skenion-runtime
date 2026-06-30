@@ -1441,55 +1441,76 @@ fn audio_output_definition_current() -> serde_json::Value {
     })
 }
 
-fn audio_sig_node_current(id: &str, value: f64) -> serde_json::Value {
+fn current_core_node_json(
+    id: &str,
+    object_id: &str,
+    params: serde_json::Value,
+    ports: serde_json::Value,
+) -> serde_json::Value {
     json!({
       "id": id,
-      "kind": "object.core.audio.sig",
-      "kindVersion": "0.1.0",
-      "params": { "value": value },
-      "ports": [
-        { "id": "value", "direction": "input", "type": "value.core.float32" },
-        { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "audio" }
-      ]
+      "implementation": {
+        "provider": { "kind": "core" },
+        "objectId": object_id,
+        "version": "0.1.0"
+      },
+      "objectSpec": object_id,
+      "objectResolution": {
+        "status": "resolved",
+        "candidates": [],
+        "diagnostics": []
+      },
+      "params": params,
+      "ports": ports
     })
+}
+
+fn audio_sig_node_current(id: &str, value: f64) -> serde_json::Value {
+    current_core_node_json(
+        id,
+        "audio.sig",
+        json!({ "value": value }),
+        json!([
+          { "id": "value", "direction": "input", "type": "value.core.float32" },
+          { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "audio" }
+        ]),
+    )
 }
 
 fn audio_snapshot_node_current(id: &str) -> serde_json::Value {
-    json!({
-      "id": id,
-      "kind": "object.core.audio.snapshot",
-      "kindVersion": "0.1.0",
-      "params": {},
-      "ports": [
-        { "id": "signal", "direction": "input", "type": "value.core.float32", "rate": "audio" },
-        {
-          "id": "trigger",
-          "direction": "input",
-          "type": "value.core.message",
-          "rate": "event",
-          "triggerMode": "trigger",
-          "accepts": ["value.core.bang"],
-          "messageKeys": {
-            "accepted": ["bang"],
-            "trigger": ["bang"]
-          }
-        },
-        { "id": "value", "direction": "output", "type": "value.core.float32" }
-      ]
-    })
+    current_core_node_json(
+        id,
+        "audio.snapshot",
+        json!({}),
+        json!([
+          { "id": "signal", "direction": "input", "type": "value.core.float32", "rate": "audio" },
+          {
+            "id": "trigger",
+            "direction": "input",
+            "type": "value.core.message",
+            "rate": "event",
+            "triggerMode": "trigger",
+            "accepts": ["value.core.bang"],
+            "messageKeys": {
+              "accepted": ["bang"],
+              "trigger": ["bang"]
+            }
+          },
+          { "id": "value", "direction": "output", "type": "value.core.float32" }
+        ]),
+    )
 }
 
 fn audio_output_node_current(id: &str) -> serde_json::Value {
-    json!({
-      "id": id,
-      "kind": "object.core.audio.output",
-      "kindVersion": "0.1.0",
-      "params": {},
-      "ports": [
-        { "id": "left", "direction": "input", "type": "value.core.float32", "rate": "audio" },
-        { "id": "right", "direction": "input", "type": "value.core.float32", "rate": "audio" }
-      ]
-    })
+    current_core_node_json(
+        id,
+        "audio.output",
+        json!({}),
+        json!([
+          { "id": "left", "direction": "input", "type": "value.core.float32", "rate": "audio" },
+          { "id": "right", "direction": "input", "type": "value.core.float32", "rate": "audio" }
+        ]),
+    )
 }
 
 fn float_node(id: &str, value: f64) -> serde_json::Value {

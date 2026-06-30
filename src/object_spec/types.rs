@@ -1,7 +1,11 @@
 use serde_json::{Map, Value};
 use skenion_contracts::{MessageKeyPolicyV01, PackageChecksumV01};
+use std::path::PathBuf;
 
-use crate::nodes::CoreNodeConstructor;
+use crate::{
+    ObjectImplementationRefCurrent, ObjectProviderRefCurrent, ObjectResolutionCurrent,
+    nodes::CoreNodeImplementation,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ObjectSpecResolution {
@@ -9,8 +13,8 @@ pub(crate) struct ObjectSpecResolution {
     pub(crate) display_text: String,
     pub(crate) class_symbol: String,
     pub(crate) creation_args: Vec<ObjectSpecAtom>,
-    pub(crate) resolved_kind: Option<String>,
-    pub(crate) resolved_kind_version: Option<String>,
+    pub(crate) implementation: Option<ObjectImplementationRefCurrent>,
+    pub(crate) object_resolution: ObjectResolutionCurrent,
     pub(crate) params: Map<String, Value>,
     pub(crate) instance_ports: Vec<ObjectSpecPort>,
     pub(crate) candidates: Vec<ObjectSpecCandidateSummary>,
@@ -27,7 +31,8 @@ impl ObjectSpecResolution {
 pub(crate) struct ObjectSpecCandidateSummary {
     pub(crate) id: String,
     pub(crate) source: String,
-    pub(crate) kind: String,
+    pub(crate) implementation: ObjectImplementationRefCurrent,
+    pub(crate) object_spec: Option<String>,
     pub(crate) display_name: String,
 }
 
@@ -81,7 +86,7 @@ pub(crate) enum ObjectSpecPortActivation {
     Passive,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ObjectRegistry {
     pub(super) candidates: Vec<ObjectRegistryCandidate>,
     pub(super) allow_unchecked_project_patch_refs: bool,
@@ -96,17 +101,18 @@ pub(super) enum ObjectRegistrySource {
     NativeProvider,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct ObjectRegistryCandidate {
+#[derive(Clone)]
+pub(crate) struct ObjectRegistryCandidate {
     pub(super) id: String,
     pub(super) source: ObjectRegistrySource,
     pub(super) aliases: Vec<String>,
-    pub(super) kind: String,
-    pub(super) kind_version: String,
+    pub(super) implementation: ObjectImplementationRefCurrent,
+    pub(super) executable_kind: String,
     pub(super) display_name: String,
-    pub(super) constructor: Option<CoreNodeConstructor>,
+    pub(super) core: Option<&'static dyn CoreNodeImplementation>,
     pub(super) catalog_category: Option<&'static str>,
     pub(super) project_patch: Option<ProjectPatchCandidate>,
+    pub(super) package: Option<PackageObjectCandidate>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,9 +125,25 @@ pub(super) struct ProjectPatchCandidate {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParsedObjectSpec {
+pub(super) struct PackageObjectCandidate {
+    pub(super) package_id: String,
+    pub(super) root_path: Option<PathBuf>,
+    pub(super) definition_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedObjectSpec {
     pub(super) input: String,
     pub(super) display_text: String,
     pub(super) class_symbol: String,
     pub(super) creation_args: Vec<ObjectSpecAtom>,
+}
+
+pub(super) fn core_implementation(object_id: impl Into<String>) -> ObjectImplementationRefCurrent {
+    ObjectImplementationRefCurrent {
+        provider: ObjectProviderRefCurrent::Core,
+        object_id: object_id.into(),
+        version: Some(super::CURRENT_KIND_VERSION.to_owned()),
+        interface_digest: None,
+    }
 }

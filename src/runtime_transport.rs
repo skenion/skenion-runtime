@@ -1535,11 +1535,10 @@ fn runtime_collaboration_change_id(change: &RuntimeCollaborationChange) -> &str 
 }
 
 fn paste_request_contains_payload_identity(request: &PasteGraphFragmentRequest) -> bool {
-    request
-        .fragment
-        .nodes
-        .iter()
-        .any(|node| is_payload_identity_node_kind_current(&node.kind))
+    request.fragment.nodes.iter().any(|node| {
+        crate::current_node_identity::graph_node_object_id(node)
+            .is_some_and(is_payload_identity_node_kind_current)
+    })
 }
 
 fn runtime_collaboration_event_payload_kind(

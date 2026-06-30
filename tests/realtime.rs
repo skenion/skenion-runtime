@@ -367,13 +367,13 @@ fn graph_node_add_payload(base_revision: &str, node_id: &str) -> Value {
             {
                 "op": "node.add",
                 "changeId": format!("add-{node_id}"),
-                "node": {
-                    "id": node_id,
-                    "kind": "object.core.float",
-                    "kindVersion": "0.1.0",
-                    "params": {},
-                    "ports": value_f32_ports_current_json()
-                },
+                "node": core_node_current_json(
+                    node_id,
+                    "float",
+                    "float",
+                    json!({}),
+                    value_f32_ports_current_json()
+                ),
                 "view": { "x": 360.0, "y": 180.0 }
             }
         ]
@@ -390,13 +390,13 @@ fn paste_fragment_payload(base_revision: &str, node_id: &str) -> Value {
                 "schema": "skenion.graph.fragment",
                 "schemaVersion": "0.1.0",
                 "nodes": [
-                    {
-                        "id": node_id,
-                        "kind": "object.core.float",
-                        "kindVersion": "0.1.0",
-                        "params": {},
-                        "ports": value_f32_ports_current_json()
-                    }
+                    core_node_current_json(
+                        node_id,
+                        "float",
+                        "float",
+                        json!({}),
+                        value_f32_ports_current_json()
+                    )
                 ],
                 "edges": []
             },
@@ -449,15 +449,15 @@ fn project_patch_interface_node_add_payload(patch_id: &str, base_revision: &str)
             {
                 "op": "node.add",
                 "changeId": format!("add-{patch_id}-inlet"),
-                "node": {
-                    "id": "patch_in",
-                    "kind": "object.core.inlet",
-                    "kindVersion": "0.1.0",
-                    "params": { "portId": "value", "label": "Value" },
-                    "ports": [
+                "node": core_node_current_json(
+                    "patch_in",
+                    "inlet",
+                    "inlet value",
+                    json!({ "portId": "value", "label": "Value" }),
+                    json!([
                         { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
-                    ]
-                }
+                    ])
+                )
             }
         ]
     })
@@ -477,13 +477,13 @@ fn project_patch_internal_node_add_payload(patch_id: &str, base_revision: &str) 
             {
                 "op": "node.add",
                 "changeId": format!("add-{patch_id}-internal-float"),
-                "node": {
-                    "id": "internal_float",
-                    "kind": "object.core.float",
-                    "kindVersion": "0.1.0",
-                    "params": { "value": 42.0 },
-                    "ports": value_f32_ports_current_json()
-                }
+                "node": core_node_current_json(
+                    "internal_float",
+                    "float",
+                    "float 42",
+                    json!({ "value": 42.0 }),
+                    value_f32_ports_current_json()
+                )
             }
         ]
     })
@@ -1579,15 +1579,15 @@ async fn node_catalog_get_exposes_core_and_project_patch_entries() {
             .is_some_and(|value| value.len() == 64)
     );
     assert!(catalog.entries.iter().any(|entry| {
-        entry.source == skenion_contracts::NodeCatalogSourceV01::Core
-            && entry.definition.id == "object.core.float"
+        entry.provider == skenion_contracts::ObjectProviderRefV01::Core
+            && entry.object_id == "float"
     }));
     let float_entry = catalog
         .entries
         .iter()
         .find(|entry| {
-            entry.source == skenion_contracts::NodeCatalogSourceV01::Core
-                && entry.definition.id == "object.core.float"
+            entry.provider == skenion_contracts::ObjectProviderRefV01::Core
+                && entry.object_id == "float"
         })
         .expect("first-party float entry should be in the catalog");
     let float_input = float_entry
@@ -1630,8 +1630,8 @@ async fn node_catalog_get_exposes_core_and_project_patch_entries() {
         .iter()
         .find(|entry| {
             matches!(
-                &entry.source,
-                skenion_contracts::NodeCatalogSourceV01::ProjectPatch { patch_id, .. }
+                &entry.provider,
+                skenion_contracts::ObjectProviderRefV01::ProjectPatch { patch_id, .. }
                     if patch_id == "my-patcher"
             )
         })
@@ -1643,9 +1643,9 @@ async fn node_catalog_get_exposes_core_and_project_patch_entries() {
     );
     assert!(catalog.entries.iter().all(|entry| {
         matches!(
-            entry.source,
-            skenion_contracts::NodeCatalogSourceV01::Core
-                | skenion_contracts::NodeCatalogSourceV01::ProjectPatch { .. }
+            entry.provider,
+            skenion_contracts::ObjectProviderRefV01::Core
+                | skenion_contracts::ObjectProviderRefV01::ProjectPatch { .. }
         )
     }));
 }
@@ -1694,14 +1694,14 @@ async fn node_catalog_revision_changes_when_project_patch_interface_changes() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["source"]["patchId"] == "my-patcher")
-            .unwrap()["source"]["interfaceDigest"]["value"],
+            .find(|entry| entry["provider"]["patchId"] == "my-patcher")
+            .unwrap()["provider"]["interfaceDigest"]["value"],
         changed_catalog["entries"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["source"]["patchId"] == "my-patcher")
-            .unwrap()["source"]["interfaceDigest"]["value"]
+            .find(|entry| entry["provider"]["patchId"] == "my-patcher")
+            .unwrap()["provider"]["interfaceDigest"]["value"]
     );
 }
 
@@ -2095,16 +2095,22 @@ async fn realtime_graph_node_create_osc_materializes_node_through_ws_command() {
     assert_eq!(ack["payload"]["graphRevision"], "2");
     assert_eq!(ack["payload"]["node"]["nodeId"], "osc_1");
     assert_eq!(
-        ack["payload"]["node"]["resolution"]["resolvedKind"],
-        "object.core.audio.osc"
+        ack["payload"]["node"]["implementation"]["objectId"],
+        "audio.osc"
     );
     assert_eq!(
-        ack["payload"]["node"]["resolution"]["params"]["frequency"],
-        220.0
+        ack["payload"]["node"]["implementation"]["provider"]["kind"],
+        "core"
     );
+    assert_eq!(
+        ack["payload"]["node"]["objectResolution"]["status"],
+        "resolved"
+    );
+    assert_eq!(ack["payload"]["node"]["params"]["frequency"], 220.0);
     assert_eq!(broadcast["payload"]["kind"], "node.create");
     assert_eq!(broadcast["payload"]["node"]["nodeId"], "osc_1");
-    assert_eq!(node["kind"], "object.core.audio.osc");
+    assert_eq!(node["implementation"]["provider"]["kind"], "core");
+    assert_eq!(node["implementation"]["objectId"], "audio.osc");
     assert_eq!(node["objectSpec"], "osc~ 220");
     assert_eq!(node["params"]["frequency"], 880.0);
     assert_eq!(node["params"]["label"], "Lead");
@@ -2166,21 +2172,23 @@ async fn realtime_graph_node_resolve_uses_runtime_registry_candidates() {
     let _attached_a = attach(&mut client_a, "hello-a", None).await;
     let _attached_b = attach(&mut client_b, "hello-b", None).await;
 
-    for (index, (object_spec, expected_kind, expected_param)) in [
-        ("* .3", "object.core.operator.mul", Some(json!(0.3))),
-        ("* 3", "object.core.operator.mul", Some(json!(3.0))),
-        ("+", "object.core.operator.add", Some(json!(0.0))),
-        ("*", "object.core.operator.mul", Some(json!(0.0))),
-        ("osc~", "object.core.audio.osc", Some(json!(440.0))),
-        ("*~", "object.core.audio.operator.mul", None),
+    for (index, (object_spec, expected_provider, expected_object_id, expected_param)) in [
+        ("* .3", "core", "operator.mul", Some(json!(0.3))),
+        ("* 3", "core", "operator.mul", Some(json!(3.0))),
+        ("+", "core", "operator.add", Some(json!(0.0))),
+        ("*", "core", "operator.mul", Some(json!(0.0))),
+        ("osc~", "core", "audio.osc", Some(json!(440.0))),
+        ("*~", "core", "audio.operator.mul", None),
         (
             "p my-patcher",
-            "object.project.patch.my-patcher",
+            "projectPatch",
+            "my-patcher",
             Some(json!("my-patcher")),
         ),
         (
             "my-patcher",
-            "object.project.patch.my-patcher",
+            "projectPatch",
+            "my-patcher",
             Some(json!("my-patcher")),
         ),
     ]
@@ -2199,23 +2207,35 @@ async fn realtime_graph_node_resolve_uses_runtime_registry_candidates() {
         assert_eq!(ack["payload"]["status"], "accepted", "{object_spec}");
         assert_eq!(ack["payload"]["applied"], false, "{object_spec}");
         assert_eq!(
-            ack["payload"]["node"]["resolution"]["resolvedKind"], expected_kind,
+            ack["payload"]["node"]["implementation"]["provider"]["kind"], expected_provider,
             "{object_spec}"
         );
         assert_eq!(
-            ack["payload"]["node"]["resolution"]["candidateCount"], 1,
+            ack["payload"]["node"]["implementation"]["objectId"], expected_object_id,
+            "{object_spec}"
+        );
+        assert_eq!(
+            ack["payload"]["node"]["objectResolution"]["status"], "resolved",
+            "{object_spec}"
+        );
+        assert_eq!(
+            ack["payload"]["node"]["candidates"]
+                .as_array()
+                .expect("resolved command should include candidates")
+                .len(),
+            1,
             "{object_spec}"
         );
         if let Some(expected_param) = expected_param {
-            let param_key = if expected_kind.starts_with("object.project.patch.") {
+            let param_key = if expected_provider == "projectPatch" {
                 "patchRef"
-            } else if expected_kind == "object.core.audio.osc" {
+            } else if expected_object_id == "audio.osc" {
                 "frequency"
             } else {
                 "right"
             };
             assert_eq!(
-                ack["payload"]["node"]["resolution"]["params"][param_key], expected_param,
+                ack["payload"]["node"]["params"][param_key], expected_param,
                 "{object_spec}"
             );
         }
@@ -2248,9 +2268,12 @@ async fn realtime_graph_node_resolve_unknown_returns_diagnostics_without_apply()
     assert_eq!(ack["payload"]["accepted"], true);
     assert_eq!(ack["payload"]["applied"], false);
     assert_eq!(ack["payload"]["graphRevision"], "1");
-    assert_eq!(ack["payload"]["node"]["resolution"]["resolved"], false);
     assert_eq!(
-        ack["payload"]["node"]["resolution"]["diagnostics"][0]["code"],
+        ack["payload"]["node"]["objectResolution"]["status"],
+        "unresolved"
+    );
+    assert_eq!(
+        ack["payload"]["node"]["diagnostics"][0]["code"],
         "object-spec.unresolved"
     );
     assert_eq!(
@@ -2340,7 +2363,7 @@ async fn realtime_graph_node_commands_validate_targets_before_session_mutation()
 }
 
 #[tokio::test]
-async fn realtime_graph_node_create_missing_materializes_diagnostic_node_by_default() {
+async fn realtime_graph_node_create_missing_rejects_without_materializing_diagnostic_node() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
     let mut client_b = connect_session(&runtime, "default").await;
@@ -2355,29 +2378,41 @@ async fn realtime_graph_node_create_missing_materializes_diagnostic_node_by_defa
     )
     .await;
     let ack = next_type(&mut client_a, "graph.ack").await;
-    let broadcast = next_type(&mut client_b, "graph.applied").await;
+    let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
     let project = loaded_project_json(&runtime);
-    let node = graph_node(&project, "missing_1");
 
-    assert_eq!(ack["payload"]["status"], "accepted");
-    assert_eq!(ack["payload"]["applied"], true);
+    assert_eq!(ack["payload"]["status"], "rejected");
+    assert_eq!(ack["payload"]["accepted"], false);
+    assert_eq!(ack["payload"]["applied"], false);
     assert_eq!(
         ack["payload"]["node"]["unresolvedPolicy"],
         "materialize-diagnostic"
     );
     assert_eq!(
-        ack["payload"]["node"]["resolution"]["diagnostics"][0]["code"],
+        ack["payload"]["diagnostics"][0]["code"],
+        "node.command.unresolved"
+    );
+    assert_eq!(
+        ack["payload"]["node"]["objectResolution"]["status"],
+        "unresolved"
+    );
+    assert_eq!(
+        ack["payload"]["node"]["diagnostics"][0]["code"],
         "object-spec.unresolved"
     );
-    assert_eq!(broadcast["payload"]["node"]["nodeId"], "missing_1");
-    assert_eq!(node["kind"], "object.core.unresolved");
-    assert_eq!(node["objectSpec"], "mystery.object 1");
-    assert_eq!(node["params"]["diagnosticCode"], "object-spec.unresolved");
-    assert_eq!(node["params"]["candidateCount"], 0);
+    assert_eq!(
+        ack["payload"]["node"]["candidates"]
+            .as_array()
+            .expect("unresolved command should include candidates")
+            .len(),
+        0
+    );
+    assert!(graph_node_option(&project, "missing_1").is_none());
+    assert!(no_broadcast.is_err());
 }
 
 #[tokio::test]
-async fn realtime_graph_node_create_ambiguous_shortcut_materializes_diagnostic_node() {
+async fn realtime_graph_node_create_ambiguous_shortcut_rejects_without_materializing_node() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
     let mut client_b = connect_session(&runtime, "default").await;
@@ -2392,21 +2427,33 @@ async fn realtime_graph_node_create_ambiguous_shortcut_materializes_diagnostic_n
     )
     .await;
     let ack = next_type(&mut client_a, "graph.ack").await;
-    let broadcast = next_type(&mut client_b, "graph.applied").await;
+    let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
     let project = loaded_project_json(&runtime);
-    let node = graph_node(&project, "ambiguous_1");
 
-    assert_eq!(ack["payload"]["status"], "accepted");
-    assert_eq!(ack["payload"]["applied"], true);
+    assert_eq!(ack["payload"]["status"], "rejected");
+    assert_eq!(ack["payload"]["accepted"], false);
+    assert_eq!(ack["payload"]["applied"], false);
     assert_eq!(
-        ack["payload"]["node"]["resolution"]["diagnostics"][0]["code"],
+        ack["payload"]["diagnostics"][0]["code"],
+        "node.command.unresolved"
+    );
+    assert_eq!(
+        ack["payload"]["node"]["objectResolution"]["status"],
+        "ambiguous"
+    );
+    assert_eq!(
+        ack["payload"]["node"]["diagnostics"][0]["code"],
         "object-spec.ambiguous"
     );
-    assert_eq!(ack["payload"]["node"]["resolution"]["candidateCount"], 2);
-    assert_eq!(broadcast["payload"]["node"]["nodeId"], "ambiguous_1");
-    assert_eq!(node["kind"], "object.core.unresolved");
-    assert_eq!(node["params"]["diagnosticCode"], "object-spec.ambiguous");
-    assert_eq!(node["params"]["candidateCount"], 2);
+    assert_eq!(
+        ack["payload"]["node"]["candidates"]
+            .as_array()
+            .expect("ambiguous command should include candidates")
+            .len(),
+        2
+    );
+    assert!(graph_node_option(&project, "ambiguous_1").is_none());
+    assert!(no_broadcast.is_err());
 }
 
 #[tokio::test]
@@ -2512,13 +2559,11 @@ async fn realtime_graph_node_replace_preserves_node_id_and_prunes_invalid_incide
         ack["payload"]["diagnostics"][0]["code"],
         "node.replace.incident-edges-dropped"
     );
-    assert_eq!(
-        ack["payload"]["node"]["resolution"]["params"]["frequency"],
-        330.0
-    );
+    assert_eq!(ack["payload"]["node"]["params"]["frequency"], 330.0);
     assert_eq!(broadcast["payload"]["node"]["nodeId"], "value_1");
     assert_eq!(node["id"], "value_1");
-    assert_eq!(node["kind"], "object.core.audio.osc");
+    assert_eq!(node["implementation"]["provider"]["kind"], "core");
+    assert_eq!(node["implementation"]["objectId"], "audio.osc");
     assert_eq!(node["objectSpec"], "osc~ 330");
     assert_eq!(node["params"]["frequency"], 660.0);
     assert_eq!(node["params"]["label"], "Retuned");
@@ -2564,7 +2609,11 @@ async fn realtime_graph_node_replace_rejects_invalid_incident_edge_policies_with
             "{policy}"
         );
         assert_eq!(project["graph"]["revision"], "1", "{policy}");
-        assert_eq!(node["kind"], "object.core.float", "{policy}");
+        assert_eq!(
+            node["implementation"]["provider"]["kind"], "core",
+            "{policy}"
+        );
+        assert_eq!(node["implementation"]["objectId"], "float", "{policy}");
         assert!(
             graph_edge_ids(&project)
                 .iter()
@@ -3338,6 +3387,31 @@ fn session_load_request(project: Value) -> Value {
     })
 }
 
+fn core_node_current_json(
+    node_id: &str,
+    object_id: &str,
+    object_spec: &str,
+    params: Value,
+    ports: Value,
+) -> Value {
+    json!({
+        "id": node_id,
+        "implementation": {
+            "provider": { "kind": "core" },
+            "objectId": object_id,
+            "version": "0.1.0"
+        },
+        "objectSpec": object_spec,
+        "objectResolution": {
+            "status": "resolved",
+            "candidates": [],
+            "diagnostics": []
+        },
+        "params": params,
+        "ports": ports
+    })
+}
+
 fn sample_project_document_current() -> Value {
     json!({
       "schema": "skenion.project",
@@ -3351,20 +3425,20 @@ fn sample_project_document_current() -> Value {
         "id": "minimal-value",
         "revision": "1",
         "nodes": [
-          {
-            "id": "value_1",
-            "kind": "object.core.float",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": value_f32_ports_current_json()
-          },
-          {
-            "id": "target_1",
-            "kind": "object.core.float",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": value_f32_ports_current_json()
-          }
+          core_node_current_json(
+            "value_1",
+            "float",
+            "float",
+            json!({}),
+            value_f32_ports_current_json()
+          ),
+          core_node_current_json(
+            "target_1",
+            "float",
+            "float",
+            json!({}),
+            value_f32_ports_current_json()
+          )
         ],
         "edges": [
           {
@@ -3419,24 +3493,24 @@ fn project_patch_definition_with_float_interface_current_json(id: &str) -> Value
         "id": format!("{id}-graph"),
         "revision": "2",
         "nodes": [
-          {
-            "id": "patch_in",
-            "kind": "object.core.inlet",
-            "kindVersion": "0.1.0",
-            "params": { "portId": "value", "label": "Value" },
-            "ports": [
+          core_node_current_json(
+            "patch_in",
+            "inlet",
+            "inlet value",
+            json!({ "portId": "value", "label": "Value" }),
+            json!([
               { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
-            ]
-          },
-          {
-            "id": "patch_out",
-            "kind": "object.core.outlet",
-            "kindVersion": "0.1.0",
-            "params": { "portId": "result", "label": "Result" },
-            "ports": [
+            ])
+          ),
+          core_node_current_json(
+            "patch_out",
+            "outlet",
+            "outlet result",
+            json!({ "portId": "result", "label": "Result" }),
+            json!([
               { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" }
-            ]
-          }
+            ])
+          )
         ],
         "edges": []
       }

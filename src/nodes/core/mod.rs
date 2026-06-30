@@ -1,4 +1,5 @@
-use super::{CoreNodeConstructor, CoreNodeImplementation};
+use super::{CoreNodeImplementation, CoreNodeResolveFn};
+use crate::object_spec::{ObjectRegistryCandidate, ObjectSpecResolution, ParsedObjectSpec};
 
 mod audio;
 mod control;
@@ -35,23 +36,29 @@ static FIRST_PARTY_CORE_NODES: &[&dyn CoreNodeImplementation] = &[
 
 pub(super) struct CoreNodeDescriptor {
     kind: &'static str,
+    object_id: &'static str,
     display_name: &'static str,
     aliases: &'static [&'static str],
-    constructor: CoreNodeConstructor,
+    resolve: CoreNodeResolveFn,
+    catalog_category: &'static str,
 }
 
 impl CoreNodeDescriptor {
     pub(super) const fn new(
         kind: &'static str,
+        object_id: &'static str,
         display_name: &'static str,
         aliases: &'static [&'static str],
-        constructor: CoreNodeConstructor,
+        resolve: CoreNodeResolveFn,
+        catalog_category: &'static str,
     ) -> Self {
         Self {
             kind,
+            object_id,
             display_name,
             aliases,
-            constructor,
+            resolve,
+            catalog_category,
         }
     }
 }
@@ -59,6 +66,10 @@ impl CoreNodeDescriptor {
 impl CoreNodeImplementation for CoreNodeDescriptor {
     fn kind(&self) -> &'static str {
         self.kind
+    }
+
+    fn object_id(&self) -> &'static str {
+        self.object_id
     }
 
     fn display_name(&self) -> &'static str {
@@ -69,8 +80,16 @@ impl CoreNodeImplementation for CoreNodeDescriptor {
         self.aliases
     }
 
-    fn constructor(&self) -> CoreNodeConstructor {
-        self.constructor
+    fn resolve(
+        &self,
+        parsed: ParsedObjectSpec,
+        candidate: &ObjectRegistryCandidate,
+    ) -> ObjectSpecResolution {
+        (self.resolve)(parsed, candidate)
+    }
+
+    fn catalog_category(&self) -> &'static str {
+        self.catalog_category
     }
 }
 

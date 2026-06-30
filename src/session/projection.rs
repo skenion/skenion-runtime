@@ -2,14 +2,19 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::{
     DataFlow, DataType, Edge, EdgeSpecCurrent, GraphDocument, GraphDocumentCurrent, GraphNode,
-    GraphNodeCurrent, NodeDefinition, NodeDefinitionCurrent, Port, PortActivation, PortDirection,
-    PortDirectionCurrent, PortRateCurrent, PortRef, PortSpecCurrent, ProjectDocumentCurrent,
-    StringOrStrings, object_spec::ObjectRegistry,
+    GraphNodeCurrent, NodeDefinition, NodeDefinitionCurrent, PackageRegistryListResponseV01, Port,
+    PortActivation, PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef, PortSpecCurrent,
+    ProjectDocumentCurrent, StringOrStrings,
+    current_node_identity::{
+        CURRENT_OBJECT_VERSION, graph_node_executable_kind, graph_node_executable_kind_version,
+    },
+    object_spec::ObjectRegistry,
 };
 
 pub(super) fn normalized_node_definitions_current(
     document: &ProjectDocumentCurrent,
     explicit_nodes: Vec<NodeDefinitionCurrent>,
+    packages: Option<&PackageRegistryListResponseV01>,
 ) -> Vec<NodeDefinitionCurrent> {
     let mut nodes = explicit_nodes;
     let mut seen = nodes
@@ -17,7 +22,9 @@ pub(super) fn normalized_node_definitions_current(
         .map(|definition| (definition.id.clone(), definition.version.clone()))
         .collect::<HashSet<_>>();
 
-    for definition in ObjectRegistry::for_project(Some(document)).node_definition_projection() {
+    for definition in ObjectRegistry::for_project_with_packages(Some(document), packages)
+        .node_definition_projection()
+    {
         let key = (definition.id.clone(), definition.version.clone());
         if seen.insert(key) {
             nodes.push(definition);
@@ -99,8 +106,10 @@ pub(crate) fn lower_graph_node_for_execution(
 ) -> GraphNode {
     GraphNode {
         id: pasted_id.to_owned(),
-        kind: node.kind.clone(),
-        kind_version: node.kind_version.clone(),
+        kind: graph_node_executable_kind(node)
+            .unwrap_or_else(|| "object.core.unresolved".to_owned()),
+        kind_version: graph_node_executable_kind_version(node)
+            .unwrap_or_else(|| CURRENT_OBJECT_VERSION.to_owned()),
         params: node.params.clone(),
         ports: node.ports.iter().map(lower_port_for_execution).collect(),
     }

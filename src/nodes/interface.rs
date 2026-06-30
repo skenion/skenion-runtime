@@ -1,25 +1,24 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CoreNodeConstructor {
-    ControlOperator,
-    ControlValue,
-    Audio,
-    Subpatch,
-    BoundaryPort,
-}
+use crate::object_spec::{ObjectSpecResolution, ParsedObjectSpec};
+
+pub(crate) type CoreNodeResolveFn =
+    fn(ParsedObjectSpec, &crate::object_spec::ObjectRegistryCandidate) -> ObjectSpecResolution;
 
 pub(crate) trait CoreNodeImplementation: Sync {
     fn kind(&self) -> &'static str;
+    fn object_id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
     fn aliases(&self) -> &'static [&'static str];
-    fn constructor(&self) -> CoreNodeConstructor;
+    fn resolve(
+        &self,
+        parsed: ParsedObjectSpec,
+        candidate: &crate::object_spec::ObjectRegistryCandidate,
+    ) -> ObjectSpecResolution;
 
     fn catalog_category(&self) -> &'static str {
-        match self.constructor() {
-            CoreNodeConstructor::Audio => "Core Audio",
-            CoreNodeConstructor::ControlOperator
-            | CoreNodeConstructor::ControlValue
-            | CoreNodeConstructor::Subpatch
-            | CoreNodeConstructor::BoundaryPort => "Core",
+        if self.kind().starts_with("object.core.audio.") {
+            "Core Audio"
+        } else {
+            "Core"
         }
     }
 }

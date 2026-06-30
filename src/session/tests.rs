@@ -1,4 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    env, fs,
+    path::PathBuf,
+};
 
 use serde_json::{Value, json};
 
@@ -9,6 +13,208 @@ use crate::{
     RuntimeControlEventRequest, RuntimeControlReadRequest, RuntimeControlReadTarget,
     RuntimeDiagnostic, RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ViewState,
 };
+
+fn core_impl(object_id: &str) -> crate::ObjectImplementationRefCurrent {
+    crate::ObjectImplementationRefCurrent {
+        provider: crate::ObjectProviderRefCurrent::Core,
+        object_id: object_id.to_owned(),
+        version: Some("0.1.0".to_owned()),
+        interface_digest: None,
+    }
+}
+
+fn current_core_node_json(
+    id: &str,
+    object_id: &str,
+    object_spec: &str,
+    params: Value,
+    ports: Value,
+) -> Value {
+    json!({
+      "id": id,
+      "implementation": {
+        "provider": { "kind": "core" },
+        "objectId": object_id,
+        "version": "0.1.0"
+      },
+      "objectSpec": object_spec,
+      "objectResolution": {
+        "status": "resolved",
+        "candidates": [],
+        "diagnostics": []
+      },
+      "params": params,
+      "ports": ports
+    })
+}
+
+fn current_provider_node_json(id: &str, object_id: &str, params: Value, ports: Value) -> Value {
+    json!({
+      "id": id,
+      "implementation": {
+        "provider": {
+          "kind": "package",
+          "packageId": "test/runtime-fixtures",
+          "version": "0.1.0"
+        },
+        "objectId": object_id,
+        "version": "0.1.0"
+      },
+      "objectSpec": object_id,
+      "objectResolution": {
+        "status": "resolved",
+        "candidates": [],
+        "diagnostics": []
+      },
+      "params": params,
+      "ports": ports
+    })
+}
+
+fn current_unresolved_node_json(id: &str, object_spec: &str) -> Value {
+    json!({
+      "id": id,
+      "objectSpec": object_spec,
+      "objectResolution": {
+        "status": "unresolved",
+        "candidates": [],
+          "diagnostics": [
+          {
+            "code": "resolution-unresolved",
+            "severity": "error",
+            "message": format!("{object_spec} is not available in the local runtime registry.")
+          }
+        ]
+      },
+      "params": {
+        "objectSpec": object_spec,
+        "diagnosticMessage": format!("{object_spec} is not available in the local runtime registry."),
+        "requestedKind": object_spec
+      },
+      "ports": []
+    })
+}
+
+fn normalize_current_fixture_value(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                normalize_current_fixture_value(item);
+            }
+        }
+        Value::Object(object) => {
+            if object.contains_key("kind")
+                && object.contains_key("kindVersion")
+                && object.contains_key("ports")
+            {
+                let id = object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("node")
+                    .to_owned();
+                let kind = object
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let object_spec = object
+                    .get("objectSpec")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let params = object.remove("params").unwrap_or_else(|| json!({}));
+                let ports = object.remove("ports").unwrap_or_else(|| json!([]));
+                *value = if kind == "object.core.unresolved" {
+                    let object_spec = params
+                        .get("objectSpec")
+                        .or_else(|| params.get("requestedKind"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unresolved");
+                    current_unresolved_node_json(&id, object_spec)
+                } else if let Some(object_id) = kind.strip_prefix("object.core.") {
+                    current_core_node_json(
+                        &id,
+                        object_id,
+                        object_spec.as_deref().unwrap_or(object_id),
+                        params,
+                        ports,
+                    )
+                } else {
+                    current_provider_node_json(&id, &kind, params, ports)
+                };
+                return;
+            }
+            for child in object.values_mut() {
+                normalize_current_fixture_value(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn current_fixture<T>(mut value: Value, label: &str) -> T
+where
+    T: serde::de::DeserializeOwned,
+{
+    normalize_current_fixture_value(&mut value);
+    serde_json::from_value(value).unwrap_or_else(|error| panic!("{label}: {error}"))
+}
+
+fn temp_package_dir(name: &str) -> PathBuf {
+    let dir = env::temp_dir().join(format!(
+        "skenion-runtime-session-package-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn test_checksum() -> skenion_contracts::PackageChecksumV01 {
+    skenion_contracts::PackageChecksumV01 {
+        algorithm: skenion_contracts::PackageChecksumAlgorithmV01::Sha256,
+        value: "0".repeat(64),
+    }
+}
+
+fn package_registry_with_definition(
+    package_dir: PathBuf,
+    object_id: &str,
+    primary_spec: &str,
+) -> crate::PackageRegistryListResponseV01 {
+    crate::PackageRegistryListResponseV01 {
+        ok: true,
+        packages: vec![crate::PackageRegistryEntryV01 {
+            package_id: "example/package".to_owned(),
+            version: "0.56.0".to_owned(),
+            category: skenion_contracts::PackageCategoryV01::Mixed,
+            source: skenion_contracts::PackageSourceV01::Workspace,
+            root: skenion_contracts::PackageRootKindV01::Package,
+            trust: skenion_contracts::PackageTrustV01::Trusted,
+            contracts: skenion_contracts::PackageContractsSupportV01 {
+                line: "0.56".to_owned(),
+                range: ">=0.56.0 <0.57.0".to_owned(),
+            },
+            runtime_abi_range: None,
+            targets: Vec::new(),
+            manifest_path: crate::RUNTIME_PACKAGE_MANIFEST_FILE.to_owned(),
+            root_path: Some(package_dir),
+            manifest_checksum: test_checksum(),
+            provides: skenion_contracts::PackageProvidesV01 {
+                objects: vec![skenion_contracts::PackageObjectExportV01 {
+                    object_id: object_id.to_owned(),
+                    primary_object_spec: primary_spec.to_owned(),
+                    aliases: Vec::new(),
+                    definition_path: "nodes/package-node.json".to_owned(),
+                    description: None,
+                    help_id: None,
+                }],
+                ..Default::default()
+            },
+            diagnostics: Vec::new(),
+        }],
+        diagnostics: Vec::new(),
+    }
+}
 
 use super::{
     HistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest, RuntimePatchResponse,
@@ -30,6 +236,95 @@ fn invalid_registry_load_returns_diagnostics_without_revision_change() {
     assert!(!response.snapshot.loaded());
     assert_eq!(response.snapshot.session_revision, 0);
     assert!(!response.diagnostics.is_empty());
+}
+
+#[test]
+fn package_registry_definitions_are_available_during_current_load() {
+    let package_dir = temp_package_dir("load");
+    fs::create_dir_all(package_dir.join("nodes")).unwrap();
+    fs::write(
+        package_dir.join("nodes/package-node.json"),
+        serde_json::to_vec(&json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "example.package.node",
+          "version": "0.56.0",
+          "displayName": "Package Node",
+          "category": "Package",
+          "ports": value_f32_ports_current_json(),
+          "execution": { "model": "control" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let package_registry =
+        package_registry_with_definition(package_dir, "example.package.node", "pkg.node");
+    let request: ProjectRequestCurrent = serde_json::from_value(json!({
+      "graph": {
+        "schema": "skenion.graph",
+        "schemaVersion": "0.1.0",
+        "id": "package-load",
+        "revision": "1",
+        "nodes": [
+          {
+            "id": "pkg_1",
+            "implementation": {
+              "provider": {
+                "kind": "package",
+                "packageId": "example/package",
+                "version": "0.56.0"
+              },
+              "objectId": "example.package.node",
+              "version": "0.56.0"
+            },
+            "objectSpec": "pkg.node",
+            "objectResolution": {
+              "status": "resolved",
+              "candidates": [],
+              "diagnostics": []
+            },
+            "params": {},
+            "ports": value_f32_ports_current_json()
+          }
+        ],
+        "edges": []
+      },
+      "nodes": [],
+      "viewState": {
+        "schema": "skenion.view-state",
+        "schemaVersion": "0.1.0",
+        "canvas": {
+          "nodes": {
+            "pkg_1": { "x": 96.0, "y": 96.0 }
+          }
+        }
+      }
+    }))
+    .expect("package-backed current project should parse");
+
+    let mut session = RuntimeSession::default();
+    let response = session.load_project_current_with_package_registry(
+        request,
+        Some(7),
+        Some(package_registry),
+    );
+
+    assert!(response.ok, "{:?}", response.diagnostics);
+    assert_eq!(response.snapshot.package_registry_revision, Some(7));
+    assert!(session.nodes_current.iter().any(
+        |definition| definition.id == "example.package.node" && definition.version == "0.56.0"
+    ));
+    assert!(
+        session
+            .node_catalog_snapshot()
+            .entries
+            .iter()
+            .any(|entry| entry.object_id == "example.package.node"
+                && entry.primary_object_spec == "pkg.node")
+    );
 }
 
 #[test]
@@ -737,7 +1032,7 @@ fn payload_identity_session_load_preserves_existing_project() {
     assert!(loaded.ok);
 
     let mut invalid = sample_project_current();
-    invalid.graph.nodes[0].kind = "object.core.bool".to_owned();
+    invalid.graph.nodes[0].implementation = Some(core_impl("object.core.bool"));
     let response = session.load_project_current(invalid);
     let snapshot = session.snapshot();
 
@@ -764,7 +1059,12 @@ fn payload_identity_session_load_preserves_existing_project() {
             .graph
             .nodes
             .iter()
-            .all(|node| node.kind != "object.core.bool")
+            .all(|node| {
+                node.implementation
+                    .as_ref()
+                    .map(|implementation| implementation.object_id.as_str())
+                    != Some("object.core.bool")
+            })
     );
 }
 
@@ -1522,7 +1822,7 @@ fn payload_identity_paste_is_rejected_without_mutating_session() {
     let loaded = load_sample_project(&mut session);
     assert!(loaded.ok);
     let mut operation = paste_operation("1");
-    operation.request.fragment.nodes[0].kind = "object.core.string".to_owned();
+    operation.request.fragment.nodes[0].implementation = Some(core_impl("object.core.string"));
 
     let response = session.apply_runtime_operation(operation);
     let snapshot = session.snapshot();
@@ -1685,7 +1985,7 @@ fn paste_graph_fragment_reports_apply_mutation_failures_as_operation_diagnostics
     let mut session = RuntimeSession::default();
     load_sample_project(&mut session);
     let mut operation = paste_operation("1");
-    operation.request.fragment.nodes[1].kind = "missing.kind".to_owned();
+    operation.request.fragment.nodes[1].implementation = Some(core_impl("missing.kind"));
 
     let response = session.apply_runtime_operation(operation);
 
@@ -1693,11 +1993,14 @@ fn paste_graph_fragment_reports_apply_mutation_failures_as_operation_diagnostics
     assert!(!response.applied);
     assert_eq!(response.history_entry_id, None);
     assert_eq!(response.revision_after, None);
-    assert_eq!(response.diagnostics[0].code, "node-definition.missing");
+    assert_eq!(
+        response.diagnostics[0].code,
+        "object-spec.implementation-mismatch"
+    );
     assert!(
         response.diagnostics[0]
             .message
-            .contains("missing node definition")
+            .contains("resolves to implementation")
     );
 }
 
@@ -1946,18 +2249,20 @@ fn rejected_payload_identity_collaboration_node_add_preserves_session_graph() {
 #[test]
 fn current_active_cutover_private_helpers_cover_defensive_paths() {
     let root_target = paste_operation("1").request.target;
-    let change: RuntimeCollaborationChange = serde_json::from_value(json!({
-      "op": "node.add",
-      "changeId": "change-add-duplicate-value",
-      "node": {
-        "id": "value_1",
-        "kind": "object.core.float",
-        "kindVersion": "0.1.0",
-        "params": {},
-        "ports": value_f32_ports_current_json()
-      }
-    }))
-    .expect("collaboration change should parse");
+    let change: RuntimeCollaborationChange = current_fixture(
+        json!({
+          "op": "node.add",
+          "changeId": "change-add-duplicate-value",
+          "node": {
+            "id": "value_1",
+            "kind": "object.core.float",
+            "kindVersion": "0.1.0",
+            "params": {},
+            "ports": value_f32_ports_current_json()
+          }
+        }),
+        "collaboration change should parse",
+    );
 
     let mut unloaded = RuntimeSession::default();
     let no_project = unloaded.apply_collaboration_change_set_current(
@@ -2118,7 +2423,7 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
 
     let mut invalid_request = sample_project_current();
     let mut invalid_document = super::project_document_from_request_current(&invalid_request);
-    invalid_document.graph.nodes[0].kind = "missing.kind".to_owned();
+    invalid_document.graph.nodes[0].implementation = Some(core_impl("missing.kind"));
     invalid_request.document = Some(invalid_document.clone());
     let mut invalid_session = RuntimeSession {
         project: Some(invalid_document),
@@ -2133,10 +2438,9 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     assert!(!validation.ok);
     assert!(!plan.ok);
     assert!(plan.snapshot.plan.is_none());
-    assert!(
-        plan.diagnostics[0]
-            .message
-            .contains("missing node definition")
+    assert_eq!(
+        plan.diagnostics[0].code.as_deref(),
+        Some("object-spec.implementation-mismatch")
     );
 
     let mut update_session = RuntimeSession::default();
@@ -2177,7 +2481,7 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     let mut invalid_restore = restore_plan_session
         .project_document_current()
         .expect("project should load");
-    invalid_restore.graph.nodes[0].kind = "missing.kind".to_owned();
+    invalid_restore.graph.nodes[0].implementation = Some(core_impl("missing.kind"));
     let restored = restore_plan_session.restore_project_document_state(
         invalid_restore,
         1,
@@ -2187,10 +2491,9 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
         None,
     );
     assert!(!restored.ok);
-    assert!(
-        restored.diagnostics[0]
-            .message
-            .contains("missing node definition")
+    assert_eq!(
+        restored.diagnostics[0].code.as_deref(),
+        Some("object-spec.implementation-mismatch")
     );
 
     let mut restore_registry_session = RuntimeSession::default();
@@ -2230,7 +2533,7 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
         .project_document_current()
         .expect("project should load");
     let mut after = before.clone();
-    after.graph.nodes[0].kind = "missing.kind".to_owned();
+    after.graph.nodes[0].implementation = Some(core_impl("missing.kind"));
     let entry = HistoryEntry::ProjectDocument {
         event_id: "event".to_owned(),
         actor_id: None,
@@ -2827,22 +3130,18 @@ fn collaboration_private_helpers_cover_patch_target_error_matrix() {
     );
 
     let mut unresolved_graph = sample_project_current().graph;
-    unresolved_graph.nodes.push(
-        serde_json::from_value(json!({
+    unresolved_graph.nodes.push(current_fixture(
+        json!({
           "id": "unresolved_current",
           "kind": "object.core.unresolved",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": []
-        }))
-        .expect("unresolved current 0.1 node should parse"),
-    );
+        }),
+        "unresolved current 0.1 node should parse",
+    ));
     let unresolved = super::unresolved_object_diagnostics_current(&unresolved_graph);
-    assert!(
-        unresolved[0]
-            .message
-            .contains("object spec could not be resolved")
-    );
+    assert!(unresolved[0].message.contains("unresolved object"));
 }
 
 #[test]
@@ -3340,31 +3639,33 @@ fn set_value_patch(base_revision: &str, value: f64) -> GraphPatch {
 }
 
 fn paste_operation(base_revision: &str) -> RuntimeOperationEnvelope {
-    serde_json::from_value(json!({
-      "schema": "skenion.runtime.operation",
-      "schemaVersion": "0.1.0",
-      "id": "op-paste",
-      "kind": "pasteGraphFragment",
-      "request": {
-        "target": {
-          "path": { "kind": "root" },
-          "baseRevision": base_revision
-        },
-        "fragment": paste_fragment_json(),
-        "options": {
-          "idConflictPolicy": "remap"
-        }
-      },
-      "attribution": {
-        "clientId": "studio-test",
-        "label": "Paste test fragment"
-      }
-    }))
-    .expect("paste operation should parse")
+    current_fixture(
+        json!({
+          "schema": "skenion.runtime.operation",
+          "schemaVersion": "0.1.0",
+          "id": "op-paste",
+          "kind": "pasteGraphFragment",
+          "request": {
+            "target": {
+              "path": { "kind": "root" },
+              "baseRevision": base_revision
+            },
+            "fragment": paste_fragment_json(),
+            "options": {
+              "idConflictPolicy": "remap"
+            }
+          },
+          "attribution": {
+            "clientId": "studio-test",
+            "label": "Paste test fragment"
+          }
+        }),
+        "paste operation should parse",
+    )
 }
 
 fn paste_fragment_json() -> Value {
-    json!({
+    let mut fragment = json!({
       "schema": "skenion.graph.fragment",
       "schemaVersion": "0.1.0",
       "nodes": [
@@ -3396,42 +3697,48 @@ fn paste_fragment_json() -> Value {
           "pasted_target": { "x": 180.0, "y": 20.0 }
         }
       }
-    })
+    });
+    normalize_current_fixture_value(&mut fragment);
+    fragment
 }
 
 fn graph_node_current(id: &str) -> crate::GraphNodeCurrent {
-    serde_json::from_value(value_node_current_json(id))
-        .expect("current 0.1 graph node should parse")
+    current_fixture(
+        value_node_current_json(id),
+        "current 0.1 graph node should parse",
+    )
 }
 
 fn value_node_current_json(id: &str) -> Value {
-    json!({
-      "id": id,
-      "kind": "object.core.float",
-      "kindVersion": "0.1.0",
-      "params": {},
-      "ports": value_f32_ports_current_json()
-    })
+    current_core_node_json(
+        id,
+        "float",
+        "float",
+        json!({}),
+        value_f32_ports_current_json(),
+    )
 }
 
 fn patch_definition_current(id: &str) -> skenion_contracts::PatchDefinitionV01 {
-    serde_json::from_value(json!({
-      "id": id,
-      "revision": "1",
-      "graph": {
-        "schema": "skenion.graph",
-        "schemaVersion": "0.1.0",
-        "id": format!("{id}-graph"),
-        "revision": "1",
-        "nodes": [value_node_current_json("patch_value")],
-        "edges": []
-      }
-    }))
-    .expect("patch definition should parse")
+    current_fixture(
+        json!({
+          "id": id,
+          "revision": "1",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": format!("{id}-graph"),
+            "revision": "1",
+            "nodes": [value_node_current_json("patch_value")],
+            "edges": []
+          }
+        }),
+        "patch definition should parse",
+    )
 }
 
 fn collaboration_change(value: Value) -> RuntimeCollaborationChange {
-    serde_json::from_value(value).expect("collaboration change should parse")
+    current_fixture(value, "collaboration change should parse")
 }
 
 fn f32_value(value: f64) -> ControlValue {
@@ -3567,125 +3874,129 @@ fn sample_internal_graph() -> GraphDocument {
 }
 
 fn sample_project_current() -> ProjectRequestCurrent {
-    serde_json::from_value(json!({
-      "graph": {
-        "schema": "skenion.graph",
-        "schemaVersion": "0.1.0",
-        "id": "minimal-value",
-        "revision": "1",
-        "nodes": [
-          {
-            "id": "value_1",
-            "kind": "object.core.float",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": value_f32_ports_current_json()
+    current_fixture(
+        json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "minimal-value",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "value_1",
+                "kind": "object.core.float",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": value_f32_ports_current_json()
+              },
+              {
+                "id": "target_1",
+                "kind": "object.core.float",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": value_f32_ports_current_json()
+              }
+            ],
+            "edges": [
+              {
+                "id": "edge_value_target",
+                "source": { "nodeId": "value_1", "portId": "value" },
+                "target": { "nodeId": "target_1", "portId": "cold" },
+                "resolvedType": "value.core.float32"
+              }
+            ]
           },
-          {
-            "id": "target_1",
-            "kind": "object.core.float",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": value_f32_ports_current_json()
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.1.0",
+              "id": "object.core.float",
+              "version": "0.1.0",
+              "displayName": "Float",
+              "category": "Typed Controls",
+              "ports": value_f32_ports_current_json(),
+              "execution": { "model": "control" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": ["value.core.float32.v0.1"]
+            }
+          ],
+          "viewState": {
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": {
+              "nodes": {
+                "value_1": { "x": 96.0, "y": 96.0 },
+                "target_1": { "x": 260.0, "y": 96.0 }
+              }
+            }
           }
-        ],
-        "edges": [
-          {
-            "id": "edge_value_target",
-            "source": { "nodeId": "value_1", "portId": "value" },
-            "target": { "nodeId": "target_1", "portId": "cold" },
-            "resolvedType": "value.core.float32"
-          }
-        ]
-      },
-      "nodes": [
-        {
-          "schema": "skenion.node.definition",
-          "schemaVersion": "0.1.0",
-          "id": "object.core.float",
-          "version": "0.1.0",
-          "displayName": "Float",
-          "category": "Typed Controls",
-          "ports": value_f32_ports_current_json(),
-          "execution": { "model": "control" },
-          "state": { "persistent": false },
-          "permissions": [],
-          "capabilities": ["value.core.float32.v0.1"]
-        }
-      ],
-      "viewState": {
-        "schema": "skenion.view-state",
-        "schemaVersion": "0.1.0",
-        "canvas": {
-          "nodes": {
-            "value_1": { "x": 96.0, "y": 96.0 },
-            "target_1": { "x": 260.0, "y": 96.0 }
-          }
-        }
-      }
-    }))
-    .expect("current 0.1 sample project should parse")
+        }),
+        "current 0.1 sample project should parse",
+    )
 }
 
 fn binding_project_current() -> ProjectRequestCurrent {
-    serde_json::from_value(json!({
-      "graph": {
-        "schema": "skenion.graph",
-        "schemaVersion": "0.1.0",
-        "id": "minimal-binding",
-        "revision": "1",
-        "nodes": [
-          {
-            "id": "value_1",
-            "kind": "object.core.float",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": value_binding_ports_current_json()
+    current_fixture(
+        json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "minimal-binding",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "value_1",
+                "kind": "object.core.float",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": value_binding_ports_current_json()
+              },
+              {
+                "id": "target_1",
+                "kind": "object.core.float",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": value_binding_ports_current_json()
+              }
+            ],
+            "edges": [
+              {
+                "id": "edge_value_target",
+                "source": { "nodeId": "value_1", "portId": "value" },
+                "target": { "nodeId": "target_1", "portId": "cold" },
+                "resolvedType": "value.core.float32"
+              }
+            ]
           },
-          {
-            "id": "target_1",
-            "kind": "object.core.float",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": value_binding_ports_current_json()
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.1.0",
+              "id": "object.core.float",
+              "version": "0.1.0",
+              "displayName": "Float",
+              "category": "Typed Controls",
+              "ports": value_binding_ports_current_json(),
+              "execution": { "model": "control" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": ["value.core.float32.v0.1"]
+            }
+          ],
+          "viewState": {
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": {
+              "nodes": {
+                "value_1": { "x": 96.0, "y": 96.0 },
+                "target_1": { "x": 260.0, "y": 96.0 }
+              }
+            }
           }
-        ],
-        "edges": [
-          {
-            "id": "edge_value_target",
-            "source": { "nodeId": "value_1", "portId": "value" },
-            "target": { "nodeId": "target_1", "portId": "cold" },
-            "resolvedType": "value.core.float32"
-          }
-        ]
-      },
-      "nodes": [
-        {
-          "schema": "skenion.node.definition",
-          "schemaVersion": "0.1.0",
-          "id": "object.core.float",
-          "version": "0.1.0",
-          "displayName": "Float",
-          "category": "Typed Controls",
-          "ports": value_binding_ports_current_json(),
-          "execution": { "model": "control" },
-          "state": { "persistent": false },
-          "permissions": [],
-          "capabilities": ["value.core.float32.v0.1"]
-        }
-      ],
-      "viewState": {
-        "schema": "skenion.view-state",
-        "schemaVersion": "0.1.0",
-        "canvas": {
-          "nodes": {
-            "value_1": { "x": 96.0, "y": 96.0 },
-            "target_1": { "x": 260.0, "y": 96.0 }
-          }
-        }
-      }
-    }))
-    .expect("binding sample project should parse")
+        }),
+        "binding sample project should parse",
+    )
 }
 
 fn sample_project_current_with_unresolved_definition() -> ProjectRequestCurrent {
@@ -3699,10 +4010,10 @@ fn sample_project_current_with_unresolved_definition() -> ProjectRequestCurrent 
 
 fn unresolved_project_current() -> ProjectRequestCurrent {
     let mut request = sample_project_current();
-    request.graph.nodes.push(
-        serde_json::from_value(unresolved_node_json("unresolved_1", "user.manipulator"))
-            .expect("unresolved current 0.1 node should parse"),
-    );
+    request.graph.nodes.push(current_fixture(
+        unresolved_node_json("unresolved_1", "user.manipulator"),
+        "unresolved current 0.1 node should parse",
+    ));
     request.nodes.push(
         serde_json::from_value(unresolved_definition_current_json())
             .expect("unresolved current 0.1 definition should parse"),
@@ -3720,16 +4031,16 @@ fn object_routing_project_current() -> ProjectRequestCurrent {
 
 fn debug_sink_project_current() -> ProjectRequestCurrent {
     let mut request = sample_project_current();
-    request.graph.nodes.push(
-        serde_json::from_value(json!({
+    request.graph.nodes.push(current_fixture(
+        json!({
             "id": "debug_1",
             "kind": "debug.sink",
             "kindVersion": "0.1.0",
             "params": {},
             "ports": []
-        }))
-        .expect("debug current 0.1 node should parse"),
-    );
+        }),
+        "debug current 0.1 node should parse",
+    ));
     request.nodes.push(
         serde_json::from_value(json!({
             "schema": "skenion.node.definition",

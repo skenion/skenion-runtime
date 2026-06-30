@@ -81,8 +81,17 @@ fn valid_project_request_current() -> Value {
         "nodes": [
           {
             "id": "node",
-            "kind": "object.core.loader",
-            "kindVersion": "0.1.0",
+            "implementation": {
+              "provider": { "kind": "core" },
+              "objectId": "loader",
+              "version": "0.1.0"
+            },
+            "objectSpec": "loader",
+            "objectResolution": {
+              "status": "resolved",
+              "candidates": [],
+              "diagnostics": []
+            },
             "params": {},
             "ports": [
               {

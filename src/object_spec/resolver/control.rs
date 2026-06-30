@@ -17,7 +17,7 @@ pub(super) fn resolve_control_operator(
     creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
 ) -> ObjectSpecResolution {
-    let kind = candidate.kind.as_str();
+    let kind = candidate.executable_kind.as_str();
     if kind == "object.core.operator.sqrt" {
         if !creation_args.is_empty() {
             return failure(
@@ -87,7 +87,7 @@ pub(super) fn resolve_control_value(
     creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
 ) -> ObjectSpecResolution {
-    let kind = candidate.kind.as_str();
+    let kind = candidate.executable_kind.as_str();
     match kind {
         "object.core.bang" => {
             if !creation_args.is_empty() {

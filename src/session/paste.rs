@@ -443,13 +443,17 @@ fn payload_identity_fragment_diagnostics_current(
         .fragment
         .nodes
         .iter()
-        .filter(|node| is_payload_identity_node_kind_current(&node.kind))
+        .filter(|node| {
+            crate::current_node_identity::graph_node_object_id(node)
+                .is_some_and(is_payload_identity_node_kind_current)
+        })
         .map(|node| RuntimeOperationDiagnostic {
             severity: "error".to_owned(),
             code: "paste.fragment.payload-node-kind".to_owned(),
             message: format!(
-                "node {} uses payload identity {} as an executable kind",
-                node.id, node.kind
+                "node {} uses payload identity {} as an executable implementation",
+                node.id,
+                crate::current_node_identity::graph_node_object_id(node).unwrap_or("<missing>")
             ),
             path: None,
             target: Some(request.target.clone()),

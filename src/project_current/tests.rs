@@ -6,8 +6,134 @@ use crate::{
     PortRateCurrent, PortSpecCurrent,
 };
 
+fn core_impl(object_id: &str) -> crate::ObjectImplementationRefCurrent {
+    crate::ObjectImplementationRefCurrent {
+        provider: crate::ObjectProviderRefCurrent::Core,
+        object_id: object_id.to_owned(),
+        version: Some(CURRENT_SCHEMA_VERSION.to_owned()),
+        interface_digest: None,
+    }
+}
+
+fn current_core_node_json(id: &str, object_id: &str, params: Value, ports: Value) -> Value {
+    json!({
+      "id": id,
+      "implementation": {
+        "provider": { "kind": "core" },
+        "objectId": object_id,
+        "version": CURRENT_SCHEMA_VERSION
+      },
+      "objectSpec": object_id,
+      "objectResolution": {
+        "status": "resolved",
+        "candidates": [],
+        "diagnostics": []
+      },
+      "params": params,
+      "ports": ports
+    })
+}
+
+fn current_provider_node_json(id: &str, object_id: &str, params: Value, ports: Value) -> Value {
+    json!({
+      "id": id,
+      "implementation": {
+        "provider": {
+          "kind": "package",
+          "packageId": "test/current-fixtures",
+          "version": CURRENT_SCHEMA_VERSION
+        },
+        "objectId": object_id,
+        "version": CURRENT_SCHEMA_VERSION
+      },
+      "objectSpec": object_id,
+      "objectResolution": {
+        "status": "resolved",
+        "candidates": [],
+        "diagnostics": []
+      },
+      "params": params,
+      "ports": ports
+    })
+}
+
+fn normalize_current_fixture_value(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                normalize_current_fixture_value(item);
+            }
+        }
+        Value::Object(object) => {
+            if object.contains_key("kind")
+                && object.contains_key("kindVersion")
+                && object.contains_key("ports")
+            {
+                let id = object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("node")
+                    .to_owned();
+                let kind = object
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let object_spec = object
+                    .get("objectSpec")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let params = object.remove("params").unwrap_or_else(|| json!({}));
+                let ports = object.remove("ports").unwrap_or_else(|| json!([]));
+                *value = if kind == "p" {
+                    let mut params = params;
+                    if let Some(patch_ref) = object_spec
+                        .as_deref()
+                        .and_then(|spec| spec.strip_prefix("p "))
+                        .filter(|patch_ref| !patch_ref.is_empty())
+                        && let Some(map) = params.as_object_mut()
+                    {
+                        map.entry("patchRef".to_owned())
+                            .or_insert_with(|| json!(patch_ref));
+                    }
+                    current_core_node_json(&id, "subpatch", params, ports)
+                } else if let Some(object_id) = kind.strip_prefix("object.core.") {
+                    let mut node = current_core_node_json(&id, object_id, params, ports);
+                    if let Some(object_spec) = object_spec.as_ref()
+                        && let Some(map) = node.as_object_mut()
+                    {
+                        map.insert("objectSpec".to_owned(), json!(object_spec));
+                    }
+                    node
+                } else {
+                    let mut node = current_provider_node_json(&id, &kind, params, ports);
+                    if let Some(object_spec) = object_spec.as_ref()
+                        && let Some(map) = node.as_object_mut()
+                    {
+                        map.insert("objectSpec".to_owned(), json!(object_spec));
+                    }
+                    node
+                };
+                return;
+            }
+            for child in object.values_mut() {
+                normalize_current_fixture_value(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn current_fixture<T>(mut value: Value, label: &str) -> T
+where
+    T: serde::de::DeserializeOwned,
+{
+    normalize_current_fixture_value(&mut value);
+    serde_json::from_value(value).unwrap_or_else(|error| panic!("{label}: {error}"))
+}
+
 fn graph(value: Value) -> GraphDocumentCurrent {
-    serde_json::from_value(value).expect("graph should parse")
+    current_fixture(value, "graph should parse")
 }
 
 fn definition(value: Value) -> NodeDefinitionCurrent {
@@ -123,61 +249,63 @@ fn render_graph() -> GraphDocumentCurrent {
 }
 
 fn identity_patch() -> PatchDefinitionCurrent {
-    serde_json::from_value(json!({
-      "id": "identity",
-      "revision": "1",
-      "graph": {
-        "schema": "skenion.graph",
-        "schemaVersion": "0.1.0",
-        "id": "identity-graph",
-        "revision": "1",
-        "nodes": [
-          {
-            "id": "patch_in",
-            "kind": "object.core.inlet",
-            "kindVersion": "0.1.0",
-            "params": { "portId": "in", "label": "Input" },
-            "ports": [
-              { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "description": "Frame entering the patch" }
-            ]
-          },
-          {
-            "id": "pass",
-            "kind": "test.pass",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": [
-              { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
-              { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
-            ]
-          },
-          {
-            "id": "patch_out",
-            "kind": "object.core.outlet",
-            "kindVersion": "0.1.0",
-            "params": { "portId": "out", "label": "Output" },
-            "ports": [
-              { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true, "description": "Frame leaving the patch" }
+    current_fixture(
+        json!({
+          "id": "identity",
+          "revision": "1",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "identity-graph",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "patch_in",
+                "kind": "object.core.inlet",
+                "kindVersion": "0.1.0",
+                "params": { "portId": "in", "label": "Input" },
+                "ports": [
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "description": "Frame entering the patch" }
+                ]
+              },
+              {
+                "id": "pass",
+                "kind": "test.pass",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": [
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
+                ]
+              },
+              {
+                "id": "patch_out",
+                "kind": "object.core.outlet",
+                "kindVersion": "0.1.0",
+                "params": { "portId": "out", "label": "Output" },
+                "ports": [
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true, "description": "Frame leaving the patch" }
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "id": "edge_in_pass",
+                "source": { "nodeId": "patch_in", "portId": "out" },
+                "target": { "nodeId": "pass", "portId": "in" },
+                "resolvedType": "value.core.tensor"
+              },
+              {
+                "id": "edge_pass_out",
+                "source": { "nodeId": "pass", "portId": "out" },
+                "target": { "nodeId": "patch_out", "portId": "in" },
+                "resolvedType": "value.core.tensor"
+              }
             ]
           }
-        ],
-        "edges": [
-          {
-            "id": "edge_in_pass",
-            "source": { "nodeId": "patch_in", "portId": "out" },
-            "target": { "nodeId": "pass", "portId": "in" },
-            "resolvedType": "value.core.tensor"
-          },
-          {
-            "id": "edge_pass_out",
-            "source": { "nodeId": "pass", "portId": "out" },
-            "target": { "nodeId": "patch_out", "portId": "in" },
-            "resolvedType": "value.core.tensor"
-          }
-        ]
-      }
-    }))
-    .expect("patch definition should parse")
+        }),
+        "patch definition should parse",
+    )
 }
 
 fn subpatch_graph() -> GraphDocumentCurrent {
@@ -234,21 +362,23 @@ fn subpatch_graph() -> GraphDocumentCurrent {
 }
 
 fn project_document() -> ProjectDocumentCurrent {
-    serde_json::from_value(json!({
-      "schema": "skenion.project",
-      "schemaVersion": "0.1.0",
-      "id": "render-project",
-      "documentId": "30000000-0000-0000-0000-000000000003",
-      "revision": "1",
-      "graph": subpatch_graph(),
-      "viewState": {
-        "schema": "skenion.view-state",
-        "schemaVersion": "0.1.0",
-        "canvas": { "nodes": {} }
-      },
-      "patchLibrary": [identity_patch()]
-    }))
-    .expect("project document should parse")
+    current_fixture(
+        json!({
+          "schema": "skenion.project",
+          "schemaVersion": "0.1.0",
+          "id": "render-project",
+          "documentId": "30000000-0000-0000-0000-000000000003",
+          "revision": "1",
+          "graph": subpatch_graph(),
+          "viewState": {
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": { "nodes": {} }
+          },
+          "patchLibrary": [identity_patch()]
+        }),
+        "project document should parse",
+    )
 }
 
 #[test]
@@ -572,8 +702,8 @@ fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
 
     let mut patch_library = Vec::new();
     for index in 0..=15 {
-        patch_library.push(
-            serde_json::from_value(json!({
+        patch_library.push(current_fixture(
+            json!({
               "id": format!("p{index}"),
               "revision": "1",
               "graph": {
@@ -592,9 +722,9 @@ fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
                 ],
                 "edges": []
               }
-            }))
-            .expect("patch should parse"),
-        );
+            }),
+            "patch should parse",
+        ));
     }
     let depth_root = graph(json!({
       "schema": "skenion.graph",
@@ -661,38 +791,40 @@ fn parses_subpatch_aliases_and_reports_missing_boundaries() {
     }));
     assert_eq!(boundary_key(&fallback_boundary.nodes[0]), "plain_inlet");
 
-    let duplicate_inlet_patch: PatchDefinitionCurrent = serde_json::from_value(json!({
-      "id": "alias-patch",
-      "revision": "1",
-      "graph": {
-        "schema": "skenion.graph",
-        "schemaVersion": "0.1.0",
-        "id": "alias-patch-graph",
-        "revision": "1",
-        "nodes": [
-          {
-            "id": "in_a",
-            "kind": "object.core.inlet",
-            "kindVersion": "0.1.0",
-            "params": { "portId": "in_a", "label": "shared" },
-            "ports": [
-              { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
-            ]
-          },
-          {
-            "id": "in_b",
-            "kind": "object.core.inlet",
-            "kindVersion": "0.1.0",
-            "params": { "portId": "in_b", "label": "shared" },
-            "ports": [
-              { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
-            ]
+    let duplicate_inlet_patch: PatchDefinitionCurrent = current_fixture(
+        json!({
+          "id": "alias-patch",
+          "revision": "1",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "alias-patch-graph",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "in_a",
+                "kind": "object.core.inlet",
+                "kindVersion": "0.1.0",
+                "params": { "portId": "in_a", "label": "shared" },
+                "ports": [
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
+                ]
+              },
+              {
+                "id": "in_b",
+                "kind": "object.core.inlet",
+                "kindVersion": "0.1.0",
+                "params": { "portId": "in_b", "label": "shared" },
+                "ports": [
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
+                ]
+              }
+            ],
+            "edges": []
           }
-        ],
-        "edges": []
-      }
-    }))
-    .expect("patch should parse");
+        }),
+        "patch should parse",
+    );
     let mut boundary_pins = std::collections::HashSet::new();
     let mut aliases = std::collections::HashMap::new();
     let first_pin = register_boundary_node(
@@ -786,27 +918,29 @@ fn reports_missing_recursive_and_invalid_patch_library_diagnostics() {
         Some("subpatch.missing-patch")
     );
 
-    let recursive_patch: PatchDefinitionCurrent = serde_json::from_value(json!({
-      "id": "recursive",
-      "revision": "1",
-      "graph": {
-        "schema": "skenion.graph",
-        "schemaVersion": "0.1.0",
-        "id": "recursive-graph",
-        "revision": "1",
-        "nodes": [
-          {
-            "id": "self",
-            "kind": "object.core.subpatch",
-            "kindVersion": "0.1.0",
-            "params": { "patchRef": "recursive" },
-            "ports": []
+    let recursive_patch: PatchDefinitionCurrent = current_fixture(
+        json!({
+          "id": "recursive",
+          "revision": "1",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "recursive-graph",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "self",
+                "kind": "object.core.subpatch",
+                "kindVersion": "0.1.0",
+                "params": { "patchRef": "recursive" },
+                "ports": []
+              }
+            ],
+            "edges": []
           }
-        ],
-        "edges": []
-      }
-    }))
-    .expect("recursive patch should parse");
+        }),
+        "recursive patch should parse",
+    );
     let recursive = ProjectRequestCurrent {
         document: None,
         graph: graph(json!({
@@ -920,7 +1054,7 @@ fn rejects_payload_identity_node_kinds_and_definition_ids() {
         "value.core.tensor",
     ] {
         let mut graph = render_graph();
-        graph.nodes[0].kind = payload_identity.to_owned();
+        graph.nodes[0].implementation = Some(core_impl(payload_identity));
         graph.nodes[0].ports.clear();
         let graph_result =
             validate_project_current(&graph, &[clear_definition(), output_definition()])
@@ -928,7 +1062,7 @@ fn rejects_payload_identity_node_kinds_and_definition_ids() {
         assert!(
             graph_result.iter().any(|diagnostic| {
                 diagnostic.code.as_deref() == Some("graph.payload-node-kind")
-                    && diagnostic.details.as_ref().unwrap()["kind"] == payload_identity
+                    && diagnostic.details.as_ref().unwrap()["objectId"] == payload_identity
             }),
             "{payload_identity}: {graph_result:#?}"
         );
@@ -1036,20 +1170,22 @@ fn validates_runtime_owned_object_spec_resolution() {
     }));
 
     let mut mismatch = graph.clone();
-    mismatch.nodes[0].kind = "object.core.operator.sub".to_owned();
+    mismatch.nodes[0].implementation = Some(core_impl("object.core.operator.sub"));
     let mismatch_result = validate_project_current(
         &mismatch,
         &[behavior_definition("object.core.operator.sub")],
     )
-    .expect_err("resolved object kind mismatch should fail");
+    .expect_err("resolved object implementation mismatch should fail");
     assert!(mismatch_result.iter().any(|diagnostic| {
-        diagnostic.code.as_deref() == Some("object-spec.kind-mismatch")
-            && diagnostic.details.as_ref().unwrap()["resolvedKind"] == "object.core.operator.add"
-            && diagnostic.details.as_ref().unwrap()["nodeKind"] == "object.core.operator.sub"
+        diagnostic.code.as_deref() == Some("object-spec.implementation-mismatch")
+            && diagnostic.details.as_ref().unwrap()["resolvedImplementation"]["objectId"]
+                == "operator.add"
+            && diagnostic.details.as_ref().unwrap()["nodeImplementation"]["objectId"]
+                == "object.core.operator.sub"
     }));
 
     let mut payload = graph.clone();
-    payload.nodes[0].kind = "object.core.float".to_owned();
+    payload.nodes[0].implementation = Some(core_impl("object.core.float"));
     payload.nodes[0].object_spec = Some("value.core.float32".to_owned());
     let payload_result =
         validate_project_current(&payload, &[behavior_definition("object.core.float")])
@@ -1060,7 +1196,16 @@ fn validates_runtime_owned_object_spec_resolution() {
     }));
 
     let mut package_deferred = graph.clone();
-    package_deferred.nodes[0].kind = "user.manipulator".to_owned();
+    package_deferred.nodes[0].implementation = Some(crate::ObjectImplementationRefCurrent {
+        provider: crate::ObjectProviderRefCurrent::Package {
+            package_id: "user/package".to_owned(),
+            lock_entry_id: None,
+            version: Some(CURRENT_SCHEMA_VERSION.to_owned()),
+        },
+        object_id: "user.manipulator".to_owned(),
+        version: Some(CURRENT_SCHEMA_VERSION.to_owned()),
+        interface_digest: None,
+    });
     package_deferred.nodes[0].object_spec = Some("user.manipulator 1".to_owned());
     validate_project_current(
         &package_deferred,

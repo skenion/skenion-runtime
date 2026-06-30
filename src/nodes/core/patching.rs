@@ -1,24 +1,28 @@
-use crate::nodes::CoreNodeConstructor;
-
 use super::CoreNodeDescriptor;
 
 pub(super) static SUBPATCH: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.subpatch",
+    "subpatch",
     "Subpatch",
     &["p", "object.core.subpatch"],
-    CoreNodeConstructor::Subpatch,
+    crate::object_spec::resolve_core_subpatch,
+    "Core",
 );
 
 pub(super) static INLET: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.inlet",
+    "inlet",
     "Inlet",
     &["inlet", "object.core.inlet"],
-    CoreNodeConstructor::BoundaryPort,
+    crate::object_spec::resolve_core_boundary_port,
+    "Core",
 );
 
 pub(super) static OUTLET: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.outlet",
+    "outlet",
     "Outlet",
     &["outlet", "object.core.outlet"],
-    CoreNodeConstructor::BoundaryPort,
+    crate::object_spec::resolve_core_boundary_port,
+    "Core",
 );

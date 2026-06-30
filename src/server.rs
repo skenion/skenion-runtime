@@ -483,9 +483,10 @@ fn load_session_for(
     }
     let project_request =
         ProjectRequestCurrent::from_project_document(request.project.clone(), Vec::new());
-    let response = session.load_project_current_with_package_registry_revision(
+    let response = session.load_project_current_with_package_registry(
         project_request,
         Some(state.packages.revision()),
+        Some(state.packages.response()),
     );
     if response.ok && response.snapshot.loaded() {
         publish_session_event(

@@ -1,15 +1,136 @@
 use super::*;
 use serde_json::{Map, json};
+use skenion_contracts::{
+    ObjectImplementationRefV01, ObjectProviderRefV01, ObjectResolutionStatusV01,
+    ObjectResolutionV01,
+};
+use std::{env, fs, path::PathBuf};
 
 fn assert_kind(resolution: &ObjectSpecResolution, kind: &str) {
     assert!(resolution.ok(), "{resolution:?}");
-    assert_eq!(resolution.resolved_kind.as_deref(), Some(kind));
-    assert_eq!(resolution.resolved_kind_version.as_deref(), Some("0.1.0"));
+    assert_eq!(
+        resolution
+            .implementation
+            .as_ref()
+            .map(crate::current_node_identity::implementation_executable_kind)
+            .as_deref(),
+        Some(kind)
+    );
+    assert_eq!(
+        resolution
+            .implementation
+            .as_ref()
+            .and_then(|implementation| implementation.version.as_deref()),
+        Some("0.1.0")
+    );
 }
 
 fn assert_diagnostic(resolution: &ObjectSpecResolution, code: &str) {
-    assert_eq!(resolution.resolved_kind, None);
+    assert_eq!(resolution.implementation, None);
     assert_eq!(resolution.diagnostics[0].code, code);
+}
+
+fn test_implementation(object_id: &str) -> ObjectImplementationRefV01 {
+    ObjectImplementationRefV01 {
+        provider: ObjectProviderRefV01::Package {
+            package_id: "test/package".to_owned(),
+            lock_entry_id: None,
+            version: Some(CURRENT_KIND_VERSION.to_owned()),
+        },
+        object_id: object_id.to_owned(),
+        version: Some(CURRENT_KIND_VERSION.to_owned()),
+        interface_digest: None,
+    }
+}
+
+fn candidate(
+    id: &str,
+    source: ObjectRegistrySource,
+    alias: &str,
+    object_id: &str,
+    display_name: &str,
+) -> ObjectRegistryCandidate {
+    ObjectRegistryCandidate {
+        id: id.to_owned(),
+        source,
+        aliases: vec![alias.to_owned()],
+        implementation: test_implementation(object_id),
+        executable_kind: object_id.to_owned(),
+        display_name: display_name.to_owned(),
+        core: None,
+        catalog_category: None,
+        project_patch: None,
+        package: None,
+    }
+}
+
+fn temp_package_dir(name: &str) -> PathBuf {
+    let dir = env::temp_dir().join(format!(
+        "skenion-runtime-object-spec-package-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn package_definition_json(id: &str) -> serde_json::Value {
+    json!({
+      "schema": "skenion.node.definition",
+      "schemaVersion": "0.1.0",
+      "id": id,
+      "version": "0.1.0",
+      "displayName": "Package Thing",
+      "category": "Package",
+      "ports": [
+        { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
+        { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
+      ],
+      "execution": { "model": "control" },
+      "state": { "persistent": false },
+      "permissions": [],
+      "capabilities": []
+    })
+}
+
+fn package_registry_with_object(
+    package_dir: PathBuf,
+    object_id: &str,
+    primary_spec: &str,
+) -> crate::PackageRegistryListResponseV01 {
+    crate::PackageRegistryListResponseV01 {
+        ok: true,
+        packages: vec![crate::PackageRegistryEntryV01 {
+            package_id: "example/package".to_owned(),
+            version: "0.56.0".to_owned(),
+            category: skenion_contracts::PackageCategoryV01::Mixed,
+            source: skenion_contracts::PackageSourceV01::Workspace,
+            root: skenion_contracts::PackageRootKindV01::Package,
+            trust: skenion_contracts::PackageTrustV01::Trusted,
+            contracts: skenion_contracts::PackageContractsSupportV01 {
+                line: "0.56".to_owned(),
+                range: ">=0.56.0 <0.57.0".to_owned(),
+            },
+            runtime_abi_range: None,
+            targets: Vec::new(),
+            manifest_path: crate::RUNTIME_PACKAGE_MANIFEST_FILE.to_owned(),
+            root_path: Some(package_dir),
+            manifest_checksum: zero_catalog_revision_checksum(),
+            provides: skenion_contracts::PackageProvidesV01 {
+                objects: vec![skenion_contracts::PackageObjectExportV01 {
+                    object_id: object_id.to_owned(),
+                    primary_object_spec: primary_spec.to_owned(),
+                    aliases: vec![format!("{primary_spec}.alias")],
+                    definition_path: "nodes/thing.json".to_owned(),
+                    description: Some("A package object".to_owned()),
+                    help_id: Some("example.package.thing".to_owned()),
+                }],
+                ..Default::default()
+            },
+            diagnostics: Vec::new(),
+        }],
+        diagnostics: Vec::new(),
+    }
 }
 
 fn patch_definition(id: &str) -> PatchDefinitionCurrent {
@@ -28,8 +149,11 @@ fn patch_definition(id: &str) -> PatchDefinitionCurrent {
             "nodes": [
                 {
                     "id": "patch_in",
-                    "kind": "object.core.inlet",
-                    "kindVersion": "0.1.0",
+                    "implementation": {
+                        "provider": { "kind": "core" },
+                        "objectId": "inlet",
+                        "version": "0.1.0"
+                    },
                     "params": { "portId": "value", "label": "Value" },
                     "ports": [
                         {
@@ -42,8 +166,11 @@ fn patch_definition(id: &str) -> PatchDefinitionCurrent {
                 },
                 {
                     "id": "patch_out",
-                    "kind": "object.core.outlet",
-                    "kindVersion": "0.1.0",
+                    "implementation": {
+                        "provider": { "kind": "core" },
+                        "objectId": "outlet",
+                        "version": "0.1.0"
+                    },
                     "params": { "portId": "result", "label": "Result" },
                     "ports": [
                         {
@@ -67,11 +194,7 @@ fn resolves_runtime_control_aliases_and_validates_args() {
     assert!(add.ok());
     assert_eq!(add.display_text, "+ 1e3");
     assert_eq!(add.class_symbol, "+");
-    assert_eq!(
-        add.resolved_kind.as_deref(),
-        Some("object.core.operator.add")
-    );
-    assert_eq!(add.resolved_kind_version.as_deref(), Some("0.1.0"));
+    assert_kind(&add, "object.core.operator.add");
     assert_eq!(add.params["right"], json!(1000.0));
     assert_eq!(add.instance_ports[0].id, "in");
 
@@ -121,20 +244,17 @@ fn resolves_runtime_control_aliases_and_validates_args() {
 fn resolves_runtime_value_audio_and_subpatch_aliases() {
     let float = resolve_object_spec_v01("f 0.25");
     assert!(float.ok());
-    assert_eq!(float.resolved_kind.as_deref(), Some("object.core.float"));
+    assert_kind(&float, "object.core.float");
     assert_eq!(float.params["value"], json!(0.25));
 
     let osc = resolve_object_spec_v01("osc~ 220");
     assert!(osc.ok());
-    assert_eq!(osc.resolved_kind.as_deref(), Some("object.core.audio.osc"));
+    assert_kind(&osc, "object.core.audio.osc");
     assert_eq!(osc.params["frequency"], json!(220.0));
 
     let mul = resolve_object_spec_v01("*~");
     assert!(mul.ok());
-    assert_eq!(
-        mul.resolved_kind.as_deref(),
-        Some("object.core.audio.operator.mul")
-    );
+    assert_kind(&mul, "object.core.audio.operator.mul");
     assert_eq!(mul.instance_ports.len(), 3);
 
     let scalar_mul = resolve_object_spec_v01("*~ 0.5");
@@ -196,10 +316,7 @@ fn resolves_runtime_value_audio_and_subpatch_aliases() {
 
     let subpatch = resolve_object_spec_v01("p voice");
     assert!(subpatch.ok());
-    assert_eq!(
-        subpatch.resolved_kind.as_deref(),
-        Some("object.core.subpatch")
-    );
+    assert_kind(&subpatch, "object.core.subpatch");
     assert_eq!(subpatch.params["patchRef"], json!("voice"));
 }
 
@@ -310,7 +427,7 @@ fn rejects_payload_identities_as_object_spec() {
         "control.float",
     ] {
         let resolution = resolve_object_spec_v01(input);
-        assert_eq!(resolution.resolved_kind, None);
+        assert_eq!(resolution.implementation, None);
         assert_eq!(
             resolution.diagnostics[0].code,
             "object-spec.payload-identity"
@@ -349,15 +466,15 @@ fn project_patch_registry_projects_catalog_and_resolution_edges() {
         .iter()
         .find(|entry| {
             matches!(
-                &entry.source,
-                NodeCatalogSourceV01::ProjectPatch { patch_id, .. }
+                &entry.provider,
+                ObjectProviderRefV01::ProjectPatch { patch_id, .. }
                     if patch_id == "my-patcher"
             )
         })
         .expect("project patch should appear in catalog");
 
     assert_eq!(project_entry.catalog_id, "project.my-patcher");
-    assert_eq!(project_entry.canonical_object_spec, "my-patcher");
+    assert_eq!(project_entry.primary_object_spec, "my-patcher");
     assert_eq!(project_entry.display.title, "Patch my-patcher");
     assert_eq!(
         project_patch_object_kind("my patch/1"),
@@ -398,10 +515,24 @@ fn project_patch_registry_projects_catalog_and_resolution_edges() {
             id: "project-patch:my-patcher".to_owned(),
             source: ObjectRegistrySource::ProjectPatch,
             aliases: vec!["my-patcher".to_owned()],
-            kind: project_patch_object_kind("my-patcher"),
-            kind_version: CURRENT_KIND_VERSION.to_owned(),
+            implementation: ObjectImplementationRefV01 {
+                provider: ObjectProviderRefV01::ProjectPatch {
+                    patch_id: "my-patcher".to_owned(),
+                    revision: Some("7".to_owned()),
+                    interface_revision: None,
+                    interface_digest: Some(skenion_contracts::compute_patch_interface_digest_v01(
+                        &patch,
+                    )),
+                },
+                object_id: "my-patcher".to_owned(),
+                version: Some(CURRENT_KIND_VERSION.to_owned()),
+                interface_digest: Some(skenion_contracts::compute_patch_interface_digest_v01(
+                    &patch,
+                )),
+            },
+            executable_kind: project_patch_object_kind("my-patcher"),
             display_name: "Patch my-patcher".to_owned(),
-            constructor: None,
+            core: None,
             catalog_category: None,
             project_patch: Some(ProjectPatchCandidate {
                 patch_id: "my-patcher".to_owned(),
@@ -410,6 +541,7 @@ fn project_patch_registry_projects_catalog_and_resolution_edges() {
                 interface_digest: skenion_contracts::compute_patch_interface_digest_v01(&patch),
                 ports: project_patch_ports(&patch),
             }),
+            package: None,
         },
     );
     assert_diagnostic(&mismatched, "object-spec.unresolved");
@@ -443,17 +575,13 @@ fn object_spec_parser_preserves_runtime_atom_boundaries() {
 #[test]
 fn reserved_providers_and_unconstructable_candidates_fail_closed() {
     let provider_registry = ObjectRegistry {
-        candidates: vec![ObjectRegistryCandidate {
-            id: "package:vendor.node".to_owned(),
-            source: ObjectRegistrySource::PackageProvider,
-            aliases: vec!["vendor.node".to_owned()],
-            kind: "object.vendor.node".to_owned(),
-            kind_version: CURRENT_KIND_VERSION.to_owned(),
-            display_name: "Vendor Node".to_owned(),
-            constructor: None,
-            catalog_category: None,
-            project_patch: None,
-        }],
+        candidates: vec![candidate(
+            "package:vendor.node",
+            ObjectRegistrySource::PackageProvider,
+            "vendor.node",
+            "object.vendor.node",
+            "Vendor Node",
+        )],
         allow_unchecked_project_patch_refs: false,
     };
     assert_diagnostic(
@@ -463,28 +591,20 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
 
     let ambiguous_registry = ObjectRegistry {
         candidates: vec![
-            ObjectRegistryCandidate {
-                id: "package:shared.node".to_owned(),
-                source: ObjectRegistrySource::PackageProvider,
-                aliases: vec!["shared.node".to_owned()],
-                kind: "object.vendor.shared".to_owned(),
-                kind_version: CURRENT_KIND_VERSION.to_owned(),
-                display_name: "Package Shared".to_owned(),
-                constructor: None,
-                catalog_category: None,
-                project_patch: None,
-            },
-            ObjectRegistryCandidate {
-                id: "native:shared.node".to_owned(),
-                source: ObjectRegistrySource::NativeProvider,
-                aliases: vec!["shared.node".to_owned()],
-                kind: "object.native.shared".to_owned(),
-                kind_version: CURRENT_KIND_VERSION.to_owned(),
-                display_name: "Native Shared".to_owned(),
-                constructor: None,
-                catalog_category: None,
-                project_patch: None,
-            },
+            candidate(
+                "package:shared.node",
+                ObjectRegistrySource::PackageProvider,
+                "shared.node",
+                "object.vendor.shared",
+                "Package Shared",
+            ),
+            candidate(
+                "native:shared.node",
+                ObjectRegistrySource::NativeProvider,
+                "shared.node",
+                "object.native.shared",
+                "Native Shared",
+            ),
         ],
         allow_unchecked_project_patch_refs: false,
     };
@@ -498,12 +618,13 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
             id: "project-patch:broken".to_owned(),
             source: ObjectRegistrySource::ProjectPatch,
             aliases: vec!["broken".to_owned()],
-            kind: project_patch_object_kind("broken"),
-            kind_version: CURRENT_KIND_VERSION.to_owned(),
+            implementation: test_implementation("broken"),
+            executable_kind: project_patch_object_kind("broken"),
             display_name: "Broken".to_owned(),
-            constructor: None,
+            core: None,
             catalog_category: None,
             project_patch: None,
+            package: None,
         }],
         allow_unchecked_project_patch_refs: false,
     };
@@ -517,12 +638,13 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
             id: "object.core.future".to_owned(),
             source: ObjectRegistrySource::FirstPartyCore,
             aliases: vec!["future".to_owned()],
-            kind: "object.core.future".to_owned(),
-            kind_version: CURRENT_KIND_VERSION.to_owned(),
+            implementation: test_implementation("future"),
+            executable_kind: "object.core.future".to_owned(),
             display_name: "Future".to_owned(),
-            constructor: None,
+            core: None,
             catalog_category: Some("Core"),
             project_patch: None,
+            package: None,
         }],
         allow_unchecked_project_patch_refs: false,
     };
@@ -530,6 +652,58 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
         &core_without_constructor.resolve("future"),
         "object-spec.unresolved",
     );
+}
+
+#[test]
+fn package_objects_project_to_catalog_and_resolve_from_installed_registry() {
+    let package_dir = temp_package_dir("catalog");
+    fs::create_dir_all(package_dir.join("nodes")).unwrap();
+    fs::write(
+        package_dir.join("nodes/thing.json"),
+        serde_json::to_vec(&package_definition_json("example.package.thing")).unwrap(),
+    )
+    .unwrap();
+    let packages = package_registry_with_object(package_dir, "example.package.thing", "thing");
+    let registry = ObjectRegistry::for_project_with_packages(None, Some(&packages));
+
+    let snapshot = registry.catalog_projection();
+    let entry = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.object_id == "example.package.thing")
+        .expect("package object should appear in node catalog");
+    assert_eq!(entry.primary_object_spec, "thing");
+    assert_eq!(
+        entry.aliases.as_deref(),
+        Some(&["thing.alias".to_owned()][..])
+    );
+    assert!(matches!(
+        &entry.provider,
+        ObjectProviderRefV01::Package {
+            package_id,
+            version,
+            ..
+        } if package_id == "example/package" && version.as_deref() == Some("0.56.0")
+    ));
+    assert_eq!(entry.definition.id, "example.package.thing");
+    assert_eq!(entry.definition.ports.len(), 2);
+
+    let resolved = registry.resolve("thing");
+    assert!(resolved.ok(), "{resolved:?}");
+    assert_eq!(
+        resolved.implementation.as_ref().map(|implementation| {
+            (
+                implementation.object_id.as_str(),
+                implementation.version.as_deref(),
+            )
+        }),
+        Some(("example.package.thing", Some("0.56.0")))
+    );
+    assert_eq!(
+        resolved.object_resolution.status,
+        ObjectResolutionStatusV01::Resolved
+    );
+    assert_eq!(resolved.instance_ports.len(), 2);
 }
 
 #[test]
@@ -544,14 +718,20 @@ fn object_spec_materialization_and_port_projection_cover_diagnostic_edges() {
             ObjectSpecAtom::Bool(true),
             ObjectSpecAtom::Symbol("arg".to_owned()),
         ],
-        resolved_kind: None,
-        resolved_kind_version: None,
+        implementation: None,
+        object_resolution: ObjectResolutionV01 {
+            status: ObjectResolutionStatusV01::Unresolved,
+            selected_spec: None,
+            candidates: Vec::new(),
+            diagnostics: Vec::new(),
+        },
         params: Map::new(),
         instance_ports: Vec::new(),
         candidates: vec![ObjectSpecCandidateSummary {
             id: "package:future".to_owned(),
             source: "package-provider".to_owned(),
-            kind: "object.future".to_owned(),
+            implementation: test_implementation("object.future"),
+            object_spec: Some("future".to_owned()),
             display_name: "Future".to_owned(),
         }],
         diagnostics: Vec::new(),
@@ -563,7 +743,11 @@ fn object_spec_materialization_and_port_projection_cover_diagnostic_edges() {
     assert!(materialize_error.message.contains("future"));
 
     let diagnostic_node = materialize_unresolved_object_spec_node_v01(&unresolved, "future_1");
-    assert_eq!(diagnostic_node.kind, "object.core.unresolved");
+    assert_eq!(diagnostic_node.implementation, None);
+    assert_eq!(
+        diagnostic_node.object_resolution.as_ref().unwrap().status,
+        ObjectResolutionStatusV01::Unresolved
+    );
     assert_eq!(diagnostic_node.params["candidateCount"], json!(1));
     assert_eq!(
         diagnostic_node.params["candidates"][0]["source"],

@@ -14,7 +14,7 @@ pub(super) fn resolve_audio_object(
     creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
 ) -> ObjectSpecResolution {
-    let kind = candidate.kind.as_str();
+    let kind = candidate.executable_kind.as_str();
     match kind {
         "object.core.audio.sig" => resolve_audio_number_param(
             input,
