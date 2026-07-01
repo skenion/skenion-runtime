@@ -22,15 +22,50 @@ pub fn convert_control_value_to_data_kind(
     data_kind: &str,
     representation: Option<&str>,
 ) -> Option<ControlValue> {
+    let requested_representation =
+        representation.or_else(|| default_representation_for_data_kind(data_kind));
     match data_kind {
-        "value.core.float32" => numeric_to_float(value, representation.unwrap_or("f32")),
-        "value.core.int32" => numeric_to_int(value, representation.unwrap_or("i32")),
-        "value.core.uint32" => numeric_to_uint(value, representation.unwrap_or("u32")),
+        "value.core.float8"
+        | "value.core.float16"
+        | "value.core.float32"
+        | "value.core.float64"
+        | "value.core.ufloat8"
+        | "value.core.ufloat16"
+        | "value.core.ufloat32"
+        | "value.core.ufloat64" => numeric_to_float(value, requested_representation?),
+        "value.core.int8" | "value.core.int16" | "value.core.int32" | "value.core.int64" => {
+            numeric_to_int(value, requested_representation?)
+        }
+        "value.core.uint8" | "value.core.uint16" | "value.core.uint32" | "value.core.uint64" => {
+            numeric_to_uint(value, requested_representation?)
+        }
         "value.core.bool" => match value {
             ControlValue::Bool { value } => Some(ControlValue::bool(*value)),
             _ => None,
         },
         "value.core.color" => color_to_color(value, representation.unwrap_or("rgba32f"), "linear"),
+        _ => None,
+    }
+}
+
+fn default_representation_for_data_kind(data_kind: &str) -> Option<&'static str> {
+    match data_kind {
+        "value.core.float8" => Some("f8.e4m3"),
+        "value.core.float16" => Some("f16"),
+        "value.core.float32" => Some("f32"),
+        "value.core.float64" => Some("f64"),
+        "value.core.ufloat8" => Some("ufloat8"),
+        "value.core.ufloat16" => Some("ufloat16"),
+        "value.core.ufloat32" => Some("ufloat32"),
+        "value.core.ufloat64" => Some("ufloat64"),
+        "value.core.int8" => Some("i8"),
+        "value.core.int16" => Some("i16"),
+        "value.core.int32" => Some("i32"),
+        "value.core.int64" => Some("i64"),
+        "value.core.uint8" => Some("u8"),
+        "value.core.uint16" => Some("u16"),
+        "value.core.uint32" => Some("u32"),
+        "value.core.uint64" => Some("u64"),
         _ => None,
     }
 }
@@ -95,7 +130,8 @@ fn quantize_float(value: f64, representation: &str) -> f64 {
         "f64" => value,
         "f32" | "f16" => value as f32 as f64,
         "f8.e4m3" | "f8.e5m2" => (value * 16.0).round() / 16.0,
-        "ufloat16" => value.max(0.0) as f32 as f64,
+        "ufloat64" => value.max(0.0),
+        "ufloat32" | "ufloat16" => value.max(0.0) as f32 as f64,
         "ufloat8" => (value.max(0.0) * 16.0).round() / 16.0,
         _ => value,
     }

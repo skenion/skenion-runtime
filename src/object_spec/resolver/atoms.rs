@@ -38,14 +38,6 @@ pub(super) fn integer_value(atom: &ObjectSpecAtom) -> Option<i64> {
     }
 }
 
-pub(super) fn unsigned_value(atom: &ObjectSpecAtom) -> Option<u64> {
-    match atom {
-        ObjectSpecAtom::Int(value) if *value >= 0 => Some(*value as u64),
-        ObjectSpecAtom::Float(_) | ObjectSpecAtom::Bool(_) | ObjectSpecAtom::Symbol(_) => None,
-        ObjectSpecAtom::Int(_) => None,
-    }
-}
-
 pub(super) fn symbol_value(atom: &ObjectSpecAtom) -> Option<String> {
     match atom {
         ObjectSpecAtom::Symbol(value) if !value.is_empty() => Some(value.clone()),

@@ -128,13 +128,7 @@ pub(super) fn stored_value_ports(port_type: &str) -> Vec<ObjectSpecPort> {
         message_input_port(
             "in",
             ObjectSpecPortActivation::Trigger,
-            &[
-                "value.core.float32",
-                "value.core.int32",
-                "value.core.uint32",
-                "value.core.bool",
-                "value.core.bang",
-            ],
+            numeric_message_value_types(),
             numeric_message_input_policy(),
         ),
         input_port(
@@ -144,6 +138,53 @@ pub(super) fn stored_value_ports(port_type: &str) -> Vec<ObjectSpecPort> {
             ObjectSpecPortActivation::Latched,
         ),
         output_port("value", port_type, ObjectSpecPortRate::Control),
+    ]
+}
+
+pub(super) fn numeric_message_value_types() -> &'static [&'static str] {
+    &[
+        "value.core.float8",
+        "value.core.float16",
+        "value.core.float32",
+        "value.core.float64",
+        "value.core.ufloat8",
+        "value.core.ufloat16",
+        "value.core.ufloat32",
+        "value.core.ufloat64",
+        "value.core.int8",
+        "value.core.int16",
+        "value.core.int32",
+        "value.core.int64",
+        "value.core.uint8",
+        "value.core.uint16",
+        "value.core.uint32",
+        "value.core.uint64",
+        "value.core.bool",
+        "value.core.bang",
+    ]
+}
+
+fn control_message_value_types() -> &'static [&'static str] {
+    &[
+        "value.core.float8",
+        "value.core.float16",
+        "value.core.float32",
+        "value.core.float64",
+        "value.core.ufloat8",
+        "value.core.ufloat16",
+        "value.core.ufloat32",
+        "value.core.ufloat64",
+        "value.core.int8",
+        "value.core.int16",
+        "value.core.int32",
+        "value.core.int64",
+        "value.core.uint8",
+        "value.core.uint16",
+        "value.core.uint32",
+        "value.core.uint64",
+        "value.core.bool",
+        "value.core.bang",
+        "value.core.message",
     ]
 }
 
@@ -194,14 +235,7 @@ pub(super) fn message_ports() -> Vec<ObjectSpecPort> {
         message_input_port(
             "in",
             ObjectSpecPortActivation::Trigger,
-            &[
-                "value.core.float32",
-                "value.core.int32",
-                "value.core.uint32",
-                "value.core.bool",
-                "value.core.bang",
-                "value.core.message",
-            ],
+            control_message_value_types(),
             stored_message_input_policy(),
         ),
         output_port("out", "value.core.message", ObjectSpecPortRate::Control),
@@ -212,13 +246,7 @@ pub(super) fn comment_ports() -> Vec<ObjectSpecPort> {
     vec![message_input_port(
         "in",
         ObjectSpecPortActivation::Trigger,
-        &[
-            "value.core.float32",
-            "value.core.int32",
-            "value.core.uint32",
-            "value.core.bool",
-            "value.core.message",
-        ],
+        control_message_value_types(),
         comment_message_input_policy(),
     )]
 }

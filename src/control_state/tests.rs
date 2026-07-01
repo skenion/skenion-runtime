@@ -168,7 +168,7 @@ fn numeric_controls_accept_bool_payloads_as_zero_or_one() {
     let graph = graph(vec![
         value_node("float_1", FLOAT_KIND, json!(0.5)),
         value_node("int_1", INT_KIND, json!(3)),
-        value_node("uint_1", UINT_KIND, json!(4)),
+        value_node_with_representation("uint_1", INT_KIND, json!(4), "u32"),
     ]);
     let mut state = ControlState::from_graph(&graph);
 
@@ -721,7 +721,8 @@ fn receive_name_dispatch_uses_numeric_conversion_policy() {
     int_receiver
         .params
         .insert("receiveName".to_owned(), json!("number"));
-    let mut uint_receiver = value_node("uint_receiver", UINT_KIND, json!(0));
+    let mut uint_receiver =
+        value_node_with_representation("uint_receiver", INT_KIND, json!(0), "u32");
     uint_receiver
         .params
         .insert("receiveName".to_owned(), json!("number"));
@@ -1038,11 +1039,11 @@ fn object_channel_helpers_skip_missing_sources_empty_names_and_mismatched_receiv
         "value.core.bool"
     ));
     assert!(object_accepts_data_kind(
-        &value_node("u32_1", UINT_KIND, json!(0)),
+        &value_node_with_representation("u32_1", INT_KIND, json!(0), "u32"),
         "value.core.bool"
     ));
     assert!(object_accepts_data_kind(
-        &value_node("u32_1", UINT_KIND, json!(0)),
+        &value_node_with_representation("u32_1", INT_KIND, json!(0), "u32"),
         "value.core.uint32"
     ));
     assert!(object_accepts_data_kind(
@@ -1817,7 +1818,6 @@ fn value_node(id: &str, kind: &str, value: serde_json::Value) -> GraphNode {
     let ports = match kind {
         FLOAT_KIND => stored_value_ports("value.core.float32"),
         INT_KIND => stored_value_ports("value.core.int32"),
-        UINT_KIND => stored_value_ports("value.core.uint32"),
         COLOR_KIND => stored_value_ports("color"),
         MESSAGE_KIND => message_ports(),
         _ => Vec::new(),
@@ -1832,6 +1832,21 @@ fn value_node(id: &str, kind: &str, value: serde_json::Value) -> GraphNode {
         params,
         ports,
     }
+}
+
+fn value_node_with_representation(
+    id: &str,
+    kind: &str,
+    value: serde_json::Value,
+    representation: &str,
+) -> GraphNode {
+    let mut node = value_node(id, kind, value);
+    node.params
+        .insert("representation".to_owned(), json!(representation));
+    if kind == INT_KIND && representation.starts_with('u') {
+        node.ports = stored_value_ports("value.core.uint32");
+    }
+    node
 }
 
 fn operator_node(id: &str, kind: &str, right: Option<f64>) -> GraphNode {

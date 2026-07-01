@@ -5,7 +5,6 @@ use crate::GraphNode;
 
 pub const FLOAT_KIND: &str = "object.core.float";
 pub const INT_KIND: &str = "object.core.int";
-pub const UINT_KIND: &str = "object.core.uint";
 pub const COLOR_KIND: &str = "object.core.color";
 pub const BANG_KIND: &str = "object.core.bang";
 pub const MESSAGE_KIND: &str = "object.core.message";
@@ -102,14 +101,20 @@ impl ControlValue {
                 representation: read_representation_param(node, DEFAULT_FLOAT_REPRESENTATION),
                 value: read_f64_param(node).unwrap_or(0.0),
             }),
-            INT_KIND => Some(Self::Int {
-                representation: read_representation_param(node, DEFAULT_INT_REPRESENTATION),
-                value: read_i64_param(node).unwrap_or(0),
-            }),
-            UINT_KIND => Some(Self::Uint {
-                representation: read_representation_param(node, DEFAULT_UINT_REPRESENTATION),
-                value: read_u64_param(node).unwrap_or(0),
-            }),
+            INT_KIND => {
+                let representation = read_representation_param(node, DEFAULT_INT_REPRESENTATION);
+                if is_unsigned_int_representation(&representation) {
+                    Some(Self::Uint {
+                        representation,
+                        value: read_u64_param(node).unwrap_or(0),
+                    })
+                } else {
+                    Some(Self::Int {
+                        representation,
+                        value: read_i64_param(node).unwrap_or(0),
+                    })
+                }
+            }
             COLOR_KIND => Some(Self::Color {
                 representation: read_representation_param(node, DEFAULT_COLOR_REPRESENTATION),
                 color_space: read_color_space_param(node),
@@ -139,10 +144,29 @@ impl ControlValue {
     pub fn kind_label(&self) -> String {
         match self {
             Self::Float { representation, .. } => {
-                format!("value.core.float32/{representation}")
+                format!(
+                    "{}/{}",
+                    value_type_id_for_float_representation(representation)
+                        .unwrap_or("value.core.float32"),
+                    representation
+                )
             }
-            Self::Int { representation, .. } => format!("value.core.int32/{representation}"),
-            Self::Uint { representation, .. } => format!("value.core.uint32/{representation}"),
+            Self::Int { representation, .. } => {
+                format!(
+                    "{}/{}",
+                    value_type_id_for_int_representation(representation)
+                        .unwrap_or("value.core.int32"),
+                    representation
+                )
+            }
+            Self::Uint { representation, .. } => {
+                format!(
+                    "{}/{}",
+                    value_type_id_for_int_representation(representation)
+                        .unwrap_or("value.core.uint32"),
+                    representation
+                )
+            }
             Self::Bool { .. } => "value.core.bool".to_owned(),
             Self::String { .. } => "value.core.string".to_owned(),
             Self::Color { representation, .. } => format!("value.core.color/{representation}"),
@@ -199,6 +223,38 @@ impl ControlValue {
             _ => None,
         }
     }
+}
+
+pub(crate) fn value_type_id_for_float_representation(representation: &str) -> Option<&'static str> {
+    match representation {
+        "f64" => Some("value.core.float64"),
+        "f32" => Some("value.core.float32"),
+        "f16" => Some("value.core.float16"),
+        "f8.e4m3" | "f8.e5m2" => Some("value.core.float8"),
+        "ufloat64" => Some("value.core.ufloat64"),
+        "ufloat32" => Some("value.core.ufloat32"),
+        "ufloat16" => Some("value.core.ufloat16"),
+        "ufloat8" => Some("value.core.ufloat8"),
+        _ => None,
+    }
+}
+
+pub(crate) fn value_type_id_for_int_representation(representation: &str) -> Option<&'static str> {
+    match representation {
+        "i64" => Some("value.core.int64"),
+        "i32" => Some("value.core.int32"),
+        "i16" => Some("value.core.int16"),
+        "i8" => Some("value.core.int8"),
+        "u64" => Some("value.core.uint64"),
+        "u32" => Some("value.core.uint32"),
+        "u16" => Some("value.core.uint16"),
+        "u8" => Some("value.core.uint8"),
+        _ => None,
+    }
+}
+
+pub(crate) fn is_unsigned_int_representation(representation: &str) -> bool {
+    matches!(representation, "u64" | "u32" | "u16" | "u8")
 }
 
 impl ControlMessage {
@@ -479,7 +535,7 @@ fn sanitize_f64(value: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Map, json};
+    use serde_json::{Map, Value, json};
 
     use super::*;
 
@@ -708,7 +764,7 @@ mod tests {
             Some(ControlValue::int(7))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(UINT_KIND, json!(7))),
+            ControlValue::for_node_default(&node_with_representation(INT_KIND, json!(7), "u32")),
             Some(ControlValue::uint(7))
         );
         assert_eq!(
@@ -748,7 +804,7 @@ mod tests {
             Some(ControlValue::int(0))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(UINT_KIND, json!(-1))),
+            ControlValue::for_node_default(&node_with_representation(INT_KIND, json!(-1), "u32")),
             Some(ControlValue::uint(0))
         );
         assert_eq!(
@@ -826,6 +882,21 @@ mod tests {
     fn node(kind: &str, value: serde_json::Value) -> GraphNode {
         let mut params = Map::new();
         params.insert("value".to_owned(), value);
+        node_with_params(kind, params)
+    }
+
+    fn node_with_representation(
+        kind: &str,
+        value: serde_json::Value,
+        representation: &str,
+    ) -> GraphNode {
+        let mut params = Map::new();
+        params.insert("value".to_owned(), value);
+        params.insert("representation".to_owned(), json!(representation));
+        node_with_params(kind, params)
+    }
+
+    fn node_with_params(kind: &str, params: Map<String, Value>) -> GraphNode {
         GraphNode {
             id: "value_1".to_owned(),
             kind: kind.to_owned(),

@@ -2,7 +2,7 @@ use serde_json::{Map, Value, json};
 use skenion_contracts::MessageKeyPolicyV01;
 
 use super::ObjectSpecCandidateSummary;
-use super::ports::message_key_policy;
+use super::ports::{message_key_policy, numeric_message_value_types};
 use super::{
     CURRENT_KIND_VERSION, ObjectSpecIssue, ObjectSpecPort, ObjectSpecPortActivation,
     ObjectSpecPortDirection, ObjectSpecPortRate, ObjectSpecResolution,
@@ -194,17 +194,12 @@ fn message_input_accepts(port: &ObjectSpecPort) -> Option<Vec<String>> {
         && port.port_type == "value.core.message"
     {
         return Some(
-            [
-                "value.core.float32",
-                "value.core.int32",
-                "value.core.uint32",
-                "value.core.bool",
-                "value.core.bang",
-                "value.core.message",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
+            numeric_message_value_types()
+                .iter()
+                .copied()
+                .chain(std::iter::once("value.core.message"))
+                .map(str::to_owned)
+                .collect(),
         );
     }
     None

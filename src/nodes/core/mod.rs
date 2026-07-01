@@ -20,7 +20,6 @@ static FIRST_PARTY_CORE_NODES: &[&dyn CoreNodeImplementation] = &[
     &control::SQUARE_ROOT,
     &control::FLOAT,
     &control::INTEGER,
-    &control::UNSIGNED_INTEGER,
     &control::BANG,
     &control::MESSAGE,
     &control::COMMENT,

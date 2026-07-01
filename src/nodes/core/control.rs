@@ -90,15 +90,6 @@ pub(super) static INTEGER: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "Core",
 );
 
-pub(super) static UNSIGNED_INTEGER: CoreNodeDescriptor = CoreNodeDescriptor::new(
-    "object.core.uint",
-    "uint",
-    "Unsigned Integer",
-    &["uint", "unsigned", "u", "object.core.uint"],
-    crate::object_spec::resolve_core_control_value,
-    "Core",
-);
-
 pub(super) static BANG: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.bang",
     "bang",

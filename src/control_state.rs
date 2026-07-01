@@ -8,7 +8,8 @@ use crate::{
     control_value::{
         BANG_KIND, COLOR_KIND, COMMENT_KIND, FLOAT_KIND, INT_KIND, MESSAGE_KIND, OPERATOR_ADD_KIND,
         OPERATOR_DIV_KIND, OPERATOR_MAX_KIND, OPERATOR_MIN_KIND, OPERATOR_MUL_KIND,
-        OPERATOR_POW_KIND, OPERATOR_SQRT_KIND, OPERATOR_SUB_KIND, PANEL_KIND, UINT_KIND,
+        OPERATOR_POW_KIND, OPERATOR_SQRT_KIND, OPERATOR_SUB_KIND, PANEL_KIND,
+        value_type_id_for_float_representation, value_type_id_for_int_representation,
     },
     convert_control_value_to_stored,
 };
@@ -520,7 +521,7 @@ impl RuntimeControlEventResponse {
 pub fn is_control_value_kind(kind: &str) -> bool {
     matches!(
         kind,
-        FLOAT_KIND | INT_KIND | UINT_KIND | COLOR_KIND | MESSAGE_KIND | COMMENT_KIND | PANEL_KIND
+        FLOAT_KIND | INT_KIND | COLOR_KIND | MESSAGE_KIND | COMMENT_KIND | PANEL_KIND
     )
 }
 
@@ -607,9 +608,15 @@ fn data_kind_for_control_message(message: &ControlMessage) -> &'static str {
 
 fn port_type_for_control_value(value: &ControlValue) -> &'static str {
     match value {
-        ControlValue::Float { .. } => "value.core.float32",
-        ControlValue::Int { .. } => "value.core.int32",
-        ControlValue::Uint { .. } => "value.core.uint32",
+        ControlValue::Float { representation, .. } => {
+            value_type_id_for_float_representation(representation).unwrap_or("value.core.float32")
+        }
+        ControlValue::Int { representation, .. } => {
+            value_type_id_for_int_representation(representation).unwrap_or("value.core.int32")
+        }
+        ControlValue::Uint { representation, .. } => {
+            value_type_id_for_int_representation(representation).unwrap_or("value.core.uint32")
+        }
         ControlValue::Bool { .. } => "value.core.bool",
         ControlValue::String { .. } => "value.core.string",
         ControlValue::Color { .. } => "value.core.color",
@@ -618,7 +625,7 @@ fn port_type_for_control_value(value: &ControlValue) -> &'static str {
 
 fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
     match node.kind.as_str() {
-        FLOAT_KIND | INT_KIND | UINT_KIND => is_numeric_data_kind(data_kind),
+        FLOAT_KIND | INT_KIND => is_numeric_data_kind(data_kind),
         kind if is_control_operator_kind(kind) => is_numeric_data_kind(data_kind),
         COLOR_KIND => data_kind == "value.core.color",
         COMMENT_KIND | PANEL_KIND => {
@@ -632,9 +639,22 @@ fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
 fn is_control_message_data_kind(data_kind: &'static str) -> bool {
     matches!(
         data_kind,
-        "value.core.float32"
+        "value.core.float8"
+            | "value.core.float16"
+            | "value.core.float32"
+            | "value.core.float64"
+            | "value.core.ufloat8"
+            | "value.core.ufloat16"
+            | "value.core.ufloat32"
+            | "value.core.ufloat64"
+            | "value.core.int8"
+            | "value.core.int16"
             | "value.core.int32"
+            | "value.core.int64"
+            | "value.core.uint8"
+            | "value.core.uint16"
             | "value.core.uint32"
+            | "value.core.uint64"
             | "value.core.bool"
             | "value.core.color"
             | "value.core.string"
@@ -646,7 +666,23 @@ fn is_control_message_data_kind(data_kind: &'static str) -> bool {
 fn is_numeric_data_kind(data_kind: &'static str) -> bool {
     matches!(
         data_kind,
-        "value.core.float32" | "value.core.int32" | "value.core.uint32" | "value.core.bool"
+        "value.core.float8"
+            | "value.core.float16"
+            | "value.core.float32"
+            | "value.core.float64"
+            | "value.core.ufloat8"
+            | "value.core.ufloat16"
+            | "value.core.ufloat32"
+            | "value.core.ufloat64"
+            | "value.core.int8"
+            | "value.core.int16"
+            | "value.core.int32"
+            | "value.core.int64"
+            | "value.core.uint8"
+            | "value.core.uint16"
+            | "value.core.uint32"
+            | "value.core.uint64"
+            | "value.core.bool"
     )
 }
 

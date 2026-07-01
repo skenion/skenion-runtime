@@ -319,14 +319,49 @@ fn resolves_runtime_value_audio_and_subpatch_aliases() {
 
 #[test]
 fn resolves_runtime_value_boxes_and_boundary_aliases() {
-    for (input, kind, value) in [
-        ("float", "object.core.float", json!(0)),
-        ("int -7", "object.core.int", json!(-7)),
-        ("uint 9", "object.core.uint", json!(9)),
+    for (input, kind, representation, value, port_type) in [
+        (
+            "float",
+            "object.core.float",
+            "f32",
+            json!(0.0),
+            "value.core.float32",
+        ),
+        (
+            "float ufloat16 1.5",
+            "object.core.float",
+            "ufloat16",
+            json!(1.5),
+            "value.core.ufloat16",
+        ),
+        (
+            "int -7",
+            "object.core.int",
+            "i32",
+            json!(-7),
+            "value.core.int32",
+        ),
+        (
+            "int u32 9",
+            "object.core.int",
+            "u32",
+            json!(9),
+            "value.core.uint32",
+        ),
+        (
+            "int u8 255",
+            "object.core.int",
+            "u8",
+            json!(255),
+            "value.core.uint8",
+        ),
     ] {
         let resolution = resolve_object_spec_v01(input);
         assert_kind(&resolution, kind);
+        assert_eq!(resolution.params["representation"], json!(representation));
         assert_eq!(resolution.params["value"], value);
+        assert_eq!(resolution.instance_ports[1].port_type, port_type);
+        assert_eq!(resolution.instance_ports[2].port_type, port_type);
         assert_eq!(resolution.instance_ports.len(), 3);
     }
 
@@ -335,13 +370,14 @@ fn resolves_runtime_value_boxes_and_boundary_aliases() {
         "object-spec.invalid-arg-type",
     );
     assert_issue(
-        &resolve_object_spec_v01("uint -1"),
+        &resolve_object_spec_v01("int u8 -1"),
         "object-spec.invalid-arg-type",
     );
     assert_issue(
         &resolve_object_spec_v01("float 1 2"),
-        "object-spec.invalid-arg-count",
+        "object-spec.invalid-arg-type",
     );
+    assert_issue(&resolve_object_spec_v01("uint 9"), "object-spec.unresolved");
 
     let bang = resolve_object_spec_v01("bang");
     assert_kind(&bang, "object.core.bang");
@@ -413,7 +449,6 @@ fn core_catalog_uses_readable_primary_object_specs() {
         ("message", "message"),
         ("float", "float"),
         ("int", "int"),
-        ("uint", "uint"),
     ] {
         let entry = snapshot
             .entries
@@ -422,6 +457,12 @@ fn core_catalog_uses_readable_primary_object_specs() {
             .expect("core object should appear in catalog");
         assert_eq!(entry.primary_object_spec, primary_object_spec);
     }
+    assert!(
+        snapshot
+            .entries
+            .iter()
+            .all(|entry| entry.object_id != "uint")
+    );
 }
 
 #[test]
@@ -581,7 +622,7 @@ fn object_spec_parser_preserves_runtime_atom_boundaries() {
         "object-spec.invalid-arg-type",
     );
     assert_issue(
-        &resolve_object_spec_v01("uint false"),
+        &resolve_object_spec_v01("int u8 false"),
         "object-spec.invalid-arg-type",
     );
 }

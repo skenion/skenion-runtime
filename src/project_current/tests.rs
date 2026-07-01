@@ -1181,7 +1181,6 @@ fn accepts_behavior_object_identities_that_still_exist() {
     let behavior_ids = [
         "object.core.float",
         "object.core.int",
-        "object.core.uint",
         "object.core.bang",
         "object.core.message",
     ];

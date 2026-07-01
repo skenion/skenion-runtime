@@ -1683,9 +1683,10 @@ mod tests {
     fn u32_node_with_value(id: &str, value: u64) -> GraphNode {
         let mut params = serde_json::Map::new();
         params.insert("value".to_owned(), json!(value));
+        params.insert("representation".to_owned(), json!("u32"));
         GraphNode {
             id: id.to_owned(),
-            kind: "object.core.uint".to_owned(),
+            kind: "object.core.int".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
