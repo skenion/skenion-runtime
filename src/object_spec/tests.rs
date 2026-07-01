@@ -405,6 +405,26 @@ fn resolves_runtime_value_boxes_and_boundary_aliases() {
 }
 
 #[test]
+fn core_catalog_uses_readable_primary_object_specs() {
+    let snapshot = ObjectRegistry::first_party_core().catalog_projection();
+
+    for (object_id, primary_object_spec) in [
+        ("bang", "bang"),
+        ("message", "message"),
+        ("float", "float"),
+        ("int", "int"),
+        ("uint", "uint"),
+    ] {
+        let entry = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.object_id == object_id)
+            .expect("core object should appear in catalog");
+        assert_eq!(entry.primary_object_spec, primary_object_spec);
+    }
+}
+
+#[test]
 fn rejects_payload_identities_as_object_spec() {
     for input in [
         "value",

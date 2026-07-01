@@ -76,7 +76,7 @@ pub(super) static FLOAT: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.float",
     "float",
     "Float",
-    &["f", "float", "number", "object.core.float"],
+    &["float", "f", "number", "object.core.float"],
     crate::object_spec::resolve_core_control_value,
     "Core",
 );
@@ -85,7 +85,7 @@ pub(super) static INTEGER: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.int",
     "int",
     "Integer",
-    &["i", "int", "object.core.int"],
+    &["int", "integer", "i", "object.core.int"],
     crate::object_spec::resolve_core_control_value,
     "Core",
 );
@@ -94,7 +94,7 @@ pub(super) static UNSIGNED_INTEGER: CoreNodeDescriptor = CoreNodeDescriptor::new
     "object.core.uint",
     "uint",
     "Unsigned Integer",
-    &["u", "uint", "object.core.uint"],
+    &["uint", "unsigned", "u", "object.core.uint"],
     crate::object_spec::resolve_core_control_value,
     "Core",
 );
@@ -103,7 +103,7 @@ pub(super) static BANG: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.bang",
     "bang",
     "Bang",
-    &["b", "bang", "object.core.bang"],
+    &["bang", "b", "object.core.bang"],
     crate::object_spec::resolve_core_control_value,
     "Core",
 );
@@ -112,7 +112,7 @@ pub(super) static MESSAGE: CoreNodeDescriptor = CoreNodeDescriptor::new(
     "object.core.message",
     "message",
     "Message",
-    &["msg", "message", "object.core.message"],
+    &["message", "msg", "object.core.message"],
     crate::object_spec::resolve_core_control_value,
     "Core",
 );
