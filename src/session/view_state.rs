@@ -101,8 +101,33 @@ pub(super) fn unsupported_patch_view_change_issue(target: &GraphTargetRef) -> Ru
     )
 }
 
+#[cfg(test)]
 pub(super) fn apply_view_patch_to_view_state(
     graph: &GraphDocument,
+    view_state: ViewState,
+    patch: &RuntimeViewPatch,
+) -> Result<(ViewState, RuntimeViewPatch), Vec<RuntimeIssue>> {
+    apply_view_patch_to_view_state_with_node_lookup(
+        |node_id| graph.nodes.iter().any(|node| node.id == node_id),
+        view_state,
+        patch,
+    )
+}
+
+pub(super) fn apply_view_patch_to_view_state_current(
+    graph: &GraphDocumentCurrent,
+    view_state: ViewState,
+    patch: &RuntimeViewPatch,
+) -> Result<(ViewState, RuntimeViewPatch), Vec<RuntimeIssue>> {
+    apply_view_patch_to_view_state_with_node_lookup(
+        |node_id| graph.nodes.iter().any(|node| node.id == node_id),
+        view_state,
+        patch,
+    )
+}
+
+fn apply_view_patch_to_view_state_with_node_lookup(
+    has_node_id: impl Fn(&str) -> bool,
     mut view_state: ViewState,
     patch: &RuntimeViewPatch,
 ) -> Result<(ViewState, RuntimeViewPatch), Vec<RuntimeIssue>> {
@@ -110,7 +135,7 @@ pub(super) fn apply_view_patch_to_view_state(
     for op in &patch.ops {
         match op {
             RuntimeViewPatchOperation::SetNodeView { node_id, view } => {
-                if !graph.nodes.iter().any(|node| node.id == *node_id) {
+                if !has_node_id(node_id) {
                     return Err(vec![RuntimeIssue::error(format!(
                         "view patch node {node_id} does not exist"
                     ))]);
@@ -133,7 +158,7 @@ pub(super) fn apply_view_patch_to_view_state(
                 );
             }
             RuntimeViewPatchOperation::MoveNodeView { node_id, from, to } => {
-                if !graph.nodes.iter().any(|node| node.id == *node_id) {
+                if !has_node_id(node_id) {
                     return Err(vec![RuntimeIssue::error(format!(
                         "view patch node {node_id} does not exist"
                     ))]);

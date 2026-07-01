@@ -216,13 +216,12 @@ pub(super) fn paste_graph_fragment_into_project_current(
         &target_path,
         PatchPath::Root | PatchPath::HelpWorkingCopy { .. }
     ) {
-        let execution_graph = lower_graph_for_execution(&next_graph);
         let view_patch = lower_fragment_view_patch(view_revision, request, &id_remap.node_id_map);
         let view_state = if let Some(view_patch) = view_patch {
-            let (view_state, _) = apply_view_patch_to_view_state(
-                &execution_graph,
-                reconcile_view_state_with_execution_graph(
-                    &execution_graph,
+            let (view_state, _) = apply_view_patch_to_view_state_current(
+                &next_graph,
+                reconcile_view_state_with_graph_current(
+                    &next_graph,
                     Some(project.view_state.clone()),
                 ),
                 &view_patch,
@@ -231,10 +230,7 @@ pub(super) fn paste_graph_fragment_into_project_current(
             next_view_revision += 1;
             view_state
         } else {
-            reconcile_view_state_with_execution_graph(
-                &execution_graph,
-                Some(project.view_state.clone()),
-            )
+            reconcile_view_state_with_graph_current(&next_graph, Some(project.view_state.clone()))
         };
         project.graph = next_graph;
         project.revision = project.graph.revision.clone();

@@ -75,8 +75,10 @@ pub use types::{
     RuntimePatchResponse, RuntimeSessionResponse, RuntimeSessionSnapshot, RuntimeViewPatch,
     RuntimeViewPatchOperation, SessionRunRequest,
 };
+#[cfg(test)]
+use view_state::apply_view_patch_to_view_state;
 use view_state::{
-    apply_view_patch_to_view_state, reconcile_view_state_with_execution_graph,
+    apply_view_patch_to_view_state_current, reconcile_view_state_with_execution_graph,
     reconcile_view_state_with_graph_current, runtime_owned_view_state, target_supports_view_state,
     unsupported_patch_view_change_issue,
 };
@@ -434,8 +436,12 @@ impl RuntimeSession {
         kind: RuntimeHistoryEntryKind,
         subject_event_id: Option<String>,
     ) -> RuntimePatchResponse {
-        let (graph, registry) = match (self.graph.clone(), self.registry.clone()) {
-            (Some(graph), Some(registry)) => (graph, registry),
+        let (graph, registry, current_graph) = match (
+            self.graph.clone(),
+            self.registry.clone(),
+            self.project.as_ref().map(|project| project.graph.clone()),
+        ) {
+            (Some(graph), Some(registry), Some(current_graph)) => (graph, registry, current_graph),
             _ => {
                 return self.patch_response(
                     false,
@@ -471,6 +477,7 @@ impl RuntimeSession {
         }
 
         let next_graph = graph.clone();
+        let next_current_graph = current_graph.clone();
 
         if let Some(view_patch) = &mutation.view_patch
             && view_patch.base_view_revision != self.view_revision
@@ -487,23 +494,26 @@ impl RuntimeSession {
         }
 
         let previous_view_state = runtime_owned_view_state(
-            reconcile_view_state_with_execution_graph(&graph, self.view_state.clone()),
+            reconcile_view_state_with_graph_current(&current_graph, self.view_state.clone()),
         );
-        let mut next_view_state = reconcile_view_state_with_execution_graph(
-            &next_graph,
+        let mut next_view_state = reconcile_view_state_with_graph_current(
+            &next_current_graph,
             Some(previous_view_state.clone()),
         );
         let view_patch = mutation
             .view_patch
             .as_ref()
             .expect("view patch should exist after no-op and active v0.1 graph patch rejection");
-        let (patched_view_state, inverse_patch) =
-            match apply_view_patch_to_view_state(&next_graph, next_view_state, view_patch) {
-                Ok(result) => result,
-                Err(issues) => {
-                    return self.patch_response(false, false, false, issues);
-                }
-            };
+        let (patched_view_state, inverse_patch) = match apply_view_patch_to_view_state_current(
+            &next_current_graph,
+            next_view_state,
+            view_patch,
+        ) {
+            Ok(result) => result,
+            Err(issues) => {
+                return self.patch_response(false, false, false, issues);
+            }
+        };
         next_view_state = patched_view_state;
         let inverse_view_patch = Some(inverse_patch);
         next_view_state = runtime_owned_view_state(next_view_state);
@@ -1000,11 +1010,10 @@ fn apply_graph_to_project_current(
 ) -> u64 {
     let mut next_view_revision = view_revision;
     if matches!(path, PatchPath::Root | PatchPath::HelpWorkingCopy { .. }) {
-        let execution_graph = lower_graph_for_execution(&graph);
         project.graph = graph;
         project.revision = project.graph.revision.clone();
-        project.view_state = runtime_owned_view_state(reconcile_view_state_with_execution_graph(
-            &execution_graph,
+        project.view_state = runtime_owned_view_state(reconcile_view_state_with_graph_current(
+            &project.graph,
             Some(view_state),
         ));
         if view_changed {

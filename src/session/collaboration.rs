@@ -241,11 +241,10 @@ pub(super) fn apply_collaboration_changes_to_project_current(
         &target.path,
         PatchPath::Root | PatchPath::HelpWorkingCopy { .. }
     ) {
-        let execution_graph = lower_graph_for_execution(&graph);
         project.graph = graph;
         project.revision = project.graph.revision.clone();
-        project.view_state = runtime_owned_view_state(reconcile_view_state_with_execution_graph(
-            &execution_graph,
+        project.view_state = runtime_owned_view_state(reconcile_view_state_with_graph_current(
+            &project.graph,
             Some(view_state),
         ));
         if view_changed {

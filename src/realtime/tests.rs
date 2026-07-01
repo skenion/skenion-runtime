@@ -864,25 +864,60 @@ fn object_command_helpers_validate_required_fields_and_targets() {
         .expect("empty object create should include node result");
     assert_eq!(node_result["objectSpec"], Value::Null);
     assert_eq!(node_result["objectResolution"]["status"], "unresolved");
+    let after_create_revision = {
+        let project = object_session
+            .project_document_current()
+            .expect("empty object create should keep project loaded");
+        let created = project
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "object")
+            .expect("empty object create should append generated Object node");
+        assert!(created.object_spec.is_none());
+        assert!(created.implementation.is_none());
+        assert!(matches!(
+            created
+                .object_resolution
+                .as_ref()
+                .expect("empty object node should carry unresolved status")
+                .status,
+            crate::ObjectResolutionStatusCurrent::Unresolved
+        ));
+        let created_view = project
+            .view_state
+            .canvas
+            .nodes
+            .get("object")
+            .expect("empty object create should persist requested view");
+        assert_eq!(created_view.x, 128.0);
+        assert_eq!(created_view.y, 96.0);
+        project.graph.revision.clone()
+    };
+    let replace_empty_object = apply_object_replace_graph_command(
+        &mut object_session,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "node.replace",
+            "target": root_target(&after_create_revision),
+            "nodeId": "object",
+            "objectSpec": "+ 1"
+        })),
+    );
+    assert!(replace_empty_object.response.ok);
+    assert!(replace_empty_object.response.applied);
     let project = object_session
         .project_document_current()
-        .expect("empty object create should keep project loaded");
-    let created = project
-        .graph
+        .expect("object replace should keep project loaded");
+    let replaced_view = project
+        .view_state
+        .canvas
         .nodes
-        .iter()
-        .find(|node| node.id == "object")
-        .expect("empty object create should append generated Object node");
-    assert!(created.object_spec.is_none());
-    assert!(created.implementation.is_none());
-    assert!(matches!(
-        created
-            .object_resolution
-            .as_ref()
-            .expect("empty object node should carry unresolved status")
-            .status,
-        crate::ObjectResolutionStatusCurrent::Unresolved
-    ));
+        .get("object")
+        .expect("object replace should keep existing view");
+    assert_eq!(replaced_view.x, 128.0);
+    assert_eq!(replaced_view.y, 96.0);
     let missing_delete_node = apply_node_delete_graph_command(
         &mut session,
         &identity,
