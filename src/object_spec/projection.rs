@@ -4,7 +4,7 @@ use skenion_contracts::MessageKeyPolicyV01;
 use super::ObjectSpecCandidateSummary;
 use super::ports::message_key_policy;
 use super::{
-    CURRENT_KIND_VERSION, ObjectSpecDiagnostic, ObjectSpecPort, ObjectSpecPortActivation,
+    CURRENT_KIND_VERSION, ObjectSpecIssue, ObjectSpecPort, ObjectSpecPortActivation,
     ObjectSpecPortDirection, ObjectSpecPortRate, ObjectSpecResolution,
 };
 use crate::{
@@ -15,9 +15,9 @@ use crate::{
 pub(crate) fn materialize_object_spec_node_v01(
     resolution: &ObjectSpecResolution,
     node_id: impl Into<String>,
-) -> Result<GraphNodeCurrent, ObjectSpecDiagnostic> {
+) -> Result<GraphNodeCurrent, ObjectSpecIssue> {
     let Some(implementation) = resolution.implementation.clone() else {
-        return Err(primary_resolution_diagnostic(resolution));
+        return Err(primary_resolution_issue(resolution));
     };
 
     Ok(GraphNodeCurrent {
@@ -83,7 +83,7 @@ pub(crate) fn materialize_unresolved_object_spec_node_v01(
     resolution: &ObjectSpecResolution,
     node_id: impl Into<String>,
 ) -> GraphNodeCurrent {
-    let diagnostic = primary_resolution_diagnostic(resolution);
+    let issue = primary_resolution_issue(resolution);
     let mut params = Map::new();
     params.insert(
         "objectSpec".to_owned(),
@@ -93,11 +93,8 @@ pub(crate) fn materialize_unresolved_object_spec_node_v01(
         "requestedKind".to_owned(),
         Value::String(resolution.class_symbol.clone()),
     );
-    params.insert("diagnosticCode".to_owned(), Value::String(diagnostic.code));
-    params.insert(
-        "diagnosticMessage".to_owned(),
-        Value::String(diagnostic.message),
-    );
+    params.insert("issueCode".to_owned(), Value::String(issue.code));
+    params.insert("issueMessage".to_owned(), Value::String(issue.message));
     params.insert(
         "candidateCount".to_owned(),
         json!(resolution.candidates.len()),
@@ -137,12 +134,12 @@ fn object_spec_candidate_json(candidate: &ObjectSpecCandidateSummary) -> Value {
     })
 }
 
-fn primary_resolution_diagnostic(resolution: &ObjectSpecResolution) -> ObjectSpecDiagnostic {
+fn primary_resolution_issue(resolution: &ObjectSpecResolution) -> ObjectSpecIssue {
     resolution
-        .diagnostics
+        .issues
         .first()
         .cloned()
-        .unwrap_or_else(|| ObjectSpecDiagnostic {
+        .unwrap_or_else(|| ObjectSpecIssue {
             code: "object-spec.unresolved".to_owned(),
             message: format!(
                 "{} is not available in the local Runtime object resolver",

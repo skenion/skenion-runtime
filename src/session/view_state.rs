@@ -1,6 +1,6 @@
 use crate::{
     CanvasNodeView, CanvasViewState, GraphDocument, GraphDocumentCurrent, GraphTargetRef,
-    PatchPath, RuntimeDiagnostic, RuntimeViewPatch, RuntimeViewPatchOperation, ViewState,
+    PatchPath, RuntimeIssue, RuntimeViewPatch, RuntimeViewPatchOperation, ViewState,
 };
 
 pub(super) fn reconcile_view_state_with_graph_current(
@@ -102,10 +102,8 @@ pub(super) fn target_supports_view_state(path: &PatchPath) -> bool {
     matches!(path, PatchPath::Root | PatchPath::HelpWorkingCopy { .. })
 }
 
-pub(super) fn unsupported_patch_view_change_diagnostic(
-    target: &GraphTargetRef,
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
+pub(super) fn unsupported_patch_view_change_issue(target: &GraphTargetRef) -> RuntimeIssue {
+    RuntimeIssue::structured_error(
         "collaboration.patch-view-unsupported",
         "project patch definition targets do not currently carry editable view state in Runtime",
         serde_json::json!({ "target": target }),
@@ -116,18 +114,18 @@ pub(super) fn apply_view_patch_to_view_state(
     graph: &GraphDocument,
     mut view_state: ViewState,
     patch: &RuntimeViewPatch,
-) -> Result<(ViewState, RuntimeViewPatch), Vec<RuntimeDiagnostic>> {
+) -> Result<(ViewState, RuntimeViewPatch), Vec<RuntimeIssue>> {
     let mut inverse_ops = Vec::new();
     for op in &patch.ops {
         match op {
             RuntimeViewPatchOperation::SetNodeView { node_id, view } => {
                 if !graph.nodes.iter().any(|node| node.id == *node_id) {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
+                    return Err(vec![RuntimeIssue::error(format!(
                         "view patch node {node_id} does not exist"
                     ))]);
                 }
                 let Some(previous) = view_state.canvas.nodes.get(node_id).cloned() else {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
+                    return Err(vec![RuntimeIssue::error(format!(
                         "view patch node {node_id} has no view state"
                     ))]);
                 };
@@ -145,19 +143,19 @@ pub(super) fn apply_view_patch_to_view_state(
             }
             RuntimeViewPatchOperation::MoveNodeView { node_id, from, to } => {
                 if !graph.nodes.iter().any(|node| node.id == *node_id) {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
+                    return Err(vec![RuntimeIssue::error(format!(
                         "view patch node {node_id} does not exist"
                     ))]);
                 }
                 let Some(previous) = view_state.canvas.nodes.get(node_id).cloned() else {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
+                    return Err(vec![RuntimeIssue::error(format!(
                         "view patch node {node_id} has no view state"
                     ))]);
                 };
                 if let Some(from) = from
                     && from != &previous
                 {
-                    return Err(vec![RuntimeDiagnostic::error(format!(
+                    return Err(vec![RuntimeIssue::error(format!(
                         "view patch node {node_id} from view does not match current view"
                     ))]);
                 }

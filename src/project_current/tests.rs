@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::{
-    DiagnosticSeverity, FanOutPolicyCurrent, FeedbackBoundaryCurrent, PortDirectionCurrent,
+    FanOutPolicyCurrent, FeedbackBoundaryCurrent, IssueSeverity, PortDirectionCurrent,
     PortRateCurrent, PortSpecCurrent,
 };
 
@@ -27,7 +27,7 @@ fn current_core_node_json(id: &str, object_id: &str, params: Value, ports: Value
       "objectResolution": {
         "status": "resolved",
         "candidates": [],
-        "diagnostics": []
+        "issues": []
       },
       "params": params,
       "ports": ports
@@ -50,7 +50,7 @@ fn current_provider_node_json(id: &str, object_id: &str, params: Value, ports: V
       "objectResolution": {
         "status": "resolved",
         "candidates": [],
-        "diagnostics": []
+        "issues": []
       },
       "params": params,
       "ports": ports
@@ -486,9 +486,8 @@ fn validates_and_builds_current_plan_metadata() {
     assert!(warnings.is_empty());
     assert!(analysis.cycles.is_empty());
 
-    let (plan, diagnostics) =
-        build_execution_plan_current(&graph, &nodes).expect("plan should build");
-    assert!(diagnostics.is_empty());
+    let (plan, issues) = build_execution_plan_current(&graph, &nodes).expect("plan should build");
+    assert!(issues.is_empty());
     assert_eq!(plan.graph_id, "render");
     assert_eq!(plan.nodes.len(), 2);
     assert_eq!(plan.groups.len(), 1);
@@ -548,10 +547,9 @@ fn records_merge_order_feedback_and_risky_warnings() {
       "capabilities": []
     }));
 
-    let (plan, diagnostics) =
-        build_execution_plan_current(&graph, std::slice::from_ref(&definition))
-            .expect("feedback should plan");
-    assert!(diagnostics.is_empty());
+    let (plan, issues) = build_execution_plan_current(&graph, std::slice::from_ref(&definition))
+        .expect("feedback should plan");
+    assert!(issues.is_empty());
     let metadata = plan.edges[0].metadata.as_ref().unwrap();
     assert_eq!(metadata.order, Some(3));
     assert_eq!(metadata.fan_out_policy.as_deref(), Some("copy"));
@@ -565,11 +563,11 @@ fn records_merge_order_feedback_and_risky_warnings() {
     );
 
     graph.edges[0].feedback.as_mut().unwrap().boundary = FeedbackBoundaryCurrent::SameTurn;
-    let (_plan, diagnostics) =
+    let (_plan, issues) =
         build_execution_plan_current(&graph, &[definition]).expect("risky feedback should plan");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.severity == DiagnosticSeverity::Warning
-            && diagnostic.code.as_deref() == Some("graph.risky-feedback")
+    assert!(issues.iter().any(|issue| {
+        issue.severity == IssueSeverity::Warning
+            && issue.code.as_deref() == Some("graph.risky-feedback")
     }));
 }
 
@@ -620,12 +618,12 @@ fn expands_subpatches_before_current_validation_and_planning() {
             && edge.target.port_id == "in"
     }));
 
-    let (diagnostics, _) =
+    let (issues, _) =
         validate_project_request_current(&request).expect("expanded project should validate");
-    assert!(diagnostics.is_empty());
-    let (plan, diagnostics) =
+    assert!(issues.is_empty());
+    let (plan, issues) =
         build_execution_plan_request_current(&request).expect("expanded project should plan");
-    assert!(diagnostics.is_empty());
+    assert!(issues.is_empty());
     assert_eq!(
         plan.nodes
             .iter()
@@ -658,10 +656,10 @@ fn current_plan_sorts_expanded_nodes_by_dependency_order() {
         vec!["output", "fx::pass", "clear"]
     );
 
-    let (plan, diagnostics) =
+    let (plan, issues) =
         build_execution_plan_request_current(&request).expect("expanded project should plan");
 
-    assert!(diagnostics.is_empty());
+    assert!(issues.is_empty());
     assert_eq!(
         plan.nodes
             .iter()
@@ -754,7 +752,7 @@ fn contracts_boundary_edges_and_filters_boundary_only_edges() {
 }
 
 #[test]
-fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
+fn reports_missing_ref_depth_and_duplicate_patch_issues() {
     let duplicate = ProjectRequestCurrent {
         document: None,
         graph: render_graph(),
@@ -762,10 +760,10 @@ fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
         patch_library: vec![identity_patch(), identity_patch()],
         view_state: None,
     };
-    let duplicate_diagnostics =
+    let duplicate_issues =
         validate_project_request_current(&duplicate).expect_err("duplicate patch ids should fail");
     assert_eq!(
-        duplicate_diagnostics[0].code.as_deref(),
+        duplicate_issues[0].code.as_deref(),
         Some("subpatch.duplicate-patch-id")
     );
 
@@ -785,14 +783,14 @@ fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
       ],
       "edges": []
     }));
-    let missing_ref_diagnostics =
+    let missing_ref_issues =
         expand_project_graph_current(&missing_ref, &[]).expect_err("missing ref should fail");
     assert_eq!(
-        missing_ref_diagnostics[0].code.as_deref(),
+        missing_ref_issues[0].code.as_deref(),
         Some("subpatch.missing-ref")
     );
     assert_eq!(
-        missing_ref_diagnostics[0].details.as_ref().unwrap()["patchRef"],
+        missing_ref_issues[0].details.as_ref().unwrap()["patchRef"],
         Value::Null
     );
 
@@ -838,13 +836,13 @@ fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
       ],
       "edges": []
     }));
-    let depth_diagnostics =
+    let depth_issues =
         expand_project_graph_current(&depth_root, &patch_library).expect_err("depth should fail");
     assert_eq!(
-        depth_diagnostics[0].code.as_deref(),
+        depth_issues[0].code.as_deref(),
         Some("subpatch.depth-exceeded")
     );
-    assert_eq!(depth_diagnostics[0].details.as_ref().unwrap()["depth"], 17);
+    assert_eq!(depth_issues[0].details.as_ref().unwrap()["depth"], 17);
 }
 
 #[test]
@@ -988,18 +986,18 @@ fn parses_subpatch_aliases_and_reports_missing_boundaries() {
         }
       ]
     }));
-    let diagnostics =
+    let issues =
         expand_project_graph_current(&root, &[duplicate_inlet_patch]).expect_err("boundaries fail");
-    let codes = diagnostics
+    let codes = issues
         .iter()
-        .map(|diagnostic| diagnostic.code.as_deref())
+        .map(|issue| issue.code.as_deref())
         .collect::<Vec<_>>();
     assert!(codes.contains(&Some("subpatch.missing-inlet")));
     assert!(codes.contains(&Some("subpatch.missing-outlet")));
 }
 
 #[test]
-fn reports_missing_recursive_and_invalid_patch_library_diagnostics() {
+fn reports_missing_recursive_and_invalid_patch_library_issues() {
     let missing = ProjectRequestCurrent {
         document: None,
         graph: subpatch_graph(),
@@ -1007,10 +1005,10 @@ fn reports_missing_recursive_and_invalid_patch_library_diagnostics() {
         patch_library: Vec::new(),
         view_state: None,
     };
-    let missing_diagnostics =
+    let missing_issues =
         validate_project_request_current(&missing).expect_err("missing patch should fail");
     assert_eq!(
-        missing_diagnostics[0].code.as_deref(),
+        missing_issues[0].code.as_deref(),
         Some("subpatch.missing-patch")
     );
 
@@ -1059,10 +1057,10 @@ fn reports_missing_recursive_and_invalid_patch_library_diagnostics() {
         patch_library: vec![recursive_patch],
         view_state: None,
     };
-    let recursive_diagnostics =
+    let recursive_issues =
         validate_project_request_current(&recursive).expect_err("recursive patch should fail");
     assert_eq!(
-        recursive_diagnostics[0].code.as_deref(),
+        recursive_issues[0].code.as_deref(),
         Some("subpatch.recursion")
     );
 
@@ -1075,27 +1073,27 @@ fn reports_missing_recursive_and_invalid_patch_library_diagnostics() {
         patch_library: vec![duplicate_boundary],
         view_state: None,
     };
-    let invalid_diagnostics =
+    let invalid_issues =
         validate_project_request_current(&invalid).expect_err("invalid patch should fail");
     assert_eq!(
-        invalid_diagnostics[0].code.as_deref(),
+        invalid_issues[0].code.as_deref(),
         Some("subpatch.invalid-patch-definition")
     );
 }
 
-fn assert_patch_graph_schema_diagnostic(
-    diagnostics: &[RuntimeDiagnostic],
+fn assert_patch_graph_schema_issue(
+    issues: &[RuntimeIssue],
     expected_code: &str,
     expected_received_schema_version: &str,
 ) {
-    let diagnostic = diagnostics
+    let issue = issues
         .iter()
-        .find(|diagnostic| diagnostic.code.as_deref() == Some(expected_code))
-        .unwrap_or_else(|| panic!("missing {expected_code} diagnostic: {diagnostics:#?}"));
-    let details = diagnostic
+        .find(|issue| issue.code.as_deref() == Some(expected_code))
+        .unwrap_or_else(|| panic!("missing {expected_code} issue: {issues:#?}"));
+    let details = issue
         .details
         .as_ref()
-        .expect("schema diagnostic should include details");
+        .expect("schema issue should include details");
 
     assert_eq!(details["surface"], "graph");
     assert_eq!(details["patchId"], "identity");
@@ -1105,11 +1103,11 @@ fn assert_patch_graph_schema_diagnostic(
         expected_received_schema_version
     );
     assert!(
-        diagnostics.iter().all(|diagnostic| {
-            diagnostic.code.as_deref() != Some("subpatch.invalid-patch-definition")
-                || !diagnostic.message.contains("schemaVersion")
+        issues.iter().all(|issue| {
+            issue.code.as_deref() != Some("subpatch.invalid-patch-definition")
+                || !issue.message.contains("schemaVersion")
         }),
-        "patch graph schemaVersion should not also be reported as generic patch contract failure: {diagnostics:#?}"
+        "patch graph schemaVersion should not also be reported as generic patch contract failure: {issues:#?}"
     );
 }
 
@@ -1127,13 +1125,13 @@ fn direct_requests_report_structured_patch_graph_schema_versions() {
         view_state: None,
     };
 
-    let validation_diagnostics = validate_project_request_current(&request)
+    let validation_issues = validate_project_request_current(&request)
         .expect_err("patch graph schema mismatch should fail request validation");
-    assert_patch_graph_schema_diagnostic(&validation_diagnostics, expected_code, schema_version);
+    assert_patch_graph_schema_issue(&validation_issues, expected_code, schema_version);
 
-    let planning_diagnostics = build_execution_plan_request_current(&request)
+    let planning_issues = build_execution_plan_request_current(&request)
         .expect_err("patch graph schema mismatch should fail request planning");
-    assert_patch_graph_schema_diagnostic(&planning_diagnostics, expected_code, schema_version);
+    assert_patch_graph_schema_issue(&planning_issues, expected_code, schema_version);
 }
 
 #[test]
@@ -1156,9 +1154,9 @@ fn rejects_payload_identity_node_kinds_and_definition_ids() {
             validate_project_current(&graph, &[clear_definition(), output_definition()])
                 .expect_err("payload identity graph node kind should fail");
         assert!(
-            graph_result.iter().any(|diagnostic| {
-                diagnostic.code.as_deref() == Some("graph.payload-node-kind")
-                    && diagnostic.details.as_ref().unwrap()["objectId"] == payload_identity
+            graph_result.iter().any(|issue| {
+                issue.code.as_deref() == Some("graph.payload-node-kind")
+                    && issue.details.as_ref().unwrap()["objectId"] == payload_identity
             }),
             "{payload_identity}: {graph_result:#?}"
         );
@@ -1169,9 +1167,9 @@ fn rejects_payload_identity_node_kinds_and_definition_ids() {
             validate_project_current(&render_graph(), &[definition, output_definition()])
                 .expect_err("payload identity definition id should fail");
         assert!(
-            definition_result.iter().any(|diagnostic| {
-                diagnostic.code.as_deref() == Some("node-definition.payload-identity-id")
-                    && diagnostic.details.as_ref().unwrap()["nodeDefinitionId"] == payload_identity
+            definition_result.iter().any(|issue| {
+                issue.code.as_deref() == Some("node-definition.payload-identity-id")
+                    && issue.details.as_ref().unwrap()["nodeDefinitionId"] == payload_identity
             }),
             "{payload_identity}: {definition_result:#?}"
         );
@@ -1224,10 +1222,10 @@ fn accepts_behavior_object_identities_that_still_exist() {
         })
         .collect::<Vec<_>>();
 
-    let (diagnostics, _) =
+    let (issues, _) =
         validate_project_current(&graph, &definitions).expect("behavior ids should validate");
 
-    assert!(diagnostics.is_empty());
+    assert!(issues.is_empty());
 }
 
 #[test]
@@ -1260,9 +1258,9 @@ fn validates_runtime_owned_object_spec_resolution() {
         &[behavior_definition("object.core.operator.add")],
     )
     .expect_err("invalid Runtime object-spec args should fail");
-    assert!(invalid_arg_result.iter().any(|diagnostic| {
-        diagnostic.code.as_deref() == Some("object-spec.invalid-arg-type")
-            && diagnostic.details.as_ref().unwrap()["objectSpec"] == "+ true"
+    assert!(invalid_arg_result.iter().any(|issue| {
+        issue.code.as_deref() == Some("object-spec.invalid-arg-type")
+            && issue.details.as_ref().unwrap()["objectSpec"] == "+ true"
     }));
 
     let mut mismatch = graph.clone();
@@ -1272,11 +1270,11 @@ fn validates_runtime_owned_object_spec_resolution() {
         &[behavior_definition("object.core.operator.sub")],
     )
     .expect_err("resolved object implementation mismatch should fail");
-    assert!(mismatch_result.iter().any(|diagnostic| {
-        diagnostic.code.as_deref() == Some("object-spec.implementation-mismatch")
-            && diagnostic.details.as_ref().unwrap()["resolvedImplementation"]["objectId"]
+    assert!(mismatch_result.iter().any(|issue| {
+        issue.code.as_deref() == Some("object-spec.implementation-mismatch")
+            && issue.details.as_ref().unwrap()["resolvedImplementation"]["objectId"]
                 == "operator.add"
-            && diagnostic.details.as_ref().unwrap()["nodeImplementation"]["objectId"]
+            && issue.details.as_ref().unwrap()["nodeImplementation"]["objectId"]
                 == "object.core.operator.sub"
     }));
 
@@ -1286,9 +1284,9 @@ fn validates_runtime_owned_object_spec_resolution() {
     let payload_result =
         validate_project_current(&payload, &[behavior_definition("object.core.float")])
             .expect_err("payload identity object spec should fail");
-    assert!(payload_result.iter().any(|diagnostic| {
-        diagnostic.code.as_deref() == Some("object-spec.payload-identity")
-            && diagnostic.details.as_ref().unwrap()["objectSpec"] == "value.core.float32"
+    assert!(payload_result.iter().any(|issue| {
+        issue.code.as_deref() == Some("object-spec.payload-identity")
+            && issue.details.as_ref().unwrap()["objectSpec"] == "value.core.float32"
     }));
 
     let mut package_deferred = graph.clone();
@@ -1311,7 +1309,7 @@ fn validates_runtime_owned_object_spec_resolution() {
 }
 
 #[test]
-fn surfaces_selector_and_connection_policy_diagnostics_with_specific_codes() {
+fn surfaces_selector_and_connection_policy_issues_with_specific_codes() {
     let mut selector_graph = render_graph();
     selector_graph.nodes[1].ports[0].port_type = "value.core.message".to_owned();
     selector_graph.nodes[1].ports[0].rate = Some(PortRateCurrent::Control);
@@ -1324,9 +1322,9 @@ fn surfaces_selector_and_connection_policy_diagnostics_with_specific_codes() {
     )
     .expect_err("selector-aware input port should fail without selector policy");
     assert!(
-        selector_result.iter().any(|diagnostic| {
-            diagnostic.code.as_deref() == Some("graph.message-key-policy")
-                && diagnostic
+        selector_result.iter().any(|issue| {
+            issue.code.as_deref() == Some("graph.message-key-policy")
+                && issue
                     .message
                     .contains("message-key-aware input port requires messageKeys")
         }),
@@ -1370,7 +1368,7 @@ fn surfaces_selector_and_connection_policy_diagnostics_with_specific_codes() {
     assert!(
         fan_in_result
             .iter()
-            .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.fan-in-cardinality")),
+            .any(|issue| issue.code.as_deref() == Some("graph.fan-in-cardinality")),
         "{fan_in_result:#?}"
     );
 
@@ -1408,7 +1406,7 @@ fn surfaces_selector_and_connection_policy_diagnostics_with_specific_codes() {
     assert!(
         fan_out_result
             .iter()
-            .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.fan-out-forbidden")),
+            .any(|issue| issue.code.as_deref() == Some("graph.fan-out-forbidden")),
         "{fan_out_result:#?}"
     );
 }
@@ -1452,28 +1450,24 @@ fn rejects_invalid_graph_definitions_and_snapshots() {
     let invalid_definition_result =
         validate_project_current(&graph, &[invalid_definition, output_definition()])
             .expect_err("invalid definition should fail");
-    let invalid_definition_diagnostic = invalid_definition_result
+    let invalid_definition_issue = invalid_definition_result
         .iter()
-        .find(|diagnostic| {
-            diagnostic
-                .message
-                .contains("unsupported permission: network")
-        })
+        .find(|issue| issue.message.contains("unsupported permission: network"))
         .expect("unsupported permission should be reported");
     assert_eq!(
-        invalid_definition_diagnostic.code.as_deref(),
+        invalid_definition_issue.code.as_deref(),
         Some("node-definition.invalid-contract")
     );
     assert_eq!(
-        invalid_definition_diagnostic.details.as_ref().unwrap()["surface"],
+        invalid_definition_issue.details.as_ref().unwrap()["surface"],
         "node-definition"
     );
     assert_eq!(
-        invalid_definition_diagnostic.details.as_ref().unwrap()["expectedSchemaVersion"],
+        invalid_definition_issue.details.as_ref().unwrap()["expectedSchemaVersion"],
         "0.1.0"
     );
     assert_eq!(
-        invalid_definition_diagnostic.details.as_ref().unwrap()["receivedSchemaVersion"],
+        invalid_definition_issue.details.as_ref().unwrap()["receivedSchemaVersion"],
         "0.1.0"
     );
 
@@ -1506,14 +1500,12 @@ fn rejects_invalid_graph_definitions_and_snapshots() {
             .expect_err("snapshot mismatch should fail");
     let messages = mismatch_result
         .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
+        .map(|issue| issue.message.as_str())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        mismatch_result
-            .iter()
-            .all(|diagnostic| diagnostic.code.is_some()),
-        "current 0.1 project diagnostics should be structured"
+        mismatch_result.iter().all(|issue| issue.code.is_some()),
+        "current 0.1 project issues should be structured"
     );
     assert!(messages.contains("missing manifest port"));
     assert!(messages.contains("direction differs from definition"));
@@ -1527,9 +1519,9 @@ fn rejects_invalid_graph_definitions_and_snapshots() {
     let incompatible_result =
         validate_project_current(&incompatible, &[clear_definition(), output_definition()])
             .expect_err("incompatible edge type should fail");
-    assert!(incompatible_result.iter().any(|diagnostic| {
-        diagnostic.code.as_deref() == Some("graph.edge-incompatible-type")
-            && diagnostic.message.contains(
+    assert!(incompatible_result.iter().any(|issue| {
+        issue.code.as_deref() == Some("graph.edge-incompatible-type")
+            && issue.message.contains(
                 "incompatible edge clear:out value.core.tensor -> output:in value.core.message",
             )
     }));

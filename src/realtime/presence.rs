@@ -7,9 +7,9 @@ use super::protocol::{
     EVENT_PRESENCE_UPDATED, EVENT_SELECTION_UPDATED, RUNTIME_REALTIME_SCHEMA,
     RUNTIME_REALTIME_SCHEMA_VERSION,
 };
-use super::state::{RememberAckInput, sync_required_diagnostic};
+use super::state::{RememberAckInput, sync_required_issue};
 use super::wire::{
-    RuntimeRealtimeConnectionIdentity, RuntimeRealtimeDiagnostic, RuntimeRealtimeEnvelope,
+    RuntimeRealtimeConnectionIdentity, RuntimeRealtimeEnvelope, RuntimeRealtimeIssue,
 };
 use super::{command_ack, command_ack_from_cached, unix_ms_timestamp};
 use crate::runtime_time::created_at_now;
@@ -43,9 +43,9 @@ pub(super) fn handle_presence_update(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: RuntimeRealtimeEnvelope,
-) -> Result<(RuntimeRealtimeEnvelope, Option<RuntimeRealtimeEnvelope>), RuntimeRealtimeDiagnostic> {
+) -> Result<(RuntimeRealtimeEnvelope, Option<RuntimeRealtimeEnvelope>), RuntimeRealtimeIssue> {
     let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
-        sync_required_diagnostic(
+        sync_required_issue(
             "realtime.command.idempotency-key-required",
             "presence.update requires idempotencyKey",
             None,
@@ -64,7 +64,7 @@ pub(super) fn handle_presence_update(
 
     let payload = serde_json::from_value::<PresenceUpdatePayload>(frame.payload.clone()).map_err(
         |error| {
-            sync_required_diagnostic(
+            sync_required_issue(
                 "realtime.presence.invalid-payload",
                 format!("invalid presence.update payload: {error}"),
                 None,
@@ -137,9 +137,9 @@ pub(super) fn handle_selection_update(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: RuntimeRealtimeEnvelope,
-) -> Result<(RuntimeRealtimeEnvelope, Option<RuntimeRealtimeEnvelope>), RuntimeRealtimeDiagnostic> {
+) -> Result<(RuntimeRealtimeEnvelope, Option<RuntimeRealtimeEnvelope>), RuntimeRealtimeIssue> {
     let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
-        sync_required_diagnostic(
+        sync_required_issue(
             "realtime.command.idempotency-key-required",
             "selection.update requires idempotencyKey",
             None,
@@ -158,7 +158,7 @@ pub(super) fn handle_selection_update(
 
     let payload = serde_json::from_value::<SelectionUpdatePayload>(frame.payload.clone()).map_err(
         |error| {
-            sync_required_diagnostic(
+            sync_required_issue(
                 "realtime.selection.invalid-payload",
                 format!("invalid selection.update payload: {error}"),
                 None,
@@ -182,7 +182,7 @@ pub(super) fn handle_selection_update(
         expires_at,
     };
     if let Err(report) = validate_runtime_collaboration_selection_envelope(&selection) {
-        return Err(sync_required_diagnostic(
+        return Err(sync_required_issue(
             "realtime.selection.invalid-selection",
             format!("invalid selection.update selection: {report}"),
             None,

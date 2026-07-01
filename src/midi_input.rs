@@ -1,7 +1,7 @@
 use midir::{Ignore, MidiInput, MidiInputPort};
 use serde::{Deserialize, Serialize};
 
-use crate::io_device_manager::{RuntimeIoDiagnostic, RuntimeIoDiagnosticSeverity};
+use crate::io_device_manager::{RuntimeIoIssue, RuntimeIoIssueSeverity};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -10,9 +10,9 @@ pub(crate) struct RuntimeMidiInputPort {
     pub name: String,
 }
 
-pub(crate) fn create_midi_input(client_name: &str) -> Result<MidiInput, RuntimeIoDiagnostic> {
-    let mut input = MidiInput::new(client_name).map_err(|error| RuntimeIoDiagnostic {
-        severity: RuntimeIoDiagnosticSeverity::Error,
+pub(crate) fn create_midi_input(client_name: &str) -> Result<MidiInput, RuntimeIoIssue> {
+    let mut input = MidiInput::new(client_name).map_err(|error| RuntimeIoIssue {
+        severity: RuntimeIoIssueSeverity::Error,
         code: "io-device-enumeration-failed".to_owned(),
         message: format!("failed to initialize MIDI input host: {error}"),
     })?;
@@ -23,7 +23,7 @@ pub(crate) fn create_midi_input(client_name: &str) -> Result<MidiInput, RuntimeI
 pub(crate) fn collect_midi_input_ports(
     input: &MidiInput,
     midir_ports: &[MidiInputPort],
-    diagnostics: &mut Vec<RuntimeIoDiagnostic>,
+    issues: &mut Vec<RuntimeIoIssue>,
 ) -> Vec<RuntimeMidiInputPort> {
     midir_ports
         .iter()
@@ -31,8 +31,8 @@ pub(crate) fn collect_midi_input_ports(
         .map(|(index, port)| RuntimeMidiInputPort {
             index,
             name: input.port_name(port).unwrap_or_else(|error| {
-                diagnostics.push(RuntimeIoDiagnostic {
-                    severity: RuntimeIoDiagnosticSeverity::Warning,
+                issues.push(RuntimeIoIssue {
+                    severity: RuntimeIoIssueSeverity::Warning,
                     code: "io-device-name-unavailable".to_owned(),
                     message: format!("failed to read MIDI input port {index} name: {error}"),
                 });

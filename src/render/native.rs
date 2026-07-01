@@ -16,8 +16,8 @@ use crate::{
         ShaderUniformValue, render_scene_from_preview_document,
     },
     telemetry::{
-        PreviewTelemetryWriter, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSeverity,
-        ShaderDiagnosticSource, unix_ms_timestamp,
+        PreviewTelemetryWriter, ShaderIssue, ShaderIssuePhase, ShaderIssueSeverity,
+        ShaderIssueSource, unix_ms_timestamp,
     },
 };
 
@@ -29,7 +29,7 @@ pub struct GeneratedShaderResponse {
     pub language: Option<String>,
     pub source: Option<String>,
     pub source_map: Option<GeneratedShaderSourceMap>,
-    pub diagnostics: Vec<ShaderDiagnostic>,
+    pub issues: Vec<ShaderIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -57,7 +57,7 @@ pub(crate) fn generated_shader_response_from_preview_document(
                 language: Some("wgsl".to_owned()),
                 source: Some(generated.source),
                 source_map: Some(generated.source_map),
-                diagnostics: Vec::new(),
+                issues: Vec::new(),
             }
         }
         Ok(RenderScene::ClearColor(_)) => GeneratedShaderResponse {
@@ -66,12 +66,12 @@ pub(crate) fn generated_shader_response_from_preview_document(
             language: None,
             source: None,
             source_map: None,
-            diagnostics: vec![ShaderDiagnostic::new(
-                ShaderDiagnosticSeverity::Info,
-                ShaderDiagnosticPhase::WgslGeneration,
+            issues: vec![ShaderIssue::new(
+                ShaderIssueSeverity::Info,
+                ShaderIssuePhase::WgslGeneration,
                 "no-generated-shader",
                 "current render scene does not use a fullscreen shader",
-                ShaderDiagnosticSource::Runtime,
+                ShaderIssueSource::Runtime,
             )],
         },
         Err(error) => GeneratedShaderResponse {
@@ -80,7 +80,7 @@ pub(crate) fn generated_shader_response_from_preview_document(
             language: None,
             source: None,
             source_map: None,
-            diagnostics: error.shader_diagnostics(),
+            issues: error.shader_issues(),
         },
     }
 }
@@ -285,15 +285,15 @@ impl ApplicationHandler for NativePreviewApp {
                 eprintln!("failed to initialize fullscreen shader renderer: {error}");
                 if let Some(telemetry) = &mut self.telemetry {
                     let phase = if error.contains("shader validation failed") {
-                        ShaderDiagnosticPhase::WgslCompile
+                        ShaderIssuePhase::WgslCompile
                     } else {
-                        ShaderDiagnosticPhase::RenderPipeline
+                        ShaderIssuePhase::RenderPipeline
                     };
-                    telemetry.record_shader_diagnostic(ShaderDiagnostic::error(
+                    telemetry.record_shader_issue(ShaderIssue::error(
                         phase,
                         "fullscreen-shader-initialization-failed",
                         format!("failed to initialize fullscreen shader renderer: {error}"),
-                        ShaderDiagnosticSource::Generated,
+                        ShaderIssueSource::Generated,
                     ));
                 }
                 let fallback_scene = RenderScene::default();
@@ -1078,7 +1078,7 @@ mod tests {
             source_map.generated_line_offset + 1,
             source_map.user_source_start_line
         );
-        assert!(response.diagnostics.is_empty());
+        assert!(response.issues.is_empty());
     }
 
     #[test]
@@ -1092,20 +1092,14 @@ mod tests {
         assert_eq!(response.language, None);
         assert_eq!(response.source, None);
         assert_eq!(response.source_map, None);
-        assert_eq!(response.diagnostics.len(), 1);
-        assert_eq!(
-            response.diagnostics[0].severity,
-            ShaderDiagnosticSeverity::Info
-        );
-        assert_eq!(
-            response.diagnostics[0].phase,
-            ShaderDiagnosticPhase::WgslGeneration
-        );
-        assert_eq!(response.diagnostics[0].code, "no-generated-shader");
+        assert_eq!(response.issues.len(), 1);
+        assert_eq!(response.issues[0].severity, ShaderIssueSeverity::Info);
+        assert_eq!(response.issues[0].phase, ShaderIssuePhase::WgslGeneration);
+        assert_eq!(response.issues[0].code, "no-generated-shader");
     }
 
     #[test]
-    fn generated_shader_response_reports_scene_build_diagnostics() {
+    fn generated_shader_response_reports_scene_build_issues() {
         let document = preview_document_with_nodes(vec![render_output_node()]);
 
         let response = generated_shader_response_from_preview_document(&document);
@@ -1115,23 +1109,17 @@ mod tests {
         assert_eq!(response.language, None);
         assert_eq!(response.source, None);
         assert_eq!(response.source_map, None);
-        assert_eq!(response.diagnostics.len(), 1);
-        assert_eq!(
-            response.diagnostics[0].severity,
-            ShaderDiagnosticSeverity::Error
-        );
-        assert_eq!(
-            response.diagnostics[0].phase,
-            ShaderDiagnosticPhase::RenderPipeline
-        );
-        assert_eq!(response.diagnostics[0].code, "render-output-without-input");
+        assert_eq!(response.issues.len(), 1);
+        assert_eq!(response.issues[0].severity, ShaderIssueSeverity::Error);
+        assert_eq!(response.issues[0].phase, ShaderIssuePhase::RenderPipeline);
+        assert_eq!(response.issues[0].code, "render-output-without-input");
     }
 
     #[test]
     fn fullscreen_shader_pipeline_reports_wgsl_validation_errors() {
         let Some((device, config)) = headless_test_device() else {
             eprintln!(
-                "skipping WGPU validation diagnostic smoke because no headless adapter is available"
+                "skipping WGPU validation issue smoke because no headless adapter is available"
             );
             return;
         };

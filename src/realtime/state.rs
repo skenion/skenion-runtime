@@ -16,7 +16,7 @@ use super::{
         RUNTIME_REALTIME_RESUME_TOKEN_TTL,
     },
     wire::{
-        RuntimeRealtimeConnectionIdentity, RuntimeRealtimeDiagnostic, RuntimeRealtimeEnvelope,
+        RuntimeRealtimeConnectionIdentity, RuntimeRealtimeEnvelope, RuntimeRealtimeIssue,
         RuntimeRealtimeReplay,
     },
 };
@@ -154,7 +154,7 @@ impl RuntimeRealtimeState {
     pub(super) fn consume_resume_token(
         &self,
         resume_token: &str,
-    ) -> Result<RuntimeRealtimeResumeIdentity, RuntimeRealtimeDiagnostic> {
+    ) -> Result<RuntimeRealtimeResumeIdentity, RuntimeRealtimeIssue> {
         let now = SystemTime::now();
         let mut resume_tokens = self
             .resume_tokens
@@ -162,7 +162,7 @@ impl RuntimeRealtimeState {
             .expect("runtime realtime resume token lock should not be poisoned");
         resume_tokens.retain(|_, identity| identity.expires_at > now);
         resume_tokens.remove(resume_token).ok_or_else(|| {
-            sync_required_diagnostic(
+            sync_required_issue(
                 "realtime.resume-token.invalid",
                 "resumeToken is unknown or expired; reconnect without it for a fresh identity",
                 Some(json!({
@@ -187,16 +187,16 @@ impl RuntimeRealtimeState {
         format!("{}:{sequence}", self.incarnation_id)
     }
 
-    fn parse_cursor(&self, cursor: &str) -> Result<u64, RuntimeRealtimeDiagnostic> {
+    fn parse_cursor(&self, cursor: &str) -> Result<u64, RuntimeRealtimeIssue> {
         let Some((incarnation_id, sequence)) = cursor.rsplit_once(':') else {
-            return Err(sync_required_diagnostic(
+            return Err(sync_required_issue(
                 "realtime.cursor.invalid",
                 "lastCursor must be a Runtime realtime cursor issued by this session",
                 Some(json!({ "lastCursor": cursor })),
             ));
         };
         if incarnation_id != self.incarnation_id {
-            return Err(sync_required_diagnostic(
+            return Err(sync_required_issue(
                 "realtime.cursor.incarnation-mismatch",
                 "lastCursor belongs to a different session incarnation",
                 Some(json!({
@@ -206,7 +206,7 @@ impl RuntimeRealtimeState {
             ));
         }
         sequence.parse::<u64>().map_err(|_| {
-            sync_required_diagnostic(
+            sync_required_issue(
                 "realtime.cursor.invalid",
                 "lastCursor sequence is not a number",
                 Some(json!({ "lastCursor": cursor })),
@@ -217,11 +217,11 @@ impl RuntimeRealtimeState {
     pub fn replay_after(
         &self,
         last_cursor: &str,
-    ) -> Result<RuntimeRealtimeReplay, RuntimeRealtimeDiagnostic> {
+    ) -> Result<RuntimeRealtimeReplay, RuntimeRealtimeIssue> {
         let after = self.parse_cursor(last_cursor)?;
         let current = self.current_sequence();
         if after > current {
-            return Err(sync_required_diagnostic(
+            return Err(sync_required_issue(
                 "realtime.cursor.unknown",
                 "lastCursor is ahead of the current Runtime realtime cursor",
                 Some(json!({ "lastCursor": last_cursor, "currentCursor": self.current_cursor() })),
@@ -240,7 +240,7 @@ impl RuntimeRealtimeState {
         if let Some(earliest) = earliest
             && after + 1 < earliest
         {
-            return Err(sync_required_diagnostic(
+            return Err(sync_required_issue(
                 "realtime.cursor.expired",
                 "lastCursor is outside the retained Runtime realtime event window",
                 Some(json!({
@@ -496,12 +496,12 @@ fn mark_replayed(mut event: RuntimeRealtimeEnvelope) -> RuntimeRealtimeEnvelope 
     event
 }
 
-pub(super) fn sync_required_diagnostic(
+pub(super) fn sync_required_issue(
     code: &str,
     message: impl Into<String>,
     details: Option<Value>,
-) -> RuntimeRealtimeDiagnostic {
-    RuntimeRealtimeDiagnostic {
+) -> RuntimeRealtimeIssue {
+    RuntimeRealtimeIssue {
         code: code.to_owned(),
         message: message.into(),
         details,

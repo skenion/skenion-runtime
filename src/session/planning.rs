@@ -2,12 +2,10 @@ use serde_json::json;
 
 use crate::{
     ExecutionPlan, GraphDocument, GraphDocumentCurrent, NodeRegistry,
-    ObjectResolutionStatusCurrent, PlanError, RuntimeDiagnostic, build_execution_plan,
+    ObjectResolutionStatusCurrent, PlanError, RuntimeIssue, build_execution_plan,
 };
 
-pub(super) fn unresolved_object_diagnostics_current(
-    graph: &GraphDocumentCurrent,
-) -> Vec<RuntimeDiagnostic> {
+pub(super) fn unresolved_object_issues_current(graph: &GraphDocumentCurrent) -> Vec<RuntimeIssue> {
     graph
         .nodes
         .iter()
@@ -18,15 +16,13 @@ pub(super) fn unresolved_object_diagnostics_current(
         })
         .map(|node| {
             let object_spec = node.object_spec.as_deref().unwrap_or(node.id.as_str());
-            let diagnostic_message = node
+            let issue_message = node
                 .object_resolution
                 .as_ref()
-                .and_then(|resolution| resolution.diagnostics.first())
-                .map(|diagnostic| diagnostic.message.as_str())
+                .and_then(|resolution| resolution.issues.first())
+                .map(|issue| issue.message.as_str())
                 .unwrap_or("object spec could not be resolved");
-            RuntimeDiagnostic::error(format!(
-                "unresolved object {object_spec}: {diagnostic_message}"
-            ))
+            RuntimeIssue::error(format!("unresolved object {object_spec}: {issue_message}"))
         })
         .collect()
 }
@@ -35,16 +31,15 @@ pub(super) fn build_session_execution_plan(
     graph: &GraphDocument,
     registry: &NodeRegistry,
     surface: &'static str,
-) -> Result<ExecutionPlan, Vec<RuntimeDiagnostic>> {
-    build_execution_plan(graph, registry)
-        .map_err(|error| plan_error_diagnostics(error, surface, graph))
+) -> Result<ExecutionPlan, Vec<RuntimeIssue>> {
+    build_execution_plan(graph, registry).map_err(|error| plan_error_issues(error, surface, graph))
 }
 
-fn plan_error_diagnostics(
+fn plan_error_issues(
     error: PlanError,
     surface: &'static str,
     graph: &GraphDocument,
-) -> Vec<RuntimeDiagnostic> {
+) -> Vec<RuntimeIssue> {
     let details = || {
         json!({
             "surface": surface,
@@ -57,14 +52,14 @@ fn plan_error_diagnostics(
             .errors()
             .iter()
             .map(|error| {
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "session.plan.invalid-project",
                     error.message.clone(),
                     details(),
                 )
             })
             .collect(),
-        PlanError::Cycle { nodes } => vec![RuntimeDiagnostic::structured_error(
+        PlanError::Cycle { nodes } => vec![RuntimeIssue::structured_error(
             "session.plan.cycle",
             format!("cycle detected: {nodes}"),
             json!({

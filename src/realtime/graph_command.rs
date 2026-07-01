@@ -2,9 +2,9 @@ use serde_json::json;
 
 use super::node_catalog::{node_catalog_changed_event, node_catalog_snapshot_for_session};
 use super::protocol::*;
-use super::state::{RememberAckInput, sync_required_diagnostic};
+use super::state::{RememberAckInput, sync_required_issue};
 use super::wire::{
-    RuntimeRealtimeConnectionIdentity, RuntimeRealtimeDiagnostic, RuntimeRealtimeEnvelope,
+    RuntimeRealtimeConnectionIdentity, RuntimeRealtimeEnvelope, RuntimeRealtimeIssue,
 };
 mod control;
 mod events;
@@ -14,9 +14,9 @@ mod types;
 
 use crate::runtime_time::created_at_now;
 use crate::{
-    DiagnosticSeverity, PatchPath, RuntimeControlEventRequest, RuntimeDiagnostic,
-    RuntimeMutationRequest, RuntimeOperationAttribution, RuntimeOperationDiagnostic,
-    RuntimeOperationEnvelope, RuntimePatchResponse, RuntimeSessionRecord,
+    IssueSeverity, PatchPath, RuntimeControlEventRequest, RuntimeIssue, RuntimeMutationRequest,
+    RuntimeOperationAttribution, RuntimeOperationEnvelope, RuntimeOperationIssue,
+    RuntimePatchResponse, RuntimeSessionRecord,
 };
 use control::{GraphControlEmission, apply_control_command};
 pub(super) use events::{control_emitted_event, graph_ack_from_cached};
@@ -37,10 +37,10 @@ pub(super) fn handle_graph_command(
         Vec<RuntimeRealtimeEnvelope>,
         Vec<RuntimeRealtimeEnvelope>,
     ),
-    RuntimeRealtimeDiagnostic,
+    RuntimeRealtimeIssue,
 > {
     let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
-        sync_required_diagnostic(
+        sync_required_issue(
             "realtime.command.idempotency-key-required",
             "graph.command requires idempotencyKey",
             None,
@@ -61,7 +61,7 @@ pub(super) fn handle_graph_command(
 
     let payload =
         serde_json::from_value::<GraphCommandPayload>(frame.payload.clone()).map_err(|error| {
-            sync_required_diagnostic(
+            sync_required_issue(
                 "realtime.graph.invalid-payload",
                 format!("invalid graph.command payload: {error}"),
                 None,
@@ -156,7 +156,7 @@ pub(super) fn apply_graph_command(
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             &session,
             true,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "graph.command.session-revision-conflict",
                 format!(
                     "baseSessionRevision {base_session_revision} does not match session revision {}",
@@ -176,7 +176,7 @@ pub(super) fn apply_graph_command(
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             &session,
             false,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "graph.command.kind-unsupported",
                 format!(
                     "unsupported graph.command kind {}; supported kinds are {}",
@@ -197,7 +197,7 @@ pub(super) fn apply_graph_command(
                 graph_command_rejected_response(
                     &session,
                     false,
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "graph.command.node-id-required",
                         "graph.command kind node.input requires payload.nodeId",
                         json!({ "commandKind": payload.kind }),
@@ -211,7 +211,7 @@ pub(super) fn apply_graph_command(
                 graph_command_rejected_response(
                     &session,
                     false,
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "graph.command.port-id-required",
                         "graph.command kind node.input requires payload.portId",
                         json!({ "commandKind": payload.kind, "nodeId": node_id }),
@@ -225,7 +225,7 @@ pub(super) fn apply_graph_command(
                 graph_command_rejected_response(
                     &session,
                     false,
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "graph.command.message-required",
                         "graph.command kind node.input requires payload.message",
                         json!({
@@ -259,7 +259,7 @@ pub(super) fn apply_graph_command(
             conflict: false,
             snapshot,
             history,
-            diagnostics: response.diagnostics.clone(),
+            issues: response.issues.clone(),
         };
         let control_emission = response.ok.then_some(GraphControlEmission {
             request: applied_request.clone(),
@@ -285,7 +285,7 @@ pub(super) fn apply_graph_command(
                 return GraphCommandOutcome::from_response(graph_command_rejected_response(
                     &session,
                     false,
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "graph.command.view-patch-required",
                         "graph.command kind view.patch requires payload.viewPatch",
                         json!({ "commandKind": payload.kind }),
@@ -298,7 +298,7 @@ pub(super) fn apply_graph_command(
                 return GraphCommandOutcome::from_response(graph_command_rejected_response(
                     &session,
                     true,
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "graph.command.view-revision-conflict",
                         format!(
                             "baseViewRevision {base_view_revision} does not match viewPatch.baseViewRevision {}",
@@ -318,7 +318,7 @@ pub(super) fn apply_graph_command(
                     return GraphCommandOutcome::from_response(graph_command_rejected_response(
                         &session,
                         true,
-                        RuntimeDiagnostic::structured_error(
+                        RuntimeIssue::structured_error(
                             "graph.command.graph-revision-conflict",
                             format!(
                                 "baseGraphRevision {base_graph_revision} does not match graph revision {}",
@@ -338,7 +338,7 @@ pub(super) fn apply_graph_command(
                     return GraphCommandOutcome::from_response(graph_command_rejected_response(
                         &session,
                         false,
-                        RuntimeDiagnostic::structured_error(
+                        RuntimeIssue::structured_error(
                             "graph.command.view-target-unsupported",
                             "view.patch realtime commands currently support only the loaded root graph view",
                             json!({ "target": target, "commandKind": payload.kind }),
@@ -350,7 +350,7 @@ pub(super) fn apply_graph_command(
                     return GraphCommandOutcome::from_response(graph_command_rejected_response(
                         &session,
                         true,
-                        RuntimeDiagnostic::structured_error(
+                        RuntimeIssue::structured_error(
                             "graph.command.target-revision-conflict",
                             format!(
                                 "target baseRevision {} does not match target graph revision {}",
@@ -381,7 +381,7 @@ pub(super) fn apply_graph_command(
                 return GraphCommandOutcome::from_response(graph_command_rejected_response(
                     &session,
                     false,
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "graph.command.target-required",
                         "graph.command kind graph.changeSet requires payload.target",
                         json!({ "commandKind": payload.kind }),
@@ -393,7 +393,7 @@ pub(super) fn apply_graph_command(
                 return GraphCommandOutcome::from_response(graph_command_rejected_response(
                     &session,
                     false,
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "graph.command.changes-required",
                         "graph.command kind graph.changeSet requires at least one change",
                         json!({ "target": target, "commandKind": payload.kind }),
@@ -406,7 +406,7 @@ pub(super) fn apply_graph_command(
                 return GraphCommandOutcome::from_response(graph_command_rejected_response(
                     &session,
                     true,
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "graph.command.target-revision-conflict",
                         format!(
                             "baseGraphRevision {base_graph_revision} does not match target.baseRevision {}",
@@ -494,7 +494,7 @@ fn apply_paste_fragment_graph_command(
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             session,
             false,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "graph.command.request-required",
                 "graph.command kind graph.pasteFragment requires payload.request",
                 json!({ "commandKind": payload.kind }),
@@ -507,7 +507,7 @@ fn apply_paste_fragment_graph_command(
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             session,
             true,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "graph.command.target-revision-conflict",
                 format!(
                     "baseGraphRevision {base_graph_revision} does not match request.target.baseRevision {}",
@@ -549,34 +549,32 @@ fn apply_paste_fragment_graph_command(
         conflict: operation_result.conflict,
         snapshot: session.snapshot(),
         history: session.history(),
-        diagnostics: operation_diagnostics_to_runtime(&operation_result.diagnostics),
+        issues: operation_issues_to_runtime(&operation_result.issues),
     };
     GraphCommandOutcome::with_operation_result(response, operation_result)
 }
 
-fn operation_diagnostics_to_runtime(
-    diagnostics: &[RuntimeOperationDiagnostic],
-) -> Vec<RuntimeDiagnostic> {
-    diagnostics
+fn operation_issues_to_runtime(issues: &[RuntimeOperationIssue]) -> Vec<RuntimeIssue> {
+    issues
         .iter()
-        .map(|diagnostic| RuntimeDiagnostic {
-            severity: match diagnostic.severity.as_str() {
-                "warning" => DiagnosticSeverity::Warning,
-                "info" => DiagnosticSeverity::Info,
-                _ => DiagnosticSeverity::Error,
+        .map(|issue| RuntimeIssue {
+            severity: match issue.severity.as_str() {
+                "warning" => IssueSeverity::Warning,
+                "info" => IssueSeverity::Info,
+                _ => IssueSeverity::Error,
             },
-            message: diagnostic.message.clone(),
-            code: Some(diagnostic.code.clone()),
+            message: issue.message.clone(),
+            code: Some(issue.code.clone()),
             details: Some(json!({
-                "path": diagnostic.path.clone(),
-                "target": diagnostic.target.clone(),
-                "expectedRevision": diagnostic.expected_revision.clone(),
-                "actualRevision": diagnostic.actual_revision.clone(),
-                "duplicates": diagnostic.duplicates.clone(),
-                "nodes": diagnostic.nodes.clone(),
-                "edges": diagnostic.edges.clone(),
-                "interfacePolicy": diagnostic.interface_policy.clone(),
-                "interfaceDetail": diagnostic.interface_detail.clone(),
+                "path": issue.path.clone(),
+                "target": issue.target.clone(),
+                "expectedRevision": issue.expected_revision.clone(),
+                "actualRevision": issue.actual_revision.clone(),
+                "duplicates": issue.duplicates.clone(),
+                "nodes": issue.nodes.clone(),
+                "edges": issue.edges.clone(),
+                "interfacePolicy": issue.interface_policy.clone(),
+                "interfaceDetail": issue.interface_detail.clone(),
             })),
         })
         .collect()
@@ -590,13 +588,13 @@ pub(super) use object_nodes::{
 #[cfg(test)]
 pub(super) use object_nodes::{
     materialize_object_command_node, next_generated_node_id, node_id_slug,
-    object_spec_runtime_diagnostics, validate_object_command_target,
+    object_spec_runtime_issues, validate_object_command_target,
 };
 
 fn graph_command_rejected_response(
     session: &crate::RuntimeSession,
     conflict: bool,
-    diagnostic: RuntimeDiagnostic,
+    issue: RuntimeIssue,
 ) -> RuntimePatchResponse {
     RuntimePatchResponse {
         ok: false,
@@ -604,6 +602,6 @@ fn graph_command_rejected_response(
         conflict,
         snapshot: session.snapshot(),
         history: session.history(),
-        diagnostics: vec![diagnostic],
+        issues: vec![issue],
     }
 }

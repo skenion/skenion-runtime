@@ -10,7 +10,7 @@ use std::{
 use axum::body::Bytes;
 use serde::Serialize;
 
-use crate::RuntimeDiagnostic;
+use crate::RuntimeIssue;
 
 pub(crate) type SharedRuntimeAssetStore = Arc<RwLock<RuntimeAssetStore>>;
 
@@ -53,7 +53,7 @@ pub struct RuntimeAsset {
 pub struct RuntimeAssetImportResponse {
     pub ok: bool,
     pub asset: Option<RuntimeAsset>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,7 +61,7 @@ pub struct RuntimeAssetImportResponse {
 pub struct RuntimeAssetListResponse {
     pub ok: bool,
     pub assets: Vec<RuntimeAsset>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,7 +69,7 @@ pub struct RuntimeAssetListResponse {
 pub struct RuntimeAssetGetResponse {
     pub ok: bool,
     pub asset: Option<RuntimeAsset>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 pub(crate) fn store_asset(
@@ -96,7 +96,7 @@ pub(crate) fn store_asset_with_id(
         return RuntimeAssetImportResponse {
             ok: false,
             asset: None,
-            diagnostics: vec![RuntimeDiagnostic::error(format!(
+            issues: vec![RuntimeIssue::error(format!(
                 "failed to create runtime asset directory: {error}"
             ))],
         };
@@ -106,7 +106,7 @@ pub(crate) fn store_asset_with_id(
         return RuntimeAssetImportResponse {
             ok: false,
             asset: None,
-            diagnostics: vec![RuntimeDiagnostic::error(format!(
+            issues: vec![RuntimeIssue::error(format!(
                 "failed to store runtime asset: {error}"
             ))],
         };
@@ -126,7 +126,7 @@ pub(crate) fn store_asset_with_id(
     RuntimeAssetImportResponse {
         ok: true,
         asset: Some(asset),
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     }
 }
 

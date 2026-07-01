@@ -25,9 +25,9 @@ fn assert_kind(resolution: &ObjectSpecResolution, kind: &str) {
     );
 }
 
-fn assert_diagnostic(resolution: &ObjectSpecResolution, code: &str) {
+fn assert_issue(resolution: &ObjectSpecResolution, code: &str) {
     assert_eq!(resolution.implementation, None);
-    assert_eq!(resolution.diagnostics[0].code, code);
+    assert_eq!(resolution.issues[0].code, code);
 }
 
 fn test_implementation(object_id: &str) -> ObjectImplementationRefV01 {
@@ -127,9 +127,9 @@ fn package_registry_with_object(
                 }],
                 ..Default::default()
             },
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }],
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     }
 }
 
@@ -199,10 +199,10 @@ fn resolves_runtime_control_aliases_and_validates_args() {
     assert_eq!(add.instance_ports[0].id, "in");
 
     let sqrt = resolve_object_spec_v01("sqrt 2");
-    assert_eq!(sqrt.diagnostics[0].code, "object-spec.invalid-arg-count");
+    assert_eq!(sqrt.issues[0].code, "object-spec.invalid-arg-count");
 
     let invalid = resolve_object_spec_v01("+ true");
-    assert_eq!(invalid.diagnostics[0].code, "object-spec.invalid-arg-type");
+    assert_eq!(invalid.issues[0].code, "object-spec.invalid-arg-type");
 
     for (input, kind, param, value) in [
         ("- -2", "object.core.operator.sub", "right", json!(-2.0)),
@@ -226,15 +226,15 @@ fn resolves_runtime_control_aliases_and_validates_args() {
     assert_kind(&default_add, "object.core.operator.add");
     assert_eq!(default_add.params["right"], json!(0.0));
 
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("sqrt 1"),
         "object-spec.invalid-arg-count",
     );
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("+ 1 2"),
         "object-spec.invalid-arg-count",
     );
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("object.core.operator.mul false"),
         "object-spec.invalid-arg-type",
     );
@@ -258,14 +258,11 @@ fn resolves_runtime_value_audio_and_subpatch_aliases() {
     assert_eq!(mul.instance_ports.len(), 3);
 
     let scalar_mul = resolve_object_spec_v01("*~ 0.5");
-    assert_eq!(
-        scalar_mul.diagnostics[0].code,
-        "object-spec.invalid-arg-count"
-    );
+    assert_eq!(scalar_mul.issues[0].code, "object-spec.invalid-arg-count");
 
     let unsupported = resolve_object_spec_v01("+~");
     assert_eq!(
-        unsupported.diagnostics[0].code,
+        unsupported.issues[0].code,
         "object-spec.unsupported-first-party"
     );
 
@@ -278,7 +275,7 @@ fn resolves_runtime_value_audio_and_subpatch_aliases() {
         "object.core.audio.operator.sqrt",
         "object.core.audio.phasor",
     ] {
-        assert_diagnostic(
+        assert_issue(
             &resolve_object_spec_v01(input),
             "object-spec.unsupported-first-party",
         );
@@ -289,8 +286,8 @@ fn resolves_runtime_value_audio_and_subpatch_aliases() {
     assert_eq!(sig.params["value"], json!(0.0));
 
     let invalid_sig = resolve_object_spec_v01("sig~ false");
-    assert_diagnostic(&invalid_sig, "object-spec.invalid-arg-type");
-    assert_diagnostic(
+    assert_issue(&invalid_sig, "object-spec.invalid-arg-type");
+    assert_issue(
         &resolve_object_spec_v01("sig~ 1 2"),
         "object-spec.invalid-arg-count",
     );
@@ -298,7 +295,7 @@ fn resolves_runtime_value_audio_and_subpatch_aliases() {
     let osc = resolve_object_spec_v01("object.core.audio.osc 220");
     assert_kind(&osc, "object.core.audio.osc");
     assert_eq!(osc.params["frequency"], json!(220.0));
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("osc~ nope"),
         "object-spec.invalid-arg-type",
     );
@@ -312,7 +309,7 @@ fn resolves_runtime_value_audio_and_subpatch_aliases() {
     assert_eq!(audio_output.instance_ports[0].id, "left");
 
     let invalid_audio_output = resolve_object_spec_v01("dac~ 1");
-    assert_diagnostic(&invalid_audio_output, "object-spec.invalid-arg-count");
+    assert_issue(&invalid_audio_output, "object-spec.invalid-arg-count");
 
     let subpatch = resolve_object_spec_v01("p voice");
     assert!(subpatch.ok());
@@ -333,15 +330,15 @@ fn resolves_runtime_value_boxes_and_boundary_aliases() {
         assert_eq!(resolution.instance_ports.len(), 3);
     }
 
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("int 1.5"),
         "object-spec.invalid-arg-type",
     );
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("uint -1"),
         "object-spec.invalid-arg-type",
     );
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("float 1 2"),
         "object-spec.invalid-arg-count",
     );
@@ -350,7 +347,7 @@ fn resolves_runtime_value_boxes_and_boundary_aliases() {
     assert_kind(&bang, "object.core.bang");
     assert!(bang.params.is_empty());
     assert_eq!(bang.instance_ports[1].port_type, "value.core.bang");
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("object.core.bang 1"),
         "object-spec.invalid-arg-count",
     );
@@ -358,7 +355,7 @@ fn resolves_runtime_value_boxes_and_boundary_aliases() {
     let float_alias = resolve_object_spec_v01("f 1.5");
     assert_kind(&float_alias, "object.core.float");
     assert_eq!(float_alias.params["value"], json!(1.5));
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("float true"),
         "object-spec.invalid-arg-type",
     );
@@ -389,19 +386,19 @@ fn resolves_runtime_value_boxes_and_boundary_aliases() {
     assert_kind(&named_outlet, "object.core.outlet");
     assert_eq!(named_outlet.params["portId"], json!("right"));
 
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("p"),
         "object-spec.invalid-arg-count",
     );
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("p true"),
         "object-spec.invalid-arg-type",
     );
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("inlet left right"),
         "object-spec.invalid-arg-count",
     );
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("outlet 1"),
         "object-spec.invalid-arg-type",
     );
@@ -428,30 +425,27 @@ fn rejects_payload_identities_as_object_spec() {
     ] {
         let resolution = resolve_object_spec_v01(input);
         assert_eq!(resolution.implementation, None);
-        assert_eq!(
-            resolution.diagnostics[0].code,
-            "object-spec.payload-identity"
-        );
+        assert_eq!(resolution.issues[0].code, "object-spec.payload-identity");
     }
 }
 
 #[test]
-fn reports_unresolved_and_syntax_diagnostics_without_runtime_mapping() {
+fn reports_unresolved_and_syntax_issues_without_runtime_mapping() {
     let unresolved = resolve_object_spec_v01("user.manipulator 1");
-    assert_eq!(unresolved.diagnostics[0].code, "object-spec.unresolved");
+    assert_eq!(unresolved.issues[0].code, "object-spec.unresolved");
 
     let invalid = resolve_object_spec_v01("[+ 1");
-    assert_eq!(invalid.diagnostics[0].code, "object-spec.invalid-syntax");
+    assert_eq!(invalid.issues[0].code, "object-spec.invalid-syntax");
 
     let empty = resolve_object_spec_v01("   ");
-    assert_eq!(empty.diagnostics[0].code, "object-spec.empty");
+    assert_eq!(empty.issues[0].code, "object-spec.empty");
 
     assert_eq!(
-        runtime_object_spec_diagnostic_code("object-spec.custom-parser-code"),
+        runtime_object_spec_issue_code("object-spec.custom-parser-code"),
         "object-spec.custom-parser-code"
     );
     assert_eq!(
-        runtime_object_spec_diagnostic_code("custom-parser-code"),
+        runtime_object_spec_issue_code("custom-parser-code"),
         "object-spec.custom-parser-code"
     );
 }
@@ -497,12 +491,12 @@ fn project_patch_registry_projects_catalog_and_resolution_edges() {
     let explicit_canonical = registry.resolve("object.core.subpatch my-patcher");
     assert_kind(&explicit_canonical, "object.project.patch.my-patcher");
 
-    assert_diagnostic(
+    assert_issue(
         &registry.resolve("my-patcher 1"),
         "object-spec.invalid-arg-count",
     );
-    assert_diagnostic(&registry.resolve("p"), "object-spec.invalid-arg-count");
-    assert_diagnostic(&registry.resolve("p true"), "object-spec.invalid-arg-type");
+    assert_issue(&registry.resolve("p"), "object-spec.invalid-arg-count");
+    assert_issue(&registry.resolve("p true"), "object-spec.invalid-arg-type");
 
     let mismatched = construct_project_patch(
         ParsedObjectSpec {
@@ -544,7 +538,7 @@ fn project_patch_registry_projects_catalog_and_resolution_edges() {
             package: None,
         },
     );
-    assert_diagnostic(&mismatched, "object-spec.unresolved");
+    assert_issue(&mismatched, "object-spec.unresolved");
 }
 
 #[test]
@@ -562,11 +556,11 @@ fn object_spec_parser_preserves_runtime_atom_boundaries() {
         });
     assert_eq!(in_range_uint, ObjectSpecAtom::Int(i64::MAX));
 
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("int false"),
         "object-spec.invalid-arg-type",
     );
-    assert_diagnostic(
+    assert_issue(
         &resolve_object_spec_v01("uint false"),
         "object-spec.invalid-arg-type",
     );
@@ -597,7 +591,7 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
         ObjectResolutionStatusV01::Error
     );
     assert_eq!(
-        unavailable_provider.diagnostics[0].code,
+        unavailable_provider.issues[0].code,
         "object-spec.provider-unavailable"
     );
 
@@ -621,7 +615,7 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
         allow_unchecked_project_patch_refs: false,
     };
     let ambiguous = ambiguous_registry.resolve("shared.node");
-    assert_diagnostic(&ambiguous, "object-spec.ambiguous");
+    assert_issue(&ambiguous, "object-spec.ambiguous");
     assert_eq!(ambiguous.candidates[0].source, "package-provider");
     assert_eq!(ambiguous.candidates[1].source, "native-provider");
 
@@ -640,7 +634,7 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
         }],
         allow_unchecked_project_patch_refs: false,
     };
-    assert_diagnostic(
+    assert_issue(
         &missing_patch_metadata.resolve("broken"),
         "object-spec.unresolved",
     );
@@ -660,7 +654,7 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
         }],
         allow_unchecked_project_patch_refs: false,
     };
-    assert_diagnostic(
+    assert_issue(
         &core_without_constructor.resolve("future"),
         "object-spec.unresolved",
     );
@@ -719,7 +713,7 @@ fn package_objects_project_to_catalog_and_resolve_from_installed_registry() {
 }
 
 #[test]
-fn object_spec_materialization_and_port_projection_cover_diagnostic_edges() {
+fn object_spec_materialization_and_port_projection_cover_issue_edges() {
     let unresolved = ObjectSpecResolution {
         input: "future".to_owned(),
         display_text: "future".to_owned(),
@@ -735,7 +729,7 @@ fn object_spec_materialization_and_port_projection_cover_diagnostic_edges() {
             status: ObjectResolutionStatusV01::Unresolved,
             selected_spec: None,
             candidates: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         },
         params: Map::new(),
         instance_ports: Vec::new(),
@@ -746,7 +740,7 @@ fn object_spec_materialization_and_port_projection_cover_diagnostic_edges() {
             object_spec: Some("future".to_owned()),
             display_name: "Future".to_owned(),
         }],
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     };
 
     let materialize_error = materialize_object_spec_node_v01(&unresolved, "future_1")
@@ -754,15 +748,15 @@ fn object_spec_materialization_and_port_projection_cover_diagnostic_edges() {
     assert_eq!(materialize_error.code, "object-spec.unresolved");
     assert!(materialize_error.message.contains("future"));
 
-    let diagnostic_node = materialize_unresolved_object_spec_node_v01(&unresolved, "future_1");
-    assert_eq!(diagnostic_node.implementation, None);
+    let issue_node = materialize_unresolved_object_spec_node_v01(&unresolved, "future_1");
+    assert_eq!(issue_node.implementation, None);
     assert_eq!(
-        diagnostic_node.object_resolution.as_ref().unwrap().status,
+        issue_node.object_resolution.as_ref().unwrap().status,
         ObjectResolutionStatusV01::Unresolved
     );
-    assert_eq!(diagnostic_node.params["candidateCount"], json!(1));
+    assert_eq!(issue_node.params["candidateCount"], json!(1));
     assert_eq!(
-        diagnostic_node.params["candidates"][0]["source"],
+        issue_node.params["candidates"][0]["source"],
         "package-provider"
     );
 

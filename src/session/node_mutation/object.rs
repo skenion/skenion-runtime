@@ -90,7 +90,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::structured_error(
+                vec![RuntimeIssue::structured_error(
                     "node.target.no-project",
                     "no project loaded in runtime session",
                     json!({ "target": target }),
@@ -100,12 +100,12 @@ impl RuntimeSession {
 
         let target_revision = match target_graph_revision_current(&project, &target) {
             Ok(revision) => revision,
-            Err(diagnostic) => {
+            Err(issue) => {
                 return self.patch_response(
                     false,
                     false,
                     false,
-                    vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                    vec![operation_issue_to_runtime_issue(*issue)],
                 );
             }
         };
@@ -120,7 +120,7 @@ impl RuntimeSession {
                     false,
                     false,
                     false,
-                    vec![RuntimeDiagnostic::structured_error(
+                    vec![RuntimeIssue::structured_error(
                         "node.target.missing-graph",
                         "node target graph is not available in the active current 0.1 project",
                         json!({ "target": target }),
@@ -133,7 +133,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::structured_error(
+                vec![RuntimeIssue::structured_error(
                     "node.create.node-id-conflict",
                     format!("node id {} already exists in target graph", node.id),
                     json!({ "nodeId": node.id, "target": target }),
@@ -153,7 +153,7 @@ impl RuntimeSession {
                     false,
                     false,
                     false,
-                    vec![unsupported_patch_view_change_diagnostic(&target)],
+                    vec![unsupported_patch_view_change_issue(&target)],
                 );
             }
         }
@@ -194,7 +194,7 @@ impl RuntimeSession {
                     false,
                     false,
                     false,
-                    vec![RuntimeDiagnostic::structured_error(
+                    vec![RuntimeIssue::structured_error(
                         "node.target.no-project",
                         "no project loaded in runtime session",
                         json!({ "target": target }),
@@ -206,13 +206,13 @@ impl RuntimeSession {
 
         let target_revision = match target_graph_revision_current(&project, &target) {
             Ok(revision) => revision,
-            Err(diagnostic) => {
+            Err(issue) => {
                 return (
                     self.patch_response(
                         false,
                         false,
                         false,
-                        vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                        vec![operation_issue_to_runtime_issue(*issue)],
                     ),
                     Vec::new(),
                 );
@@ -233,7 +233,7 @@ impl RuntimeSession {
                         false,
                         false,
                         false,
-                        vec![RuntimeDiagnostic::structured_error(
+                        vec![RuntimeIssue::structured_error(
                             "node.target.missing-graph",
                             "node target graph is not available in the active current 0.1 project",
                             json!({ "target": target }),
@@ -253,7 +253,7 @@ impl RuntimeSession {
                     false,
                     false,
                     false,
-                    vec![RuntimeDiagnostic::structured_error(
+                    vec![RuntimeIssue::structured_error(
                         "node.replace.node-missing",
                         format!("node {} does not exist in target graph", node.id),
                         json!({ "nodeId": node.id, "target": target }),
@@ -267,7 +267,7 @@ impl RuntimeSession {
         graph.nodes[node_index] = node.clone();
         let invalid_incident_edge_ids = invalid_incident_edge_ids_current(&graph, &node.id);
         let policy = interface_incident_edge_policy.unwrap_or(InterfaceIncidentEdgePolicyV01::Drop);
-        let mut diagnostics = Vec::new();
+        let mut issues = Vec::new();
         if !invalid_incident_edge_ids.is_empty() {
             match policy {
                 InterfaceIncidentEdgePolicyV01::Drop => {
@@ -278,7 +278,7 @@ impl RuntimeSession {
                     graph
                         .edges
                         .retain(|edge| !invalid.contains(edge.id.as_str()));
-                    diagnostics.push(RuntimeDiagnostic::structured_warning(
+                    issues.push(RuntimeIssue::structured_warning(
                         "node.replace.incident-edges-dropped",
                         format!(
                             "node.replace dropped {} incident edge(s) that no longer match node {}'s interface",
@@ -299,7 +299,7 @@ impl RuntimeSession {
                             false,
                             false,
                             false,
-                            vec![RuntimeDiagnostic::structured_error(
+                            vec![RuntimeIssue::structured_error(
                                 "node.replace.invalid-incident-edge",
                                 format!(
                                     "node.replace would leave {} invalid incident edge(s) on node {}",
@@ -317,14 +317,14 @@ impl RuntimeSession {
                         Vec::new(),
                     );
                 }
-                InterfaceIncidentEdgePolicyV01::PreserveDiagnostic => {
+                InterfaceIncidentEdgePolicyV01::PreserveIssue => {
                     return (
                         self.patch_response(
                             false,
                             false,
                             false,
-                            vec![RuntimeDiagnostic::structured_error(
-                                "node.replace.preserve-diagnostic-unsupported",
+                            vec![RuntimeIssue::structured_error(
+                                "node.replace.preserve-issue-unsupported",
                                 "node.replace cannot preserve invalid incident edges in the current Runtime graph substrate",
                                 json!({
                                     "target": target,
@@ -356,7 +356,7 @@ impl RuntimeSession {
                         false,
                         false,
                         false,
-                        vec![unsupported_patch_view_change_diagnostic(&target)],
+                        vec![unsupported_patch_view_change_issue(&target)],
                     ),
                     Vec::new(),
                 );
@@ -366,10 +366,7 @@ impl RuntimeSession {
         let graph_changed =
             previous_node != graph.nodes[node_index] || !invalid_incident_edge_ids.is_empty();
         if !graph_changed && !view_changed {
-            return (
-                self.patch_response(true, false, false, diagnostics),
-                Vec::new(),
-            );
+            return (self.patch_response(true, false, false, issues), Vec::new());
         }
         graph.revision = next_graph_revision(&graph.revision);
         let next_view_revision = apply_graph_to_project_current(
@@ -389,7 +386,7 @@ impl RuntimeSession {
             None,
         );
         if response.applied {
-            response.diagnostics.extend(diagnostics);
+            response.issues.extend(issues);
         }
         (response, invalid_incident_edge_ids)
     }

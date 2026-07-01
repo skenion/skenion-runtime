@@ -5,7 +5,7 @@ use thiserror::Error;
 use super::{DEFAULT_BLOCK_SIZE, DEFAULT_SAMPLE_RATE};
 use crate::{
     AudioClockBridgePlan, AudioClockDomain, AudioEndpoint, AudioGraphPartition, PlanError,
-    RuntimeDiagnostic,
+    RuntimeIssue,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,23 +175,21 @@ impl Default for AudioRealtimeDspOptions {
 #[derive(Debug, Error)]
 pub enum AudioDspPlanError {
     #[error("audio dsp project validation failed")]
-    InvalidProject {
-        diagnostics: Box<[RuntimeDiagnostic]>,
-    },
+    InvalidProject { issues: Box<[RuntimeIssue]> },
     #[error("{message}")]
     Plan {
         message: String,
-        diagnostics: Box<[RuntimeDiagnostic]>,
+        issues: Box<[RuntimeIssue]>,
     },
     #[error("audio dsp block size must be greater than zero")]
-    InvalidBlockSize { diagnostic: Box<RuntimeDiagnostic> },
+    InvalidBlockSize { issue: Box<RuntimeIssue> },
     #[error("audio dsp sample rate must be greater than zero")]
-    InvalidSampleRate { diagnostic: Box<RuntimeDiagnostic> },
+    InvalidSampleRate { issue: Box<RuntimeIssue> },
     #[error("audio signal port {node_id}.{port_id} is not an audio_block node")]
     SignalPortOutsideAudioBlock {
         node_id: String,
         port_id: String,
-        diagnostic: Box<RuntimeDiagnostic>,
+        issue: Box<RuntimeIssue>,
     },
     #[error(
         "audio signal route from {source_node_id} domain {source_clock_domain_id} to {target_node_id} domain {target_clock_domain_id} requires object.core.audio.clock-bridge or object.core.audio.resample"
@@ -201,38 +199,36 @@ pub enum AudioDspPlanError {
         target_node_id: String,
         source_clock_domain_id: String,
         target_clock_domain_id: String,
-        diagnostic: Box<RuntimeDiagnostic>,
+        issue: Box<RuntimeIssue>,
     },
 }
 
 impl AudioDspPlanError {
-    pub fn diagnostics(&self) -> Vec<RuntimeDiagnostic> {
+    pub fn issues(&self) -> Vec<RuntimeIssue> {
         match self {
-            Self::InvalidProject { diagnostics } | Self::Plan { diagnostics, .. } => {
-                diagnostics.to_vec()
-            }
-            Self::InvalidBlockSize { diagnostic }
-            | Self::InvalidSampleRate { diagnostic }
-            | Self::SignalPortOutsideAudioBlock { diagnostic, .. }
-            | Self::ClockDomainCrossingRequiresBridge { diagnostic, .. } => {
-                vec![(**diagnostic).clone()]
+            Self::InvalidProject { issues } | Self::Plan { issues, .. } => issues.to_vec(),
+            Self::InvalidBlockSize { issue }
+            | Self::InvalidSampleRate { issue }
+            | Self::SignalPortOutsideAudioBlock { issue, .. }
+            | Self::ClockDomainCrossingRequiresBridge { issue, .. } => {
+                vec![(**issue).clone()]
             }
         }
     }
 
-    pub(super) fn from_diagnostics(diagnostics: Vec<RuntimeDiagnostic>) -> Self {
+    pub(super) fn from_issues(issues: Vec<RuntimeIssue>) -> Self {
         Self::InvalidProject {
-            diagnostics: diagnostics.into_boxed_slice(),
+            issues: issues.into_boxed_slice(),
         }
     }
 
     pub(super) fn from_project_validation_report(report: crate::ProjectValidationReport) -> Self {
         Self::InvalidProject {
-            diagnostics: report
+            issues: report
                 .errors()
                 .iter()
                 .map(|error| {
-                    RuntimeDiagnostic::structured_error(
+                    RuntimeIssue::structured_error(
                         "audio-dsp.invalid-project",
                         error.message.clone(),
                         json!({ "surface": "internal-project-validation" }),
@@ -249,7 +245,7 @@ impl AudioDspPlanError {
             error => {
                 let message = error.to_string();
                 Self::Plan {
-                    diagnostics: vec![RuntimeDiagnostic::structured_error(
+                    issues: vec![RuntimeIssue::structured_error(
                         "audio-dsp.plan",
                         message.clone(),
                         json!({ "surface": "internal-plan" }),
@@ -267,21 +263,22 @@ pub enum AudioOfflineDspError {
     #[error("{0}")]
     Plan(#[from] AudioDspPlanError),
     #[error("audio offline dsp block count must be greater than zero")]
-    InvalidBlockCount { diagnostic: Box<RuntimeDiagnostic> },
+    InvalidBlockCount { issue: Box<RuntimeIssue> },
     #[error("offline audio dsp node {node_id} uses unsupported kind {kind}")]
     UnsupportedNodeKind {
         node_id: String,
         kind: String,
-        diagnostic: Box<RuntimeDiagnostic>,
+        issue: Box<RuntimeIssue>,
     },
 }
 
 impl AudioOfflineDspError {
-    pub fn diagnostics(&self) -> Vec<RuntimeDiagnostic> {
+    pub fn issues(&self) -> Vec<RuntimeIssue> {
         match self {
-            Self::Plan(error) => error.diagnostics(),
-            Self::InvalidBlockCount { diagnostic }
-            | Self::UnsupportedNodeKind { diagnostic, .. } => vec![(**diagnostic).clone()],
+            Self::Plan(error) => error.issues(),
+            Self::InvalidBlockCount { issue } | Self::UnsupportedNodeKind { issue, .. } => {
+                vec![(**issue).clone()]
+            }
         }
     }
 }
@@ -291,29 +288,29 @@ pub enum AudioRealtimeDspError {
     #[error("{0}")]
     Plan(#[from] AudioDspPlanError),
     #[error("audio realtime dsp output channel count must be greater than zero")]
-    InvalidChannelCount { diagnostic: Box<RuntimeDiagnostic> },
+    InvalidChannelCount { issue: Box<RuntimeIssue> },
     #[error(
         "audio realtime dsp graph must contain exactly one object.core.audio.output node, found {count}"
     )]
     OutputCount {
         count: usize,
-        diagnostic: Box<RuntimeDiagnostic>,
+        issue: Box<RuntimeIssue>,
     },
     #[error("audio realtime dsp node {node_id} uses unsupported kind {kind}")]
     UnsupportedNodeKind {
         node_id: String,
         kind: String,
-        diagnostic: Box<RuntimeDiagnostic>,
+        issue: Box<RuntimeIssue>,
     },
 }
 
 impl AudioRealtimeDspError {
-    pub fn diagnostics(&self) -> Vec<RuntimeDiagnostic> {
+    pub fn issues(&self) -> Vec<RuntimeIssue> {
         match self {
-            Self::Plan(error) => error.diagnostics(),
-            Self::InvalidChannelCount { diagnostic }
-            | Self::OutputCount { diagnostic, .. }
-            | Self::UnsupportedNodeKind { diagnostic, .. } => vec![(**diagnostic).clone()],
+            Self::Plan(error) => error.issues(),
+            Self::InvalidChannelCount { issue }
+            | Self::OutputCount { issue, .. }
+            | Self::UnsupportedNodeKind { issue, .. } => vec![(**issue).clone()],
         }
     }
 }

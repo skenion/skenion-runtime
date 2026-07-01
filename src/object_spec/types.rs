@@ -18,12 +18,12 @@ pub(crate) struct ObjectSpecResolution {
     pub(crate) params: Map<String, Value>,
     pub(crate) instance_ports: Vec<ObjectSpecPort>,
     pub(crate) candidates: Vec<ObjectSpecCandidateSummary>,
-    pub(crate) diagnostics: Vec<ObjectSpecDiagnostic>,
+    pub(crate) issues: Vec<ObjectSpecIssue>,
 }
 
 impl ObjectSpecResolution {
     pub(crate) fn ok(&self) -> bool {
-        self.diagnostics.is_empty()
+        self.issues.is_empty()
     }
 }
 
@@ -45,7 +45,7 @@ pub(crate) enum ObjectSpecAtom {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObjectSpecDiagnostic {
+pub(crate) struct ObjectSpecIssue {
     pub(crate) code: String,
     pub(crate) message: String,
 }

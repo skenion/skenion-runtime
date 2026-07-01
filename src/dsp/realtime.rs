@@ -8,7 +8,7 @@ use super::{
     AUDIO_OUTPUT_KIND, AudioDspPlan, AudioDspPlanNode, AudioRealtimeDspError,
     AudioRealtimeDspOptions, build_audio_dsp_plan, build_audio_dsp_plan_with_graph_current,
 };
-use crate::{GraphDocument, NodeRegistry, ProjectRequestCurrent, RuntimeDiagnostic};
+use crate::{GraphDocument, NodeRegistry, ProjectRequestCurrent, RuntimeIssue};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum AudioRealtimeNodeKind {
@@ -45,7 +45,7 @@ impl AudioRealtimeDspExecutor {
     ) -> Result<Self, AudioRealtimeDspError> {
         if options.channels == 0 {
             return Err(AudioRealtimeDspError::InvalidChannelCount {
-                diagnostic: invalid_channel_count_diagnostic(),
+                issue: invalid_channel_count_issue(),
             });
         }
         let (plan, graph) = build_audio_dsp_plan_with_graph_current(request, options.plan)?;
@@ -60,7 +60,7 @@ impl AudioRealtimeDspExecutor {
     ) -> Result<Self, AudioRealtimeDspError> {
         if options.channels == 0 {
             return Err(AudioRealtimeDspError::InvalidChannelCount {
-                diagnostic: invalid_channel_count_diagnostic(),
+                issue: invalid_channel_count_issue(),
             });
         }
         let plan = build_audio_dsp_plan(graph, registry, options.plan)?;
@@ -80,7 +80,7 @@ impl AudioRealtimeDspExecutor {
         if output_nodes.len() != 1 {
             return Err(AudioRealtimeDspError::OutputCount {
                 count: output_nodes.len(),
-                diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                issue: Box::new(RuntimeIssue::structured_error(
                     "audio-dsp.realtime-output-count",
                     format!(
                         "audio realtime dsp graph must contain exactly one object.core.audio.output node, found {}",
@@ -98,7 +98,7 @@ impl AudioRealtimeDspExecutor {
             return Err(AudioRealtimeDspError::UnsupportedNodeKind {
                 node_id: node.node_id.clone(),
                 kind: node.kind.clone(),
-                diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                issue: Box::new(RuntimeIssue::structured_error(
                     "audio-dsp.realtime-unsupported-node-kind",
                     format!(
                         "audio realtime dsp node {} uses unsupported kind {}",
@@ -255,8 +255,8 @@ impl AudioRealtimeDspExecutor {
     }
 }
 
-fn invalid_channel_count_diagnostic() -> Box<RuntimeDiagnostic> {
-    Box::new(RuntimeDiagnostic::structured_error(
+fn invalid_channel_count_issue() -> Box<RuntimeIssue> {
+    Box::new(RuntimeIssue::structured_error(
         "audio-dsp.invalid-realtime-channel-count",
         "audio realtime dsp output channel count must be greater than zero",
         json!({ "channels": 0 }),

@@ -20,12 +20,12 @@ pub(in crate::object_spec) fn parse_object_spec_input_v01(
         });
     }
 
-    let diagnostic = parsed.diagnostics.first();
-    let code = diagnostic
-        .map(|diagnostic| runtime_object_spec_diagnostic_code(&diagnostic.code))
+    let issue = parsed.issues.first();
+    let code = issue
+        .map(|issue| runtime_object_spec_issue_code(&issue.code))
         .unwrap_or_else(|| "object-spec.invalid-syntax".to_owned());
-    let message = diagnostic
-        .map(|diagnostic| diagnostic.message.clone())
+    let message = issue
+        .map(|issue| issue.message.clone())
         .unwrap_or_else(|| "object spec could not be parsed".to_owned());
     Err(Box::new(failure(
         &parsed.input,
@@ -37,7 +37,7 @@ pub(in crate::object_spec) fn parse_object_spec_input_v01(
     )))
 }
 
-pub(in crate::object_spec) fn runtime_object_spec_diagnostic_code(code: &str) -> String {
+pub(in crate::object_spec) fn runtime_object_spec_issue_code(code: &str) -> String {
     match code {
         "empty-object-spec" => "object-spec.empty".to_owned(),
         "invalid-syntax" => "object-spec.invalid-syntax".to_owned(),

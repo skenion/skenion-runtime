@@ -89,5 +89,5 @@ pub(in crate::realtime) enum HistoryCommandScope {
 #[serde(rename_all = "kebab-case")]
 pub(in crate::realtime) enum ObjectUnresolvedPolicy {
     Reject,
-    MaterializeDiagnostic,
+    MaterializeIssue,
 }

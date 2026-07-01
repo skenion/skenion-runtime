@@ -10,8 +10,8 @@ use crate::{
     ControlMessage, ControlValue, Edge, EdgeEndpointCurrent, EdgeSpecCurrent, GraphDocument,
     GraphDocumentCurrent, GraphPatch, NodeRegistry, PasteGraphFragmentRequest, PortRef,
     PortSpecCurrent, ProjectRequestCurrent, RuntimeCollaborationChange, RuntimeControlEmission,
-    RuntimeControlEventRequest, RuntimeControlReadRequest, RuntimeControlReadTarget,
-    RuntimeDiagnostic, RuntimeOperationDiagnostic, RuntimeOperationEnvelope, ViewState,
+    RuntimeControlEventRequest, RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeIssue,
+    RuntimeOperationEnvelope, RuntimeOperationIssue, ViewState,
 };
 
 fn core_impl(object_id: &str) -> crate::ObjectImplementationRefCurrent {
@@ -41,7 +41,7 @@ fn current_core_node_json(
       "objectResolution": {
         "status": "resolved",
         "candidates": [],
-        "diagnostics": []
+        "issues": []
       },
       "params": params,
       "ports": ports
@@ -64,7 +64,7 @@ fn current_provider_node_json(id: &str, object_id: &str, params: Value, ports: V
       "objectResolution": {
         "status": "resolved",
         "candidates": [],
-        "diagnostics": []
+        "issues": []
       },
       "params": params,
       "ports": ports
@@ -78,7 +78,7 @@ fn current_unresolved_node_json(id: &str, object_spec: &str) -> Value {
       "objectResolution": {
         "status": "unresolved",
         "candidates": [],
-          "diagnostics": [
+          "issues": [
           {
             "code": "resolution-unresolved",
             "severity": "error",
@@ -88,7 +88,7 @@ fn current_unresolved_node_json(id: &str, object_spec: &str) -> Value {
       },
       "params": {
         "objectSpec": object_spec,
-        "diagnosticMessage": format!("{object_spec} is not available in the local runtime registry."),
+        "issueMessage": format!("{object_spec} is not available in the local runtime registry."),
         "requestedKind": object_spec
       },
       "ports": []
@@ -203,9 +203,9 @@ fn package_registry_with_definition(
                 }],
                 ..Default::default()
             },
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }],
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     }
 }
 
@@ -213,12 +213,11 @@ use super::{
     HistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest, RuntimePatchResponse,
     RuntimeSession, RuntimeViewPatch, RuntimeViewPatchOperation, lower_fragment_view_patch,
     lower_port_for_execution, remap_edge, runtime_binding_format_revision,
-    runtime_diagnostic_to_operation_diagnostic, runtime_value_format_label,
-    value_format_for_port_type,
+    runtime_issue_to_operation_issue, runtime_value_format_label, value_format_for_port_type,
 };
 
 #[test]
-fn invalid_registry_load_returns_diagnostics_without_revision_change() {
+fn invalid_registry_load_returns_issues_without_revision_change() {
     let mut session = RuntimeSession::default();
     let mut request = sample_project_current();
     request.nodes[0].schema_version = "9.9.9".to_owned();
@@ -228,7 +227,7 @@ fn invalid_registry_load_returns_diagnostics_without_revision_change() {
     assert!(!response.ok);
     assert!(!response.snapshot.loaded());
     assert_eq!(response.snapshot.session_revision, 0);
-    assert!(!response.diagnostics.is_empty());
+    assert!(!response.issues.is_empty());
 }
 
 #[test]
@@ -277,7 +276,7 @@ fn package_registry_definitions_are_available_during_current_load() {
             "objectResolution": {
               "status": "resolved",
               "candidates": [],
-              "diagnostics": []
+              "issues": []
             },
             "params": {},
             "ports": value_f32_ports_current_json()
@@ -305,7 +304,7 @@ fn package_registry_definitions_are_available_during_current_load() {
         Some(package_registry),
     );
 
-    assert!(response.ok, "{:?}", response.diagnostics);
+    assert!(response.ok, "{:?}", response.issues);
     assert_eq!(response.snapshot.package_registry_revision, Some(7));
     assert!(session.nodes_current.iter().any(
         |definition| definition.id == "example.package.node" && definition.version == "0.56.0"
@@ -332,7 +331,7 @@ fn validate_and_plan_fail_without_loaded_project() {
     assert!(!plan.ok);
     assert!(preview_control.is_none());
     assert!(
-        plan.diagnostics[0]
+        plan.issues[0]
             .message
             .contains("no project loaded in runtime session")
     );
@@ -396,14 +395,14 @@ fn session_snapshot_derives_endpoint_binding_value_formats() {
 #[test]
 fn legacy_session_plan_errors_include_surface_and_graph_context() {
     let graph = sample_internal_graph();
-    let diagnostics =
+    let issues =
         super::build_session_execution_plan(&graph, &NodeRegistry::new(), "session.legacy-plan")
             .expect_err("empty registry should reject graph nodes without definitions");
 
-    let invalid_project = diagnostics
+    let invalid_project = issues
         .iter()
-        .find(|diagnostic| diagnostic.code.as_deref() == Some("session.plan.invalid-project"))
-        .expect("invalid project diagnostic should be preserved");
+        .find(|issue| issue.code.as_deref() == Some("session.plan.invalid-project"))
+        .expect("invalid project issue should be preserved");
     assert_eq!(
         invalid_project
             .details
@@ -428,7 +427,7 @@ fn plan_current_reports_invalid_stored_project() {
         graph: Some(sample_internal_graph()),
         registry: Some(NodeRegistry::new()),
         plan: None,
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
         revision: 1,
         ..RuntimeSession::default()
     };
@@ -437,11 +436,7 @@ fn plan_current_reports_invalid_stored_project() {
 
     assert!(!response.ok);
     assert!(response.snapshot.plan.is_none());
-    assert!(
-        response.diagnostics[0]
-            .message
-            .contains("no project loaded")
-    );
+    assert!(response.issues[0].message.contains("no project loaded"));
 }
 
 #[test]
@@ -450,7 +445,7 @@ fn validate_current_reports_invalid_stored_project() {
         graph: Some(sample_internal_graph()),
         registry: None,
         plan: None,
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
         revision: 1,
         ..RuntimeSession::default()
     };
@@ -458,11 +453,7 @@ fn validate_current_reports_invalid_stored_project() {
     let response = session.validate_current();
 
     assert!(!response.ok);
-    assert!(
-        response.diagnostics[0]
-            .message
-            .contains("no project loaded")
-    );
+    assert!(response.issues[0].message.contains("no project loaded"));
 }
 
 #[test]
@@ -471,7 +462,7 @@ fn validate_current_reports_registry_validation_errors() {
         graph: Some(sample_internal_graph()),
         registry: Some(NodeRegistry::new()),
         plan: None,
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
         revision: 1,
         ..RuntimeSession::default()
     };
@@ -479,11 +470,7 @@ fn validate_current_reports_registry_validation_errors() {
     let response = session.validate_current();
 
     assert!(!response.ok);
-    assert!(
-        response.diagnostics[0]
-            .message
-            .contains("no project loaded")
-    );
+    assert!(response.issues[0].message.contains("no project loaded"));
 }
 
 #[test]
@@ -506,7 +493,7 @@ fn run_current_returns_plan_failure_when_rebuild_fails() {
         graph: Some(sample_internal_graph()),
         registry: Some(NodeRegistry::new()),
         plan: None,
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
         revision: 1,
         ..RuntimeSession::default()
     };
@@ -515,11 +502,7 @@ fn run_current_returns_plan_failure_when_rebuild_fails() {
 
     assert!(!response.ok);
     assert!(response.report.is_none());
-    assert!(
-        response.diagnostics[0]
-            .message
-            .contains("no project loaded")
-    );
+    assert!(response.issues[0].message.contains("no project loaded"));
 }
 
 #[test]
@@ -532,11 +515,7 @@ fn control_event_fails_without_loaded_project() {
     assert!(!response.ok);
     assert!(response.emitted.is_empty());
     assert_eq!(session.snapshot().session_revision, 0);
-    assert!(
-        response.diagnostics[0]
-            .message
-            .contains("no project loaded")
-    );
+    assert!(response.issues[0].message.contains("no project loaded"));
 }
 
 #[test]
@@ -671,7 +650,7 @@ fn control_read_addresses_params_ports_and_state() {
 }
 
 #[test]
-fn invalid_control_read_reports_diagnostics() {
+fn invalid_control_read_reports_issues() {
     let mut session = RuntimeSession::default();
     let missing_session = session.read_control(control_read(
         "value_1",
@@ -680,7 +659,7 @@ fn invalid_control_read_reports_diagnostics() {
     ));
     assert!(!missing_session.ok);
     assert!(
-        missing_session.diagnostics[0]
+        missing_session.issues[0]
             .message
             .contains("no project loaded")
     );
@@ -693,7 +672,7 @@ fn invalid_control_read_reports_diagnostics() {
     ));
     assert!(!missing_port.ok);
     assert!(
-        missing_port.diagnostics[0]
+        missing_port.issues[0]
             .message
             .contains("port missing does not exist")
     );
@@ -705,7 +684,7 @@ fn invalid_control_read_reports_diagnostics() {
     ));
     assert!(!missing_node.ok);
     assert!(
-        missing_node.diagnostics[0]
+        missing_node.issues[0]
             .message
             .contains("node missing does not exist")
     );
@@ -717,7 +696,7 @@ fn invalid_control_read_reports_diagnostics() {
     ));
     assert!(!missing_param.ok);
     assert!(
-        missing_param.diagnostics[0]
+        missing_param.issues[0]
             .message
             .contains("param missing does not exist")
     );
@@ -729,7 +708,7 @@ fn invalid_control_read_reports_diagnostics() {
     ));
     assert!(!missing_state_id.ok);
     assert!(
-        missing_state_id.diagnostics[0]
+        missing_state_id.issues[0]
             .message
             .contains("state other does not exist")
     );
@@ -746,7 +725,7 @@ fn invalid_control_read_reports_diagnostics() {
     ));
     assert!(!missing_runtime_state.ok);
     assert!(
-        missing_runtime_state.diagnostics[0]
+        missing_runtime_state.issues[0]
             .message
             .contains("has no runtime control state")
     );
@@ -797,7 +776,7 @@ fn failed_control_propagation_does_not_mutate_state_or_revision() {
     let response = session.apply_control_event(control_request("value_1", "in", f32_value(9.0)));
 
     assert!(!response.ok);
-    assert!(response.diagnostics[0].message.contains("port missing"));
+    assert!(response.issues[0].message.contains("port missing"));
     assert_eq!(response.control_revision, Some(before.control_revision));
     assert_eq!(session.snapshot().control_revision, before.control_revision);
     assert_eq!(
@@ -895,7 +874,7 @@ fn patch_without_loaded_session_returns_error() {
     assert!(response.snapshot.project.is_none());
     assert!(!response.snapshot.loaded());
     assert!(
-        response.diagnostics[0]
+        response.issues[0]
             .message
             .contains("no project loaded in runtime session")
     );
@@ -923,31 +902,32 @@ fn patch_with_matching_revision_applies_and_rebuilds_plan() {
 }
 
 #[test]
-fn unresolved_object_loads_session_with_error_diagnostic() {
+fn unresolved_object_loads_session_with_error_issue() {
     let mut session = RuntimeSession::default();
 
     let response = session.load_project_current(unresolved_project_current());
 
     assert!(response.ok);
     assert!(response.snapshot.loaded());
-    assert!(response.diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("unresolved object user.manipulator")
-    }));
-    assert_eq!(session.snapshot().diagnostics, response.diagnostics);
+    assert!(
+        response
+            .issues
+            .iter()
+            .any(|issue| { issue.message.contains("unresolved object user.manipulator") })
+    );
+    assert_eq!(session.snapshot().issues, response.issues);
 
     let plan = session.plan_current();
     assert!(plan.ok);
-    assert!(plan.diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("unresolved object user.manipulator")
-    }));
+    assert!(
+        plan.issues
+            .iter()
+            .any(|issue| { issue.message.contains("unresolved object user.manipulator") })
+    );
 }
 
 #[test]
-fn replace_node_with_unresolved_object_applies_with_error_diagnostic() {
+fn replace_node_with_unresolved_object_applies_with_error_issue() {
     let mut session = RuntimeSession::default();
     let loaded = session.load_project_current(sample_project_current());
     assert!(loaded.ok);
@@ -1053,9 +1033,9 @@ fn payload_identity_session_load_preserves_existing_project() {
     );
     assert!(
         response
-            .diagnostics
+            .issues
             .iter()
-            .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.payload-node-kind"))
+            .any(|issue| issue.code.as_deref() == Some("graph.payload-node-kind"))
     );
     assert_eq!(snapshot.graph_revision(), Some("1"));
     assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
@@ -1138,11 +1118,11 @@ fn history_starts_empty_and_undo_redo_empty_stack_returns_errors() {
     assert!(!undo.ok);
     assert!(!undo.applied);
     assert!(latest_history_entry(&undo).is_none());
-    assert!(undo.diagnostics[0].message.contains("available to undo"));
+    assert!(undo.issues[0].message.contains("available to undo"));
     assert!(!redo.ok);
     assert!(!redo.applied);
     assert!(latest_history_entry(&redo).is_none());
-    assert!(redo.diagnostics[0].message.contains("available to redo"));
+    assert!(redo.issues[0].message.contains("available to redo"));
 }
 
 #[test]
@@ -1298,10 +1278,10 @@ fn empty_and_conflicting_view_mutations_are_rejected_without_history() {
 
     assert!(!empty.ok);
     assert!(!empty.applied);
-    assert!(empty.diagnostics[0].message.contains("did not include"));
+    assert!(empty.issues[0].message.contains("did not include"));
     assert!(!conflict.ok);
     assert!(conflict.conflict);
-    assert!(conflict.diagnostics[0].message.contains("baseViewRevision"));
+    assert!(conflict.issues[0].message.contains("baseViewRevision"));
     assert_eq!(conflict.history.entries.len(), 0);
 }
 
@@ -1366,15 +1346,11 @@ fn view_patch_set_node_view_success_errors_and_noop_paths() {
         description: None,
     });
     assert!(!missing_node.ok);
-    assert!(
-        missing_node.diagnostics[0]
-            .message
-            .contains("does not exist")
-    );
+    assert!(missing_node.issues[0].message.contains("does not exist"));
 }
 
 #[test]
-fn view_mutation_on_invalid_stored_graph_returns_diagnostics_without_panic() {
+fn view_mutation_on_invalid_stored_graph_returns_issues_without_panic() {
     let mut session = RuntimeSession::default();
     let loaded = load_sample_project(&mut session);
     assert!(loaded.ok);
@@ -1419,7 +1395,7 @@ fn view_mutation_on_invalid_stored_graph_returns_diagnostics_without_panic() {
             description: Some("drag invalid stored graph".to_owned()),
         })
     }))
-    .expect("invalid stored graph should return diagnostics instead of panicking");
+    .expect("invalid stored graph should return issues instead of panicking");
 
     assert!(!response.ok);
     assert!(!response.applied);
@@ -1434,15 +1410,15 @@ fn view_mutation_on_invalid_stored_graph_returns_diagnostics_without_panic() {
     );
     assert!(response.snapshot.plan.is_none());
     assert!(
-        response.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code.as_deref() == Some("session.plan.invalid-project")
-                && diagnostic.message.contains(
+        response.issues.iter().any(|issue| {
+            issue.code.as_deref() == Some("session.plan.invalid-project")
+                && issue.message.contains(
                     "incompatible edge value_1:value value.core.float32 -> target_1:cold value.core.bool",
                 )
         })
     );
-    assert!(response.snapshot.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains(
+    assert!(response.snapshot.issues.iter().any(|issue| {
+        issue.message.contains(
             "incompatible edge value_1:value value.core.float32 -> target_1:cold value.core.bool",
         )
     }));
@@ -1687,7 +1663,7 @@ fn failed_history_operations_do_not_mutate_stacks_or_session() {
     assert!(!no_loaded_response.ok);
     assert_eq!(no_loaded_response.history.undo_depth, 1);
     assert!(
-        no_loaded_response.diagnostics[0]
+        no_loaded_response.issues[0]
             .message
             .contains("no project loaded")
     );
@@ -1720,7 +1696,7 @@ fn failed_history_operations_do_not_mutate_stacks_or_session() {
     assert!(!invalid_redo_response.ok);
     assert_eq!(invalid_redo_response.history.redo_depth, 1);
     assert_eq!(
-        invalid_redo_response.diagnostics[0].code.as_deref(),
+        invalid_redo_response.issues[0].code.as_deref(),
         Some("project.graph-patch-unsupported")
     );
 
@@ -1729,9 +1705,9 @@ fn failed_history_operations_do_not_mutate_stacks_or_session() {
     let no_actor_undo = no_actor_history.undo_for_actor("participant-a");
     let no_actor_redo = no_actor_history.redo_for_actor("participant-a");
     assert!(!no_actor_undo.ok);
-    assert!(no_actor_undo.diagnostics[0].message.contains("actor"));
+    assert!(no_actor_undo.issues[0].message.contains("actor"));
     assert!(!no_actor_redo.ok);
-    assert!(no_actor_redo.diagnostics[0].message.contains("actor"));
+    assert!(no_actor_redo.issues[0].message.contains("actor"));
 
     let mut invalid_actor_inverse = RuntimeSession::default();
     load_sample_project(&mut invalid_actor_inverse);
@@ -1767,9 +1743,7 @@ fn reject_patch_uses_current_session_snapshot() {
 
     let response = session.reject_patch(
         false,
-        vec![RuntimeDiagnostic::error(
-            "invalid graph patch: unsupported op",
-        )],
+        vec![RuntimeIssue::error("invalid graph patch: unsupported op")],
     );
 
     assert!(!response.ok);
@@ -1778,7 +1752,7 @@ fn reject_patch_uses_current_session_snapshot() {
     assert_eq!((response.history.entries).len(), 0);
     assert_eq!(patch_graph(&response).revision, "1");
     assert_eq!(response.snapshot.graph_revision(), Some("1"));
-    assert!(response.diagnostics[0].message.contains("unsupported op"));
+    assert!(response.issues[0].message.contains("unsupported op"));
 }
 
 #[test]
@@ -1837,10 +1811,7 @@ fn payload_identity_paste_is_rejected_without_mutating_session() {
 
     assert!(!response.ok);
     assert!(!response.applied);
-    assert_eq!(
-        response.diagnostics[0].code,
-        "paste.fragment.payload-node-kind"
-    );
+    assert_eq!(response.issues[0].code, "paste.fragment.payload-node-kind");
     assert_eq!(response.revision_after, None);
     assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
     assert_eq!(snapshot.graph_revision(), Some("1"));
@@ -1897,7 +1868,7 @@ fn paste_graph_fragment_reports_no_loaded_project() {
     assert!(!response.ok);
     assert!(!response.applied);
     assert_eq!(response.revision_before, "1");
-    assert_eq!(response.diagnostics[0].code, "paste.target.no-project");
+    assert_eq!(response.issues[0].code, "paste.target.no-project");
 }
 
 #[test]
@@ -1911,12 +1882,9 @@ fn paste_graph_fragment_rejects_invalid_operation_envelope() {
 
     assert!(!response.ok);
     assert!(!response.applied);
-    assert_eq!(
-        response.diagnostics[0].code,
-        "paste.operation.invalid-envelope"
-    );
+    assert_eq!(response.issues[0].code, "paste.operation.invalid-envelope");
     assert!(
-        response.diagnostics[0]
+        response.issues[0]
             .message
             .contains("unsupported runtime operation kind")
     );
@@ -1938,9 +1906,9 @@ fn paste_graph_fragment_rejects_id_conflicts_when_requested() {
 
     assert!(!response.ok);
     assert!(!response.applied);
-    assert_eq!(response.diagnostics[0].code, "paste.id-conflict");
+    assert_eq!(response.issues[0].code, "paste.id-conflict");
     assert_eq!(
-        response.diagnostics[0].duplicates.as_deref(),
+        response.issues[0].duplicates.as_deref(),
         Some(&["value_1".to_owned()][..])
     );
     assert_eq!(
@@ -1974,22 +1942,22 @@ fn paste_graph_fragment_rejects_unsupported_interface_incident_edge_policy() {
     assert_eq!(response.revision_after, None);
     assert!(response.id_remap.node_id_map.is_empty());
     assert_eq!(
-        response.diagnostics[0].code,
+        response.issues[0].code,
         "paste.options.unsupported-interface-incident-edge-policy"
     );
     assert_eq!(
-        response.diagnostics[0].path.as_deref(),
+        response.issues[0].path.as_deref(),
         Some("request.options.interfaceIncidentEdgePolicy")
     );
     assert_eq!(
-        response.diagnostics[0].interface_policy,
+        response.issues[0].interface_policy,
         Some(skenion_contracts::InterfaceIncidentEdgePolicyV01::Reject)
     );
     assert_eq!(session.snapshot().graph_revision(), Some("1"));
 }
 
 #[test]
-fn paste_graph_fragment_reports_apply_mutation_failures_as_operation_diagnostics() {
+fn paste_graph_fragment_reports_apply_mutation_failures_as_operation_issues() {
     let mut session = RuntimeSession::default();
     load_sample_project(&mut session);
     let mut operation = paste_operation("1");
@@ -2002,11 +1970,11 @@ fn paste_graph_fragment_reports_apply_mutation_failures_as_operation_diagnostics
     assert_eq!(response.history_entry_id, None);
     assert_eq!(response.revision_after, None);
     assert_eq!(
-        response.diagnostics[0].code,
+        response.issues[0].code,
         "object-spec.implementation-mismatch"
     );
     assert!(
-        response.diagnostics[0]
+        response.issues[0]
             .message
             .contains("resolves to implementation")
     );
@@ -2023,15 +1991,8 @@ fn paste_operation_validation_reports_fragment_analysis_errors() {
 
     assert!(!response.ok);
     assert!(!response.applied);
-    assert_eq!(
-        response.diagnostics[0].code,
-        "paste.operation.invalid-envelope"
-    );
-    assert!(
-        response.diagnostics[0]
-            .message
-            .contains("missing-target-port")
-    );
+    assert_eq!(response.issues[0].code, "paste.operation.invalid-envelope");
+    assert!(response.issues[0].message.contains("missing-target-port"));
     assert!(response.id_remap.node_id_map.is_empty());
 }
 
@@ -2097,29 +2058,29 @@ fn paste_lowering_handles_absent_fragment_view_and_unmapped_edge_endpoints() {
 }
 
 #[test]
-fn runtime_diagnostic_conversion_preserves_severity_and_code_defaults() {
+fn runtime_issue_conversion_preserves_severity_and_code_defaults() {
     let target = skenion_contracts::GraphTargetRef {
         path: skenion_contracts::PatchPath::Root,
         base_revision: "1".to_owned(),
         target_revision: None,
     };
-    let error = RuntimeDiagnostic::error("plain error");
-    let warning = RuntimeDiagnostic {
-        severity: crate::DiagnosticSeverity::Warning,
+    let error = RuntimeIssue::error("plain error");
+    let warning = RuntimeIssue {
+        severity: crate::IssueSeverity::Warning,
         message: "coded warning".to_owned(),
         code: Some("runtime.warning".to_owned()),
         details: None,
     };
-    let info = RuntimeDiagnostic {
-        severity: crate::DiagnosticSeverity::Info,
+    let info = RuntimeIssue {
+        severity: crate::IssueSeverity::Info,
         message: "info".to_owned(),
         code: Some("runtime.info".to_owned()),
         details: None,
     };
 
-    let converted_error = runtime_diagnostic_to_operation_diagnostic(&error, &target);
-    let converted_warning = runtime_diagnostic_to_operation_diagnostic(&warning, &target);
-    let converted_info = runtime_diagnostic_to_operation_diagnostic(&info, &target);
+    let converted_error = runtime_issue_to_operation_issue(&error, &target);
+    let converted_warning = runtime_issue_to_operation_issue(&warning, &target);
+    let converted_info = runtime_issue_to_operation_issue(&info, &target);
 
     assert_eq!(converted_error.severity, "error");
     assert_eq!(converted_error.code, "paste.lowering.failed");
@@ -2128,7 +2089,7 @@ fn runtime_diagnostic_conversion_preserves_severity_and_code_defaults() {
     assert_eq!(converted_info.severity, "info");
     assert_eq!(converted_info.code, "runtime.info");
 
-    let warning = super::operation_diagnostic_to_runtime_diagnostic(RuntimeOperationDiagnostic {
+    let warning = super::operation_issue_to_runtime_issue(RuntimeOperationIssue {
         severity: "warning".to_owned(),
         code: "paste.warning".to_owned(),
         message: "warning".to_owned(),
@@ -2142,7 +2103,7 @@ fn runtime_diagnostic_conversion_preserves_severity_and_code_defaults() {
         interface_policy: None,
         interface_detail: None,
     });
-    let info = super::operation_diagnostic_to_runtime_diagnostic(RuntimeOperationDiagnostic {
+    let info = super::operation_issue_to_runtime_issue(RuntimeOperationIssue {
         severity: "info".to_owned(),
         code: "paste.info".to_owned(),
         message: "info".to_owned(),
@@ -2156,9 +2117,9 @@ fn runtime_diagnostic_conversion_preserves_severity_and_code_defaults() {
         interface_policy: None,
         interface_detail: None,
     });
-    assert_eq!(warning.severity, crate::DiagnosticSeverity::Warning);
+    assert_eq!(warning.severity, crate::IssueSeverity::Warning);
     assert_eq!(warning.code.as_deref(), Some("paste.warning"));
-    assert_eq!(info.severity, crate::DiagnosticSeverity::Info);
+    assert_eq!(info.severity, crate::IssueSeverity::Info);
     assert_eq!(info.code.as_deref(), Some("paste.info"));
 }
 
@@ -2190,9 +2151,9 @@ fn rejected_collaboration_edge_connect_preserves_session_graph() {
     assert!(!response.applied);
     assert!(
         response
-            .diagnostics
+            .issues
             .iter()
-            .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.edge-target-direction"))
+            .any(|issue| issue.code.as_deref() == Some("graph.edge-target-direction"))
     );
     assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
     assert_eq!(snapshot.graph_revision(), Some("1"));
@@ -2237,9 +2198,9 @@ fn rejected_payload_identity_collaboration_node_add_preserves_session_graph() {
     assert!(!response.applied);
     assert!(
         response
-            .diagnostics
+            .issues
             .iter()
-            .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.payload-node-kind"))
+            .any(|issue| issue.code.as_deref() == Some("graph.payload-node-kind"))
     );
     assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
     assert_eq!(snapshot.graph_revision(), Some("1"));
@@ -2281,7 +2242,7 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
         None,
     );
     assert_eq!(
-        no_project.diagnostics[0].code.as_deref(),
+        no_project.issues[0].code.as_deref(),
         Some("collaboration.target.no-project")
     );
 
@@ -2291,25 +2252,25 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
     invalid_request.document = Some(invalid_document);
     let invalid_document_response = unloaded.load_project_current(invalid_request);
     assert_eq!(
-        invalid_document_response.diagnostics[0].code.as_deref(),
+        invalid_document_response.issues[0].code.as_deref(),
         Some("project.unsupported-schema-version")
     );
     assert_eq!(
-        invalid_document_response.diagnostics[0]
+        invalid_document_response.issues[0]
             .details
             .as_ref()
             .unwrap()["surface"],
         "project"
     );
     assert_eq!(
-        invalid_document_response.diagnostics[0]
+        invalid_document_response.issues[0]
             .details
             .as_ref()
             .unwrap()["expectedSchemaVersion"],
         "0.1.0"
     );
     assert_eq!(
-        invalid_document_response.diagnostics[0]
+        invalid_document_response.issues[0]
             .details
             .as_ref()
             .unwrap()["receivedSchemaVersion"],
@@ -2335,7 +2296,7 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
     );
     assert!(stale.conflict);
     assert_eq!(
-        stale.diagnostics[0].code.as_deref(),
+        stale.issues[0].code.as_deref(),
         Some("collaboration.revision-conflict")
     );
 
@@ -2352,7 +2313,7 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
         None,
     );
     assert_eq!(
-        missing_target.diagnostics[0].code.as_deref(),
+        missing_target.issues[0].code.as_deref(),
         Some("paste.target.missing-help-working-copy")
     );
 
@@ -2364,7 +2325,7 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
         None,
     );
     assert_eq!(
-        duplicate.diagnostics[0].code.as_deref(),
+        duplicate.issues[0].code.as_deref(),
         Some("collaboration.node-id-conflict")
     );
 
@@ -2395,7 +2356,7 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
         current_unresolved_node_json("missing_object", "missing.object"),
         "unresolved current 0.1 node should parse",
     ));
-    let unresolved = super::unresolved_object_diagnostics_current(&unresolved_graph);
+    let unresolved = super::unresolved_object_issues_current(&unresolved_graph);
     assert!(unresolved[0].message.contains("missing.object"));
 }
 
@@ -2409,7 +2370,7 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     let duplicate_load = duplicate_session.load_project_current(duplicate_request);
     assert!(!duplicate_load.ok);
     assert!(
-        duplicate_load.diagnostics[0]
+        duplicate_load.issues[0]
             .message
             .contains("duplicate node definition")
     );
@@ -2432,7 +2393,7 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     assert!(!plan.ok);
     assert!(plan.snapshot.plan.is_none());
     assert_eq!(
-        plan.diagnostics[0].code.as_deref(),
+        plan.issues[0].code.as_deref(),
         Some("object-spec.implementation-mismatch")
     );
 
@@ -2460,7 +2421,7 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     );
     assert!(!update.ok);
     assert!(
-        update.diagnostics[0]
+        update.issues[0]
             .message
             .contains("duplicate node definition")
     );
@@ -2485,7 +2446,7 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     );
     assert!(!restored.ok);
     assert_eq!(
-        restored.diagnostics[0].code.as_deref(),
+        restored.issues[0].code.as_deref(),
         Some("object-spec.implementation-mismatch")
     );
 
@@ -2511,7 +2472,7 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     );
     assert!(!restored.ok);
     assert!(
-        restored.diagnostics[0]
+        restored.issues[0]
             .message
             .contains("duplicate node definition")
     );
@@ -3127,7 +3088,7 @@ fn collaboration_private_helpers_cover_patch_target_error_matrix() {
         current_unresolved_node_json("unresolved_current", "user.manipulator"),
         "unresolved current 0.1 node should parse",
     ));
-    let unresolved = super::unresolved_object_diagnostics_current(&unresolved_graph);
+    let unresolved = super::unresolved_object_issues_current(&unresolved_graph);
     assert!(unresolved[0].message.contains("unresolved object"));
 }
 
@@ -3139,7 +3100,7 @@ fn node_current_operations_report_no_project_without_mutation() {
         target_revision: None,
     };
     let assert_code = |response: &RuntimePatchResponse, code: &str| {
-        assert_eq!(response.diagnostics[0].code.as_deref(), Some(code));
+        assert_eq!(response.issues[0].code.as_deref(), Some(code));
     };
     let mut session = RuntimeSession::default();
     let create =
@@ -3314,7 +3275,7 @@ fn paste_graph_fragment_reports_base_revision_conflict() {
     assert!(response.conflict);
     assert_eq!(response.revision_before, "1");
     assert_eq!(response.revision_after, None);
-    assert_eq!(response.diagnostics[0].code, "paste.revision-conflict");
+    assert_eq!(response.issues[0].code, "paste.revision-conflict");
     assert_eq!(session.graph().unwrap().revision, "1");
 }
 
@@ -3334,7 +3295,7 @@ fn paste_graph_fragment_rejects_missing_help_working_copy_target() {
     assert!(!response.ok);
     assert!(!response.applied);
     assert_eq!(
-        response.diagnostics[0].code,
+        response.issues[0].code,
         "paste.target.missing-help-working-copy"
     );
 }
@@ -3379,11 +3340,11 @@ fn paste_graph_fragment_rejects_project_patch_definition_target() {
     assert!(!response.ok);
     assert!(!response.applied);
     assert_eq!(
-        response.diagnostics[0].code,
+        response.issues[0].code,
         "paste.target.missing-project-patch-definition"
     );
     assert!(
-        response.diagnostics[0]
+        response.issues[0]
             .message
             .contains("project patch definition identity is not loaded")
     );
@@ -3404,7 +3365,7 @@ fn paste_graph_fragment_rejects_embedded_patch_instance_target() {
     assert!(!response.ok);
     assert!(!response.applied);
     assert_eq!(
-        response.diagnostics[0].code,
+        response.issues[0].code,
         "paste.target.unsupported-embedded-patch-instance"
     );
 }
@@ -3420,12 +3381,9 @@ fn paste_graph_fragment_rejects_outside_endpoint_by_default() {
 
     assert!(!response.ok);
     assert!(!response.applied);
-    assert_eq!(
-        response.diagnostics[0].code,
-        "paste.operation.invalid-envelope"
-    );
+    assert_eq!(response.issues[0].code, "paste.operation.invalid-envelope");
     assert!(
-        response.diagnostics[0]
+        response.issues[0]
             .message
             .contains("fragment-edge-outside-selection")
     );
@@ -3474,7 +3432,7 @@ fn paste_graph_fragment_rejects_immutable_help_source_target() {
     assert!(!response.ok);
     assert!(!response.applied);
     assert_eq!(
-        response.diagnostics[0].code,
+        response.issues[0].code,
         "paste.target.immutable-help-source"
     );
 }
@@ -3574,7 +3532,7 @@ fn assert_graph_patch_rejected(response: &RuntimePatchResponse) {
     assert!(!response.applied);
     assert!(!response.conflict);
     assert_eq!(
-        response.diagnostics[0].code.as_deref(),
+        response.issues[0].code.as_deref(),
         Some("project.graph-patch-unsupported")
     );
 }

@@ -2,14 +2,14 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
-    DEFAULT_HOST, DEFAULT_PORT, DiagnosticSeverity, ExecutionPlan, PreviewFrameLimit,
-    ProjectDocumentCurrent, ProjectRequestCurrent, RunProjectRequestCurrent, RuntimeDiagnostic,
+    DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, IssueSeverity, PreviewFrameLimit,
+    ProjectDocumentCurrent, ProjectRequestCurrent, RunProjectRequestCurrent, RuntimeIssue,
     ServeRuntimeOptions, build_execution_plan_request_current,
     build_execution_plan_run_request_current, format_dummy_execution_text,
     format_midi_clock_fixture_report_text, format_plan_text,
-    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
+    project_document_payload_schema_issues, project_document_validation_issues_current,
     run_dummy_execution, run_midi_clock_fixture_file, run_preview_window,
-    run_render_preview_document_file, schema_version_diagnostic, serve_runtime,
+    run_render_preview_document_file, schema_version_issue, serve_runtime,
     serve_runtime_with_options, validate_project_request_current,
 };
 
@@ -122,8 +122,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::ValidateProject { project } => {
             let request = load_project_request_current(project)?;
-            if let Err(diagnostics) = validate_project_request_current(&request) {
-                return Err(format_runtime_diagnostics(&diagnostics).into());
+            if let Err(issues) = validate_project_request_current(&request) {
+                return Err(format_runtime_issues(&issues).into());
             }
             println!(
                 "valid project: {} {}",
@@ -133,13 +133,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Plan { project, format } => {
             let request = load_project_request_current(project)?;
-            let (plan, diagnostics) = build_execution_plan_request_current(&request)
-                .map_err(|diagnostics| format_runtime_diagnostics(&diagnostics))?;
-            if diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code.is_some())
-            {
-                eprintln!("{}", format_runtime_diagnostics(&diagnostics));
+            let (plan, issues) = build_execution_plan_request_current(&request)
+                .map_err(|issues| format_runtime_issues(&issues))?;
+            if issues.iter().any(|issue| issue.code.is_some()) {
+                eprintln!("{}", format_runtime_issues(&issues));
             }
             match format {
                 OutputFormat::Text => {
@@ -157,13 +154,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             format,
         } => {
             let request = load_run_project_request_current(project, frames)?;
-            let (plan, diagnostics) = build_execution_plan_run_request_current(&request)
-                .map_err(|diagnostics| format_runtime_diagnostics(&diagnostics))?;
-            if diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code.is_some())
-            {
-                eprintln!("{}", format_runtime_diagnostics(&diagnostics));
+            let (plan, issues) = build_execution_plan_run_request_current(&request)
+                .map_err(|issues| format_runtime_issues(&issues))?;
+            if issues.iter().any(|issue| issue.code.is_some()) {
+                eprintln!("{}", format_runtime_issues(&issues));
             }
             let report = run_dummy_execution(&plan, frames);
             match format {
@@ -224,15 +218,14 @@ fn load_project_request_current(
     let bytes = std::fs::read(path)?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
     if is_project_document(&value) {
-        validate_project_document_schema_version(&value).map_err(diagnostics_error)?;
+        validate_project_document_schema_version(&value).map_err(issues_error)?;
         decode_project_document_request_current(value)
     } else {
         let request: ProjectRequestCurrent = serde_json::from_value(value)?;
         if request.graph.schema_version != "0.1.0" {
-            let diagnostic =
-                schema_version_diagnostic("graph", Some(request.graph.schema_version.as_str()))
-                    .expect("non-current schema version should produce a diagnostic");
-            return Err(diagnostics_error(vec![diagnostic]));
+            let issue = schema_version_issue("graph", Some(request.graph.schema_version.as_str()))
+                .expect("non-current schema version should produce a issue");
+            return Err(issues_error(vec![issue]));
         }
         Ok(request)
     }
@@ -262,15 +255,15 @@ fn is_project_document(value: &serde_json::Value) -> bool {
 
 fn validate_project_document_schema_version(
     value: &serde_json::Value,
-) -> Result<(), Vec<RuntimeDiagnostic>> {
-    let diagnostic = schema_version_diagnostic(
+) -> Result<(), Vec<RuntimeIssue>> {
+    let issue = schema_version_issue(
         "project",
         value
             .get("schemaVersion")
             .and_then(serde_json::Value::as_str),
     );
-    match diagnostic {
-        Some(diagnostic) => Err(vec![diagnostic]),
+    match issue {
+        Some(issue) => Err(vec![issue]),
         None => Ok(()),
     }
 }
@@ -279,8 +272,8 @@ fn decode_project_document_request_current(
     mut value: serde_json::Value,
 ) -> Result<ProjectRequestCurrent, Box<dyn std::error::Error>> {
     if value.get("nodes").is_some() {
-        return Err(diagnostics_error(vec![RuntimeDiagnostic {
-            severity: DiagnosticSeverity::Error,
+        return Err(issues_error(vec![RuntimeIssue {
+            severity: IssueSeverity::Error,
             message: "ProjectDocument payloads must not include top-level nodes; node definitions must come from Runtime registry/catalog sources or an explicit legacy ProjectRequest wrapper".to_owned(),
             code: Some("project.document.top-level-nodes-rejected".to_owned()),
             details: Some(serde_json::json!({
@@ -290,18 +283,18 @@ fn decode_project_document_request_current(
             })),
         }]));
     }
-    let schema_diagnostics = project_document_payload_schema_diagnostics(&value);
-    if !schema_diagnostics.is_empty() {
-        return Err(diagnostics_error(schema_diagnostics));
+    let schema_issues = project_document_payload_schema_issues(&value);
+    if !schema_issues.is_empty() {
+        return Err(issues_error(schema_issues));
     }
     if let Some(object) = value.as_object_mut() {
         object.remove("frames");
     }
     let document = serde_json::from_value::<ProjectDocumentCurrent>(value)?;
     if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
-        return Err(diagnostics_error(
-            project_document_validation_diagnostics_current(&document, &report),
-        ));
+        return Err(issues_error(project_document_validation_issues_current(
+            &document, &report,
+        )));
     }
     Ok(ProjectRequestCurrent::from_project_document(
         document,
@@ -309,23 +302,23 @@ fn decode_project_document_request_current(
     ))
 }
 
-fn diagnostics_error(diagnostics: Vec<RuntimeDiagnostic>) -> Box<dyn std::error::Error> {
-    format_runtime_diagnostics(&diagnostics).into()
+fn issues_error(issues: Vec<RuntimeIssue>) -> Box<dyn std::error::Error> {
+    format_runtime_issues(&issues).into()
 }
 
-fn format_runtime_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> String {
-    diagnostics
+fn format_runtime_issues(issues: &[RuntimeIssue]) -> String {
+    issues
         .iter()
-        .map(|diagnostic| match &diagnostic.code {
+        .map(|issue| match &issue.code {
             Some(code) => {
-                let mut line = format!("{code}: {}", diagnostic.message);
-                if let Some(details) = &diagnostic.details {
+                let mut line = format!("{code}: {}", issue.message);
+                if let Some(details) = &issue.details {
                     line.push_str(" details=");
                     line.push_str(&details.to_string());
                 }
                 line
             }
-            None => diagnostic.message.clone(),
+            None => issue.message.clone(),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -397,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_project_loader_reports_structured_schema_version_diagnostics() {
+    fn cli_project_loader_reports_structured_schema_version_issues() {
         let path = std::env::temp_dir().join(format!(
             "skenion-runtime-cli-schema-version-{}.json",
             std::process::id()

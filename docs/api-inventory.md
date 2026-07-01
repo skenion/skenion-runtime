@@ -3,7 +3,7 @@
 This file is the concrete Runtime API inventory used to clean up Studio.
 It is intentionally Runtime-owned. Contracts may define shared DTO shapes, but
 Runtime owns routes, WebSocket frames, session state, graph mutation, object
-resolution, catalog projection, control input, and diagnostics.
+resolution, catalog projection, control input, and issues.
 
 Source files checked for this inventory:
 
@@ -44,12 +44,12 @@ Legend:
 | `GET` | `/v0/runtime/info` | `runtime_info` | none | `RuntimeInfoResponse` | none | Required for capability/API gating. |
 | `GET` | `/v0/sidecar/startup` | `sidecar_startup` | none | `RuntimeSidecarStartupResponse` | none | Desktop/local shell only. |
 | `GET` | `/v0/sidecar/health` | `sidecar_health` | none | `RuntimeSidecarHealthResponse` | none | Desktop/local shell only. |
-| `POST` | `/v0/sidecar/shutdown` | `sidecar_shutdown` | raw bytes parsed by sidecar helper | `RuntimeSidecarShutdownResponse` | records runtime diagnostics | Desktop/local shell explicit shutdown only. |
+| `POST` | `/v0/sidecar/shutdown` | `sidecar_shutdown` | raw bytes parsed by sidecar helper | `RuntimeSidecarShutdownResponse` | records runtime issues | Desktop/local shell explicit shutdown only. |
 | `GET` | `/v0/extensions` | `runtime_extensions` | none | `RuntimeExtensionListResponse` | none | Package/extension panel snapshot. Do not poll for live sync. |
 | `GET` | `/v0/packages` | `runtime_packages` | none | `PackageRegistryListResponseV01` | none | Package panel snapshot. Do not poll for live sync. |
 | `GET` | `/v0/runtime/logs` | `runtime_logs` | none | `RuntimeLogSnapshotResponse` | none | Logs panel snapshot. |
 | `GET` | `/v0/runtime/logs/stream` | `runtime_logs_stream` | none | SSE stream | stream subscription | Logs panel stream until WS log surface exists. |
-| `GET` | `/v0/io/devices` | `io_devices` | none | `RuntimeIoDeviceListResponse` | records IO diagnostics into logs | Explicit device refresh only. Do not background-poll. |
+| `GET` | `/v0/io/devices` | `io_devices` | none | `RuntimeIoDeviceListResponse` | records IO issues into logs | Explicit device refresh only. Do not background-poll. |
 | `POST` | `/v0/validate` | `validate_project_endpoint` | project JSON | `RuntimeApiResponse` | no session graph mutation | Import/debug utility only. |
 | `POST` | `/v0/plan` | `plan_project_endpoint` | project JSON | `RuntimeApiResponse` | no session graph mutation | Debug utility only. |
 | `POST` | `/v0/run` | `run_project_endpoint` | project JSON plus optional frames | `RuntimeApiResponse` | no session graph mutation | Prototype/debug utility, not live Studio path. |
@@ -57,7 +57,7 @@ Legend:
 | `DELETE` | `/v0/sessions/{session_id}` | `clear_session_by_id` | none | `RuntimeSessionResponse` | clears session | Explicit destructive command only. |
 | `GET` | `/v0/sessions/{session_id}/info` | `session_info_by_id` | none | `RuntimeSessionInfoResponse` | creates session record | Settings/debug/fallback. |
 | `GET` | `/v0/sessions/{session_id}/snapshot` | `session_snapshot_by_id` | none | `RuntimeSessionResponse` | creates session record, no graph mutation | Debug/CLI/fallback. Not live hydration. |
-| `GET` | `/v0/sessions/{session_id}/node-catalog` | `session_node_catalog_by_id` | none | `NodeCatalogSnapshotV01` or HTTP 404 diagnostic | no mutation; absent sessions return 404 | Debug/CLI/fallback. Not normal live hydration. |
+| `GET` | `/v0/sessions/{session_id}/node-catalog` | `session_node_catalog_by_id` | none | `NodeCatalogSnapshotV01` or HTTP 404 issue | no mutation; absent sessions return 404 | Debug/CLI/fallback. Not normal live hydration. |
 | `GET` | `/v0/sessions/{session_id}/events/stream` | `disabled_session_events_stream_by_id` | `server::tests::legacy_http_live_routes_return_gone_with_ws_replacements` | HTTP 410 `skenion.runtime.http-live-channel-disabled` | none | Disabled legacy live channel. Use WS `session.hello` replay/resume. |
 | `POST` | `/v0/sessions/{session_id}/load` | `load_session_by_id` | project JSON | `RuntimeSessionResponse` | replaces loaded session project | Open/import/load only. |
 | `POST` | `/v0/sessions/{session_id}/validate` | `validate_session_by_id` | none | `RuntimeSessionResponse` | write lock, no graph mutation | Explicit validate command. |
@@ -100,7 +100,7 @@ Plain HTTP returns:
 - status: `426 Upgrade Required`
 - header: `Upgrade: websocket`
 - schema: `skenion.runtime.realtime.upgradeRequired`
-- diagnostic code: `realtime.websocket-upgrade-required`
+- issue code: `realtime.websocket-upgrade-required`
 
 Plain HTTP no longer creates a session record before returning 426. Studio must
 still avoid this route unless it is opening a WebSocket.
@@ -156,18 +156,18 @@ If a command frame is sent before `session.hello`, Runtime returns
 | Type | Produced by | Payload contains | Who should consume it | Studio rule |
 | --- | --- | --- | --- | --- |
 | `session.attached` | successful `session.hello` | `connectionId`, `clientId`, `windowId`, `resumeToken`, `currentRevisions`, `snapshot`, `globalCursor`, `nodeCatalog` | attaching client | Hydrate live graph from `payload.snapshot`. |
-| `session.syncRequired` | failed resume/replay gap | same as attach plus `diagnostic` | attaching client | Replace local state from snapshot; do not patch over stale local state. |
+| `session.syncRequired` | failed resume/replay gap | same as attach plus `issue` | attaching client | Replace local state from snapshot; do not patch over stale local state. |
 | `presence.updated` | presence handling and presence replay | presence payload | all live clients | Presence UI only. |
 | `selection.updated` | selection handling and replay | selection envelope plus TTL/replay metadata | all live clients | Selection UI only. |
 | `command.ack` | generic command ack helper | accepted/rejected payload | sender | Naming cleanup candidate; avoid using for graph state. |
-| `graph.ack` | `graph.command` | status, applied/conflict, graph sequence, node result, operation result, revisions, diagnostics | sender | Sender feedback only. Do not treat as final multi-client graph sync. |
-| `graph.applied` | accepted `graph.command` | kind, target, node result, operation result, revisions, diagnostics | all live clients | Authoritative graph update event. |
+| `graph.ack` | `graph.command` | status, applied/conflict, graph sequence, node result, operation result, revisions, issues | sender | Sender feedback only. Do not treat as final multi-client graph sync. |
+| `graph.applied` | accepted `graph.command` | kind, target, node result, operation result, revisions, issues | all live clients | Authoritative graph update event. |
 | `control.emitted` | successful `node.input` | request, response, changed values | relevant live clients | Authoritative transient control feedback. |
 | `nodeCatalog.snapshot` | `nodeCatalog.request` | status `included`, `catalogRevision`, `snapshot` | requester | Replace cached catalog if revision differs. |
 | `nodeCatalog.unchanged` | `nodeCatalog.request` | status `unchanged`, `catalogRevision` | requester | Keep cached catalog. |
 | `nodeCatalog.changed` | graph command when catalog projection changed | new catalog revision and snapshot metadata | all live clients | Request or apply catalog refresh. Must not fire for ordinary edge/node usage edits. |
 | `runtime.error` | protocol/runtime error | code, message, details | triggering client | Show scoped error; do not wipe graph. |
-| `runtime.internal` | internal diagnostic helper | diagnostic payload | debug only | Public status needs review. |
+| `runtime.internal` | internal issue helper | issue payload | debug only | Public status needs review. |
 
 ## `session.hello.payload.nodeCatalog`
 
@@ -245,7 +245,7 @@ Node/object fields:
 | `message` | `ControlMessage` | `node.input` |
 | `request` | `PasteGraphFragmentRequest` | `graph.pasteFragment` |
 | `scope` | `client` or `global` | `history.undo`, `history.redo`; defaults to `client` |
-| `unresolvedPolicy` | `reject` or `materialize-diagnostic` | object spec materialization |
+| `unresolvedPolicy` | `reject` or `materialize-issue` | object spec materialization |
 | `interfaceIncidentEdgePolicy` | Contracts enum | `node.replace` |
 
 View/collaboration fields:
@@ -271,7 +271,7 @@ View/collaboration fields:
 | `node.update` | `nodeId`, non-empty `params` | yes | no | `graph.ack`, `graph.applied` |
 | `node.input` | `nodeId`, `portId`, `message` | no | yes | `graph.ack`, local/remote `control.emitted` |
 
-Unsupported kinds return diagnostic code `graph.command.kind-unsupported`.
+Unsupported kinds return issue code `graph.command.kind-unsupported`.
 Supported kinds are exactly:
 
 ```text
@@ -306,7 +306,7 @@ Current result facts from `src/realtime.rs`:
   not graph mutation.
 - `node.replace` and `node.delete` can return dropped incident edge ids.
 - unresolved object spec returns `node.command.unresolved` unless the unresolved
-  policy materializes a diagnostic node.
+  policy materializes a issue node.
 
 ## Catalog Revision Rules
 
@@ -380,7 +380,7 @@ Stop using in normal live Studio flow:
 
 1. `GET /v0/sessions/{session_id}` is WebSocket-only and returns HTTP 426 to
    non-WebSocket callers. Studio must not probe this route with HTTP.
-2. `/v0/io/devices` is not a pure read: it records IO diagnostics into runtime
+2. `/v0/io/devices` is not a pure read: it records IO issues into runtime
    logs. It should not be used as a polling endpoint.
 3. `control.command` and HTTP `/control/event` are disabled live paths.
    Studio live control should use `graph.command` kind `node.input`.

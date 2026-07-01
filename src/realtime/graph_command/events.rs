@@ -56,7 +56,7 @@ pub(in crate::realtime) fn control_emitted_event(
             "request": request,
             "emitted": response.emitted,
             "values": changed_values,
-            "diagnostics": response.diagnostics,
+            "issues": response.issues,
             "replayed": false,
         }),
     })
@@ -96,7 +96,7 @@ pub(super) fn graph_ack(context: &GraphEventContext<'_>, cached: bool) -> Runtim
                 "undoDepth": context.response.history.undo_depth,
                 "redoDepth": context.response.history.redo_depth,
             },
-            "diagnostics": context.response.diagnostics,
+            "issues": context.response.issues,
         }),
     )
 }
@@ -158,7 +158,7 @@ pub(super) fn graph_applied_event(context: &GraphEventContext<'_>) -> RuntimeRea
             "graphRevision": context.response.snapshot.graph_revision(),
             "viewRevision": context.response.snapshot.view_revision,
             "historyEntryId": context.response.history.entries.last().map(|entry| entry.id.clone()),
-            "diagnostics": context.response.diagnostics,
+            "issues": context.response.issues,
             "replayed": false,
         }),
     }

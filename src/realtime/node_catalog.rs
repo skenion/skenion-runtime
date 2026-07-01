@@ -6,7 +6,7 @@ use crate::{RuntimeSessionRecord, runtime_time::created_at_now};
 
 use super::{
     EVENT_NODE_CATALOG_CHANGED, RUNTIME_REALTIME_SCHEMA, RUNTIME_REALTIME_SCHEMA_VERSION,
-    RuntimeRealtimeDiagnostic, RuntimeRealtimeEnvelope, state::sync_required_diagnostic,
+    RuntimeRealtimeEnvelope, RuntimeRealtimeIssue, state::sync_required_issue,
     wire::RuntimeRealtimeConnectionIdentity,
 };
 
@@ -39,10 +39,10 @@ pub(super) fn handle_node_catalog_request(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: RuntimeRealtimeEnvelope,
-) -> Result<RuntimeRealtimeEnvelope, RuntimeRealtimeDiagnostic> {
+) -> Result<RuntimeRealtimeEnvelope, RuntimeRealtimeIssue> {
     let request = serde_json::from_value::<NodeCatalogRequestPayload>(frame.payload.clone())
         .map_err(|error| {
-            sync_required_diagnostic(
+            sync_required_issue(
                 "realtime.node-catalog.invalid-payload",
                 format!("invalid nodeCatalog.request payload: {error}"),
                 None,

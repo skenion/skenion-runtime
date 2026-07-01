@@ -34,7 +34,7 @@ pub struct RuntimeRealtimeEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeRealtimeDiagnostic {
+pub struct RuntimeRealtimeIssue {
     pub code: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

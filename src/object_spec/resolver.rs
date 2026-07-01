@@ -22,7 +22,7 @@ use reference::{resolve_named_ref_object, resolve_optional_named_ref_object};
 #[cfg(test)]
 pub(super) use atoms::contract_object_spec_atom_to_runtime;
 #[cfg(test)]
-pub(super) use parser::runtime_object_spec_diagnostic_code;
+pub(super) use parser::runtime_object_spec_issue_code;
 
 pub(super) fn construct_first_party_core(
     parsed: ParsedObjectSpec,

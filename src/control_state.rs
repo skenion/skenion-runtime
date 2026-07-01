@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    ControlMessage, ControlValue, GraphDocument, GraphNode, PortDirection, RuntimeDiagnostic,
+    ControlMessage, ControlValue, GraphDocument, GraphNode, PortDirection, RuntimeIssue,
     control_value::{
         BANG_KIND, COLOR_KIND, COMMENT_KIND, FLOAT_KIND, INT_KIND, MESSAGE_KIND, OPERATOR_ADD_KIND,
         OPERATOR_DIV_KIND, OPERATOR_MAX_KIND, OPERATOR_MIN_KIND, OPERATOR_MUL_KIND,
@@ -45,7 +45,7 @@ pub struct RuntimeControlEventResponse {
     pub changed: bool,
     pub control_revision: Option<u64>,
     pub emitted: Vec<RuntimeControlEmission>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,7 +55,7 @@ pub struct RuntimeControlStateResponse {
     pub control_revision: u64,
     pub values: BTreeMap<String, ControlValue>,
     pub channels: BTreeMap<String, ControlMessage>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ pub struct RuntimeControlReadResponse {
     pub ok: bool,
     pub address: RuntimeControlReadRequest,
     pub value: Option<Value>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 impl RuntimeControlEventRequest {
@@ -286,7 +286,7 @@ impl ControlState {
         let mut visited_edges = 0usize;
         while let Some(emission) = queue.pop() {
             let channel_response = self.publish_object_channel(&emission, graph);
-            response.diagnostics.extend(channel_response.diagnostics);
+            response.issues.extend(channel_response.issues);
             for channel_emission in channel_response.emitted {
                 queue.push(channel_emission.clone());
                 response.emitted.push(channel_emission);
@@ -361,13 +361,13 @@ impl ControlState {
         graph: &GraphDocument,
     ) -> RuntimeControlEventResponse {
         let mut emitted = Vec::new();
-        let mut diagnostics = Vec::new();
+        let mut issues = Vec::new();
         for node in graph.nodes.iter().filter(|node| node.id != source_node_id) {
             if read_named_param(node, "receiveName").as_deref() != Some(channel_name) {
                 continue;
             }
             if !object_accepts_data_kind(node, data_kind) {
-                diagnostics.push(RuntimeDiagnostic::warning(format!(
+                issues.push(RuntimeIssue::warning(format!(
                     "receiveName {channel_name} on node {} ignored incompatible routed {data_kind}",
                     node.id
                 )));
@@ -383,20 +383,20 @@ impl ControlState {
             );
             if response.ok {
                 emitted.extend(response.emitted);
-                diagnostics.extend(response.diagnostics);
+                issues.extend(response.issues);
             } else {
                 let detail = response
-                    .diagnostics
+                    .issues
                     .first()
-                    .map(|diagnostic| diagnostic.message.as_str())
+                    .map(|issue| issue.message.as_str())
                     .unwrap_or("unknown receiver error");
-                diagnostics.push(RuntimeDiagnostic::warning(format!(
+                issues.push(RuntimeIssue::warning(format!(
                     "receiveName {channel_name} on node {} rejected routed {data_kind}: {detail}",
                     node.id
                 )));
             }
         }
-        RuntimeControlEventResponse::ok_with_diagnostics(emitted, diagnostics)
+        RuntimeControlEventResponse::ok_with_issues(emitted, issues)
     }
 
     fn apply_operator_event(
@@ -486,20 +486,17 @@ impl RuntimeControlEventResponse {
             changed: false,
             control_revision: None,
             emitted,
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }
     }
 
-    fn ok_with_diagnostics(
-        emitted: Vec<RuntimeControlEmission>,
-        diagnostics: Vec<RuntimeDiagnostic>,
-    ) -> Self {
+    fn ok_with_issues(emitted: Vec<RuntimeControlEmission>, issues: Vec<RuntimeIssue>) -> Self {
         Self {
             ok: true,
             changed: false,
             control_revision: None,
             emitted,
-            diagnostics,
+            issues,
         }
     }
 
@@ -509,7 +506,7 @@ impl RuntimeControlEventResponse {
             changed: false,
             control_revision: None,
             emitted: Vec::new(),
-            diagnostics: vec![RuntimeDiagnostic::error(message)],
+            issues: vec![RuntimeIssue::error(message)],
         }
     }
 
@@ -551,7 +548,7 @@ impl RuntimeControlReadResponse {
             ok: true,
             address,
             value: Some(value),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }
     }
 
@@ -560,7 +557,7 @@ impl RuntimeControlReadResponse {
             ok: false,
             address,
             value: None,
-            diagnostics: vec![RuntimeDiagnostic::error(message)],
+            issues: vec![RuntimeIssue::error(message)],
         }
     }
 }

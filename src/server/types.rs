@@ -1,21 +1,21 @@
 use serde::Serialize;
 
-use crate::{DummyExecutionReport, ExecutionPlan, RuntimeDiagnostic};
+use crate::{DummyExecutionReport, ExecutionPlan, RuntimeIssue};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeApiResponse {
     pub ok: bool,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
     pub plan: Option<ExecutionPlan>,
     pub report: Option<DummyExecutionReport>,
 }
 
 impl RuntimeApiResponse {
-    pub(super) fn diagnostics(diagnostics: Vec<RuntimeDiagnostic>) -> Self {
+    pub(super) fn issues(issues: Vec<RuntimeIssue>) -> Self {
         Self {
             ok: false,
-            diagnostics,
+            issues,
             plan: None,
             report: None,
         }

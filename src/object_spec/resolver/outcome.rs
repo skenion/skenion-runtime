@@ -1,11 +1,11 @@
 use serde_json::Map;
 use skenion_contracts::{
-    ObjectResolutionCandidateV01, ObjectResolutionDiagnosticCodeV01, ObjectResolutionDiagnosticV01,
-    ObjectResolutionStatusV01, ObjectResolutionV01, PackageDiagnosticSeverityV01,
+    ObjectResolutionCandidateV01, ObjectResolutionIssueCodeV01, ObjectResolutionIssueV01,
+    ObjectResolutionStatusV01, ObjectResolutionV01, PackageIssueSeverityV01,
 };
 
 use super::super::{
-    ObjectRegistryCandidate, ObjectSpecAtom, ObjectSpecCandidateSummary, ObjectSpecDiagnostic,
+    ObjectRegistryCandidate, ObjectSpecAtom, ObjectSpecCandidateSummary, ObjectSpecIssue,
     ObjectSpecPort, ObjectSpecResolution,
 };
 
@@ -35,12 +35,12 @@ pub(super) fn success(
                 display_name: Some(candidate.display_name.clone()),
                 reason: Some("selected".to_owned()),
             }],
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         },
         params,
         instance_ports,
         candidates: vec![summary],
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     }
 }
 
@@ -93,9 +93,9 @@ pub(super) fn failure_with_candidates(
                     reason: None,
                 })
                 .collect(),
-            diagnostics: vec![ObjectResolutionDiagnosticV01 {
-                severity: PackageDiagnosticSeverityV01::Error,
-                code: object_resolution_diagnostic_code(&code),
+            issues: vec![ObjectResolutionIssueV01 {
+                severity: PackageIssueSeverityV01::Error,
+                code: object_resolution_issue_code(&code),
                 message: message.clone(),
                 details: None,
             }],
@@ -103,7 +103,7 @@ pub(super) fn failure_with_candidates(
         params: Map::new(),
         instance_ports: Vec::new(),
         candidates,
-        diagnostics: vec![ObjectSpecDiagnostic { code, message }],
+        issues: vec![ObjectSpecIssue { code, message }],
     }
 }
 
@@ -134,9 +134,9 @@ pub(super) fn failure_for_selected_candidate(
                 display_name: Some(candidate.display_name.clone()),
                 reason: Some("selected".to_owned()),
             }],
-            diagnostics: vec![ObjectResolutionDiagnosticV01 {
-                severity: PackageDiagnosticSeverityV01::Error,
-                code: object_resolution_diagnostic_code(&code),
+            issues: vec![ObjectResolutionIssueV01 {
+                severity: PackageIssueSeverityV01::Error,
+                code: object_resolution_issue_code(&code),
                 message: message.clone(),
                 details: None,
             }],
@@ -144,16 +144,14 @@ pub(super) fn failure_for_selected_candidate(
         params: Map::new(),
         instance_ports: Vec::new(),
         candidates: vec![summary],
-        diagnostics: vec![ObjectSpecDiagnostic { code, message }],
+        issues: vec![ObjectSpecIssue { code, message }],
     }
 }
 
-pub(super) fn object_resolution_diagnostic_code(code: &str) -> ObjectResolutionDiagnosticCodeV01 {
+pub(super) fn object_resolution_issue_code(code: &str) -> ObjectResolutionIssueCodeV01 {
     match code {
-        "object-spec.ambiguous" => ObjectResolutionDiagnosticCodeV01::ResolutionAmbiguous,
-        "object-spec.provider-unavailable" => {
-            ObjectResolutionDiagnosticCodeV01::ImplementationMissing
-        }
-        _ => ObjectResolutionDiagnosticCodeV01::ResolutionUnresolved,
+        "object-spec.ambiguous" => ObjectResolutionIssueCodeV01::ResolutionAmbiguous,
+        "object-spec.provider-unavailable" => ObjectResolutionIssueCodeV01::ImplementationMissing,
+        _ => ObjectResolutionIssueCodeV01::ResolutionUnresolved,
     }
 }

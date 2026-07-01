@@ -799,7 +799,7 @@ async fn node_catalog_get_for_unknown_session_returns_not_found_without_creating
     let body: Value = serde_json::from_slice(&body).expect("response body should be JSON");
     assert_eq!(body["ok"], false);
     assert_eq!(body["sessionId"], "probe");
-    assert_eq!(body["diagnostic"]["code"], "runtime.session-not-found");
+    assert_eq!(body["issue"]["code"], "runtime.session-not-found");
     assert!(state.sessions.get_existing("probe").is_none());
 }
 
@@ -844,7 +844,7 @@ async fn websocket_rejects_invalid_frames_session_mismatch_and_pre_attach_comman
         .expect("invalid JSON frame sends");
     let invalid_json = next_type(&mut socket, "runtime.error").await;
     assert_eq!(
-        invalid_json["payload"]["diagnostic"]["code"],
+        invalid_json["payload"]["issue"]["code"],
         "realtime.frame.invalid-json"
     );
 
@@ -854,7 +854,7 @@ async fn websocket_rejects_invalid_frames_session_mismatch_and_pre_attach_comman
         .expect("binary frame sends");
     let binary = next_type(&mut socket, "runtime.error").await;
     assert_eq!(
-        binary["payload"]["diagnostic"]["code"],
+        binary["payload"]["issue"]["code"],
         "realtime.frame.binary-unsupported"
     );
 
@@ -872,15 +872,15 @@ async fn websocket_rejects_invalid_frames_session_mismatch_and_pre_attach_comman
     .await;
     let mismatch = next_type(&mut socket, "runtime.error").await;
     assert_eq!(
-        mismatch["payload"]["diagnostic"]["code"],
+        mismatch["payload"]["issue"]["code"],
         "realtime.session.mismatch"
     );
     assert_eq!(
-        mismatch["payload"]["diagnostic"]["details"]["expectedSessionId"],
+        mismatch["payload"]["issue"]["details"]["expectedSessionId"],
         "default"
     );
     assert_eq!(
-        mismatch["payload"]["diagnostic"]["details"]["actualSessionId"],
+        mismatch["payload"]["issue"]["details"]["actualSessionId"],
         "other"
     );
 
@@ -920,7 +920,7 @@ async fn websocket_rejects_invalid_frames_session_mismatch_and_pre_attach_comman
         .await;
         let error = next_type(&mut socket, "runtime.error").await;
         assert_eq!(
-            error["payload"]["diagnostic"]["code"], "realtime.session.not-attached",
+            error["payload"]["issue"]["code"], "realtime.session.not-attached",
             "{message_type}"
         );
     }
@@ -942,7 +942,7 @@ async fn realtime_node_catalog_request_rejects_malformed_payload() {
 
     assert_eq!(attached["type"], "session.attached");
     assert_eq!(
-        error["payload"]["diagnostic"]["code"],
+        error["payload"]["issue"]["code"],
         "realtime.node-catalog.invalid-payload"
     );
     assert_eq!(error["connectionId"], attached["connectionId"]);
@@ -1047,24 +1047,21 @@ async fn realtime_attached_commands_reject_missing_idempotency_invalid_payloads_
         .await;
         let ack = next_type(&mut client_a, "graph.ack").await;
         assert_eq!(ack["payload"]["status"], "rejected", "{name}");
-        assert_eq!(
-            ack["payload"]["diagnostics"][0]["code"], expected_code,
-            "{name}"
-        );
+        assert_eq!(ack["payload"]["issues"][0]["code"], expected_code, "{name}");
     }
 
     let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
 
     assert_eq!(
-        missing_presence_key["payload"]["diagnostic"]["code"],
+        missing_presence_key["payload"]["issue"]["code"],
         "realtime.command.idempotency-key-required"
     );
     assert_eq!(
-        invalid_control_payload["payload"]["diagnostic"]["code"],
+        invalid_control_payload["payload"]["issue"]["code"],
         "realtime.control-command.disabled"
     );
     assert_eq!(
-        invalid_graph_payload["payload"]["diagnostic"]["code"],
+        invalid_graph_payload["payload"]["issue"]["code"],
         "realtime.graph.invalid-payload"
     );
     assert!(no_broadcast.is_err());
@@ -1173,11 +1170,11 @@ async fn realtime_control_invalid_command_returns_rejected_ack_without_success_b
 
     assert_eq!(ack["payload"]["status"], "rejected");
     assert_eq!(ack["payload"]["accepted"], false);
-    assert_eq!(ack["payload"]["diagnostics"][0]["severity"], "error");
+    assert_eq!(ack["payload"]["issues"][0]["severity"], "error");
     assert!(
-        ack["payload"]["diagnostics"][0]["message"]
+        ack["payload"]["issues"][0]["message"]
             .as_str()
-            .expect("diagnostic message")
+            .expect("issue message")
             .contains("does not exist")
     );
     assert!(no_success_broadcast.is_err());
@@ -1548,7 +1545,7 @@ async fn realtime_graph_base_revision_conflict_rejects_ack_without_broadcast() {
     assert_eq!(ack["payload"]["applied"], false);
     assert_eq!(ack["payload"]["conflict"], true);
     assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
+        ack["payload"]["issues"][0]["code"],
         "collaboration.revision-conflict"
     );
     assert!(ack["payload"].get("history").is_none());
@@ -1833,7 +1830,7 @@ async fn realtime_sync_required_hydrates_node_catalog_by_requested_mode() {
 
     assert_eq!(always_sync["type"], "session.syncRequired");
     assert_eq!(
-        always_sync["payload"]["diagnostic"]["code"],
+        always_sync["payload"]["issue"]["code"],
         "realtime.cursor.unknown"
     );
     assert_eq!(always_sync["payload"]["nodeCatalog"]["status"], "included");
@@ -1866,7 +1863,7 @@ async fn realtime_sync_required_hydrates_node_catalog_by_requested_mode() {
 
     assert_eq!(unchanged_sync["type"], "session.syncRequired");
     assert_eq!(
-        unchanged_sync["payload"]["diagnostic"]["code"],
+        unchanged_sync["payload"]["issue"]["code"],
         "realtime.cursor.unknown"
     );
     assert_eq!(
@@ -2246,7 +2243,7 @@ async fn realtime_graph_node_resolve_uses_runtime_registry_candidates() {
 }
 
 #[tokio::test]
-async fn realtime_graph_node_resolve_unknown_returns_diagnostics_without_apply() {
+async fn realtime_graph_node_resolve_unknown_returns_issues_without_apply() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
     let mut client_b = connect_session(&runtime, "default").await;
@@ -2273,11 +2270,11 @@ async fn realtime_graph_node_resolve_unknown_returns_diagnostics_without_apply()
         "unresolved"
     );
     assert_eq!(
-        ack["payload"]["node"]["diagnostics"][0]["code"],
+        ack["payload"]["node"]["issues"][0]["code"],
         "object-spec.unresolved"
     );
     assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
+        ack["payload"]["issues"][0]["code"],
         "object-spec.unresolved"
     );
     assert_eq!(
@@ -2344,18 +2341,18 @@ async fn realtime_graph_node_commands_validate_targets_before_session_mutation()
 
     assert_eq!(missing_target_ack["payload"]["status"], "rejected");
     assert_eq!(
-        missing_target_ack["payload"]["diagnostics"][0]["code"],
+        missing_target_ack["payload"]["issues"][0]["code"],
         "graph.command.target-required"
     );
     assert_eq!(target_revision_ack["payload"]["status"], "conflict");
     assert_eq!(target_revision_ack["payload"]["conflict"], true);
     assert_eq!(
-        target_revision_ack["payload"]["diagnostics"][0]["code"],
+        target_revision_ack["payload"]["issues"][0]["code"],
         "graph.command.target-revision-conflict"
     );
     assert_eq!(missing_graph_ack["payload"]["status"], "rejected");
     assert_eq!(
-        missing_graph_ack["payload"]["diagnostics"][0]["code"],
+        missing_graph_ack["payload"]["issues"][0]["code"],
         "node.target.missing-graph"
     );
     assert_eq!(project["graph"]["revision"], "1");
@@ -2387,14 +2384,14 @@ async fn realtime_graph_node_create_missing_materializes_unresolved_object_node(
     assert_eq!(ack["payload"]["graphRevision"], "2");
     assert_eq!(
         ack["payload"]["node"]["unresolvedPolicy"],
-        "materialize-diagnostic"
+        "materialize-issue"
     );
     assert_eq!(
         ack["payload"]["node"]["objectResolution"]["status"],
         "unresolved"
     );
     assert_eq!(
-        ack["payload"]["node"]["diagnostics"][0]["code"],
+        ack["payload"]["node"]["issues"][0]["code"],
         "object-spec.unresolved"
     );
     assert_eq!(
@@ -2440,7 +2437,7 @@ async fn realtime_graph_node_create_ambiguous_shortcut_materializes_unresolved_o
         "unresolved"
     );
     assert_eq!(
-        ack["payload"]["node"]["diagnostics"][0]["code"],
+        ack["payload"]["node"]["issues"][0]["code"],
         "object-spec.ambiguous"
     );
     assert_eq!(
@@ -2506,17 +2503,17 @@ async fn realtime_graph_node_create_rejects_no_project_duplicate_and_patch_view_
 
     assert_eq!(no_project_ack["payload"]["status"], "rejected");
     assert_eq!(
-        no_project_ack["payload"]["diagnostics"][0]["code"],
+        no_project_ack["payload"]["issues"][0]["code"],
         "node.target.no-project"
     );
     assert_eq!(duplicate_ack["payload"]["status"], "rejected");
     assert_eq!(
-        duplicate_ack["payload"]["diagnostics"][0]["code"],
+        duplicate_ack["payload"]["issues"][0]["code"],
         "node.create.node-id-conflict"
     );
     assert_eq!(patch_view_ack["payload"]["status"], "rejected");
     assert_eq!(
-        patch_view_ack["payload"]["diagnostics"][0]["code"],
+        patch_view_ack["payload"]["issues"][0]["code"],
         "collaboration.patch-view-unsupported"
     );
     assert_eq!(project["graph"]["revision"], "1");
@@ -2558,7 +2555,7 @@ async fn realtime_graph_node_replace_preserves_node_id_and_prunes_invalid_incide
         json!(["edge_value_target"])
     );
     assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
+        ack["payload"]["issues"][0]["code"],
         "node.replace.incident-edges-dropped"
     );
     assert_eq!(ack["payload"]["node"]["params"]["frequency"], 330.0);
@@ -2581,10 +2578,7 @@ async fn realtime_graph_node_replace_preserves_node_id_and_prunes_invalid_incide
 async fn realtime_graph_node_replace_rejects_invalid_incident_edge_policies_without_mutation() {
     for (policy, expected_code) in [
         ("reject", "node.replace.invalid-incident-edge"),
-        (
-            "preserve-diagnostic",
-            "node.replace.preserve-diagnostic-unsupported",
-        ),
+        ("preserve-issue", "node.replace.preserve-issue-unsupported"),
     ] {
         let runtime = spawn_loaded_runtime().await;
         let mut client_a = connect_session(&runtime, "default").await;
@@ -2607,7 +2601,7 @@ async fn realtime_graph_node_replace_rejects_invalid_incident_edge_policies_with
         assert_eq!(ack["payload"]["status"], "rejected", "{policy}");
         assert_eq!(ack["payload"]["accepted"], false, "{policy}");
         assert_eq!(
-            ack["payload"]["diagnostics"][0]["code"], expected_code,
+            ack["payload"]["issues"][0]["code"], expected_code,
             "{policy}"
         );
         assert_eq!(project["graph"]["revision"], "1", "{policy}");
@@ -2783,7 +2777,7 @@ async fn realtime_graph_node_delete_missing_node_rejects_without_broadcast() {
     assert_eq!(ack["payload"]["historySummary"]["undoDepth"], 0);
     assert_eq!(ack["payload"]["historySummary"]["redoDepth"], 0);
     assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
+        ack["payload"]["issues"][0]["code"],
         "node.delete.node-missing"
     );
     assert_eq!(project["graph"]["revision"], "1");
@@ -2830,7 +2824,7 @@ async fn realtime_graph_node_update_missing_node_rejects_without_broadcast() {
     assert_eq!(ack["payload"]["historySummary"]["undoDepth"], 0);
     assert_eq!(ack["payload"]["historySummary"]["redoDepth"], 0);
     assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
+        ack["payload"]["issues"][0]["code"],
         "node.update.node-missing"
     );
     assert_eq!(project["graph"]["revision"], "1");
@@ -2865,7 +2859,7 @@ async fn realtime_graph_node_update_rejects_empty_params_without_broadcast() {
     assert_eq!(ack["payload"]["status"], "rejected");
     assert_eq!(ack["payload"]["accepted"], false);
     assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
+        ack["payload"]["issues"][0]["code"],
         "graph.command.params-required"
     );
     assert!(no_broadcast.is_err());
@@ -2979,7 +2973,7 @@ async fn realtime_graph_node_create_base_revision_conflict_rejects_without_broad
     assert_eq!(ack["payload"]["applied"], false);
     assert_eq!(ack["payload"]["conflict"], true);
     assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
+        ack["payload"]["issues"][0]["code"],
         "graph.command.target-revision-conflict"
     );
     assert_eq!(
@@ -3012,14 +3006,14 @@ async fn realtime_graph_legacy_object_commands_are_rejected_as_unsupported() {
         )
         .await;
         let ack = next_type(&mut client_a, "graph.ack").await;
-        let supported_kinds = ack["payload"]["diagnostics"][0]["details"]["supportedKinds"]
+        let supported_kinds = ack["payload"]["issues"][0]["details"]["supportedKinds"]
             .as_array()
-            .expect("unsupported kind diagnostic should include supportedKinds");
+            .expect("unsupported kind issue should include supportedKinds");
 
         assert_eq!(ack["payload"]["status"], "rejected", "{kind}");
         assert_eq!(ack["payload"]["accepted"], false, "{kind}");
         assert_eq!(
-            ack["payload"]["diagnostics"][0]["code"], "graph.command.kind-unsupported",
+            ack["payload"]["issues"][0]["code"], "graph.command.kind-unsupported",
             "{kind}"
         );
         assert!(
@@ -3137,7 +3131,7 @@ async fn realtime_graph_unsupported_command_kind_returns_rejected_ack() {
     assert_eq!(ack["payload"]["status"], "rejected");
     assert_eq!(ack["payload"]["accepted"], false);
     assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
+        ack["payload"]["issues"][0]["code"],
         "graph.command.kind-unsupported"
     );
     assert!(no_broadcast.is_err());
@@ -3218,10 +3212,7 @@ async fn reconnect_with_unknown_cursor_receives_sync_required() {
     .await;
 
     assert_eq!(sync["type"], "session.syncRequired");
-    assert_eq!(
-        sync["payload"]["diagnostic"]["code"],
-        "realtime.cursor.unknown"
-    );
+    assert_eq!(sync["payload"]["issue"]["code"], "realtime.cursor.unknown");
     assert!(sync["payload"]["snapshot"].is_object());
 }
 
@@ -3357,7 +3348,7 @@ async fn guessed_adjacent_resume_token_cannot_reuse_identity_or_idempotency_scop
 
     assert_eq!(sync["type"], "session.syncRequired");
     assert_eq!(
-        sync["payload"]["diagnostic"]["code"],
+        sync["payload"]["issue"]["code"],
         "realtime.resume-token.invalid"
     );
     assert_ne!(sync["clientId"], attached_a["clientId"]);
@@ -3407,7 +3398,7 @@ fn core_node_current_json(
         "objectResolution": {
             "status": "resolved",
             "candidates": [],
-            "diagnostics": []
+            "issues": []
         },
         "params": params,
         "ports": ports

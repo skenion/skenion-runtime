@@ -9,7 +9,7 @@ Runtime internals live in a Cargo workspace until external consumers justify ext
 
 The active runtime surface is a current 0.1 project loader, planner, session API,
 and local preview process manager. Unsupported graph/project/node contract
-versions are rejected with structured diagnostics.
+versions are rejected with structured issues.
 
 It can validate and plan:
 

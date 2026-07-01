@@ -2,7 +2,7 @@ use super::*;
 
 type PasteProjectResult =
     Result<(ProjectDocumentCurrent, u64, IdRemapResult, String), PasteProjectError>;
-type PasteProjectError = (Vec<RuntimeOperationDiagnostic>, IdRemapResult);
+type PasteProjectError = (Vec<RuntimeOperationIssue>, IdRemapResult);
 
 impl RuntimeSession {
     pub fn apply_runtime_operation(
@@ -14,7 +14,7 @@ impl RuntimeSession {
             return self.reject_paste_response(
                 target,
                 false,
-                operation_diagnostics_from_validation_report(report.to_string()),
+                operation_issues_from_validation_report(report.to_string()),
                 empty_id_remap(),
             );
         }
@@ -47,13 +47,8 @@ impl RuntimeSession {
 
         let target_revision = match target_graph_revision_current(&project, &request.target) {
             Ok(revision) => revision,
-            Err(diagnostic) => {
-                return self.reject_paste_response(
-                    target,
-                    false,
-                    vec![*diagnostic],
-                    empty_id_remap(),
-                );
+            Err(issue) => {
+                return self.reject_paste_response(target, false, vec![*issue], empty_id_remap());
             }
         };
 
@@ -85,8 +80,8 @@ impl RuntimeSession {
                 &request,
             ) {
                 Ok(result) => result,
-                Err((diagnostics, id_remap)) => {
-                    return self.reject_paste_response(target, false, diagnostics, id_remap);
+                Err((issues, id_remap)) => {
+                    return self.reject_paste_response(target, false, issues, id_remap);
                 }
             };
         let mutation = RuntimeMutationRequest {
@@ -123,10 +118,10 @@ impl RuntimeSession {
         } else {
             None
         };
-        let diagnostics = response
-            .diagnostics
+        let issues = response
+            .issues
             .iter()
-            .map(|diagnostic| runtime_diagnostic_to_operation_diagnostic(diagnostic, &target))
+            .map(|issue| runtime_issue_to_operation_issue(issue, &target))
             .collect();
 
         PasteGraphFragmentResponse {
@@ -140,7 +135,7 @@ impl RuntimeSession {
             revision_after: response.applied.then_some(revision_after),
             history_entry_id,
             id_remap,
-            diagnostics,
+            issues,
         }
     }
 
@@ -148,7 +143,7 @@ impl RuntimeSession {
         &self,
         target: GraphTargetRef,
         conflict: bool,
-        diagnostics: Vec<RuntimeOperationDiagnostic>,
+        issues: Vec<RuntimeOperationIssue>,
         id_remap: IdRemapResult,
     ) -> PasteGraphFragmentResponse {
         let revision_before = self
@@ -167,7 +162,7 @@ impl RuntimeSession {
             revision_after: None,
             history_entry_id: None,
             id_remap,
-            diagnostics,
+            issues,
         }
     }
 }
@@ -260,15 +255,14 @@ pub(super) fn paste_graph_fragment_into_project_current(
 pub(super) fn paste_graph_fragment_into_graph_current(
     mut graph: GraphDocumentCurrent,
     request: &PasteGraphFragmentRequest,
-) -> Result<(GraphDocumentCurrent, IdRemapResult), (Vec<RuntimeOperationDiagnostic>, IdRemapResult)>
-{
+) -> Result<(GraphDocumentCurrent, IdRemapResult), (Vec<RuntimeOperationIssue>, IdRemapResult)> {
     if let Some(interface_policy) = request
         .options
         .as_ref()
         .and_then(|options| options.interface_incident_edge_policy)
     {
         return Err((
-            vec![RuntimeOperationDiagnostic {
+            vec![RuntimeOperationIssue {
                 severity: "error".to_owned(),
                 code: "paste.options.unsupported-interface-incident-edge-policy".to_owned(),
                 message:
@@ -299,36 +293,36 @@ pub(super) fn paste_graph_fragment_into_graph_current(
         .and_then(|options| options.id_conflict_policy)
         .unwrap_or(IdConflictPolicy::Remap);
 
-    let payload_identity_diagnostics =
-        payload_identity_fragment_diagnostics_current(request, &graph.revision);
-    if !payload_identity_diagnostics.is_empty() {
-        return Err((payload_identity_diagnostics, empty_id_remap()));
+    let payload_identity_issues =
+        payload_identity_fragment_issues_current(request, &graph.revision);
+    if !payload_identity_issues.is_empty() {
+        return Err((payload_identity_issues, empty_id_remap()));
     }
 
     let fragment_analysis =
         skenion_contracts::analyze_graph_fragment_v01(&request.fragment, outside_policy);
     if !fragment_analysis.ok {
-        let diagnostics = fragment_analysis
-            .diagnostics
+        let issues = fragment_analysis
+            .issues
             .iter()
-            .filter(|diagnostic| diagnostic.severity == "error")
-            .map(|diagnostic| RuntimeOperationDiagnostic {
-                severity: diagnostic.severity.clone(),
-                code: format!("paste.fragment.{}", diagnostic.code),
-                message: diagnostic.message.clone(),
+            .filter(|issue| issue.severity == "error")
+            .map(|issue| RuntimeOperationIssue {
+                severity: issue.severity.clone(),
+                code: format!("paste.fragment.{}", issue.code),
+                message: issue.message.clone(),
                 path: None,
                 target: Some(request.target.clone()),
                 expected_revision: None,
                 actual_revision: Some(graph.revision.clone()),
                 duplicates: None,
-                nodes: diagnostic.nodes.clone(),
-                edges: diagnostic.edges.clone(),
+                nodes: issue.nodes.clone(),
+                edges: issue.edges.clone(),
                 interface_policy: None,
                 interface_detail: None,
             })
             .collect();
         return Err((
-            diagnostics,
+            issues,
             IdRemapResult {
                 omitted_edge_ids: fragment_analysis.omitted_edge_ids,
                 ..empty_id_remap()
@@ -435,10 +429,10 @@ pub(super) fn paste_graph_fragment_into_graph_current(
     ))
 }
 
-fn payload_identity_fragment_diagnostics_current(
+fn payload_identity_fragment_issues_current(
     request: &PasteGraphFragmentRequest,
     graph_revision: &str,
-) -> Vec<RuntimeOperationDiagnostic> {
+) -> Vec<RuntimeOperationIssue> {
     request
         .fragment
         .nodes
@@ -447,7 +441,7 @@ fn payload_identity_fragment_diagnostics_current(
             crate::current_node_identity::graph_node_object_id(node)
                 .is_some_and(is_payload_identity_node_kind_current)
         })
-        .map(|node| RuntimeOperationDiagnostic {
+        .map(|node| RuntimeOperationIssue {
             severity: "error".to_owned(),
             code: "paste.fragment.payload-node-kind".to_owned(),
             message: format!(
@@ -568,10 +562,8 @@ fn placement_delta(
     }
 }
 
-fn operation_diagnostics_from_validation_report(
-    message: String,
-) -> Vec<RuntimeOperationDiagnostic> {
-    vec![RuntimeOperationDiagnostic {
+fn operation_issues_from_validation_report(message: String) -> Vec<RuntimeOperationIssue> {
+    vec![RuntimeOperationIssue {
         severity: "error".to_owned(),
         code: "paste.operation.invalid-envelope".to_owned(),
         message,
@@ -587,22 +579,22 @@ fn operation_diagnostics_from_validation_report(
     }]
 }
 
-pub(super) fn runtime_diagnostic_to_operation_diagnostic(
-    diagnostic: &RuntimeDiagnostic,
+pub(super) fn runtime_issue_to_operation_issue(
+    issue: &RuntimeIssue,
     target: &GraphTargetRef,
-) -> RuntimeOperationDiagnostic {
-    RuntimeOperationDiagnostic {
-        severity: match diagnostic.severity {
-            crate::DiagnosticSeverity::Error => "error",
-            crate::DiagnosticSeverity::Warning => "warning",
-            crate::DiagnosticSeverity::Info => "info",
+) -> RuntimeOperationIssue {
+    RuntimeOperationIssue {
+        severity: match issue.severity {
+            crate::IssueSeverity::Error => "error",
+            crate::IssueSeverity::Warning => "warning",
+            crate::IssueSeverity::Info => "info",
         }
         .to_owned(),
-        code: diagnostic
+        code: issue
             .code
             .clone()
             .unwrap_or_else(|| "paste.lowering.failed".to_owned()),
-        message: diagnostic.message.clone(),
+        message: issue.message.clone(),
         path: None,
         target: Some(target.clone()),
         expected_revision: None,

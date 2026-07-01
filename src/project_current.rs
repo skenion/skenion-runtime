@@ -13,7 +13,7 @@ use crate::{
     ExecutionModelCurrent, FanOutPolicyCurrent, GraphDocumentCurrent, GraphNodeCurrent,
     GraphValidationResultCurrent, MergePolicyCurrent, NodeDefinitionCurrent,
     PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode, PortDirectionCurrent,
-    PortSpecCurrent, ProjectDocumentCurrent, RuntimeDiagnostic, ViewState, port_connection_policy,
+    PortSpecCurrent, ProjectDocumentCurrent, RuntimeIssue, ViewState, port_connection_policy,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -112,7 +112,7 @@ impl RunProjectRequestCurrent {
 }
 
 type CurrentValidation =
-    Result<(Vec<RuntimeDiagnostic>, GraphValidationResultCurrent), Vec<RuntimeDiagnostic>>;
+    Result<(Vec<RuntimeIssue>, GraphValidationResultCurrent), Vec<RuntimeIssue>>;
 
 #[derive(Debug, Clone)]
 struct ExpandedGraphCurrent {
@@ -154,24 +154,24 @@ enum BoundaryKind {
 
 struct ExpansionContext<'a> {
     patches: HashMap<&'a str, &'a PatchDefinitionCurrent>,
-    diagnostics: Vec<RuntimeDiagnostic>,
+    issues: Vec<RuntimeIssue>,
 }
 
 pub fn expand_project_graph_current(
     graph: &GraphDocumentCurrent,
     patch_library: &[PatchDefinitionCurrent],
-) -> Result<GraphDocumentCurrent, Vec<RuntimeDiagnostic>> {
+) -> Result<GraphDocumentCurrent, Vec<RuntimeIssue>> {
     let mut context = ExpansionContext {
         patches: patch_library
             .iter()
             .map(|definition| (definition.id.as_str(), definition))
             .collect(),
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     };
     let expanded = expand_graph_current(graph, "", 0, &[], &mut context);
 
-    if !context.diagnostics.is_empty() {
-        return Err(context.diagnostics);
+    if !context.issues.is_empty() {
+        return Err(context.issues);
     }
 
     Ok(GraphDocumentCurrent {
@@ -194,7 +194,7 @@ pub fn validate_project_request_current(request: &ProjectRequestCurrent) -> Curr
 
 pub fn build_execution_plan_request_current(
     request: &ProjectRequestCurrent,
-) -> Result<(crate::ExecutionPlan, Vec<RuntimeDiagnostic>), Vec<RuntimeDiagnostic>> {
+) -> Result<(crate::ExecutionPlan, Vec<RuntimeIssue>), Vec<RuntimeIssue>> {
     validate_patch_library_current(&request.patch_library)?;
     let graph = expand_project_graph_current(&request.graph, &request.patch_library)?;
     let nodes = normalized_node_definitions_current(&request.nodes, &request.patch_library);
@@ -203,7 +203,7 @@ pub fn build_execution_plan_request_current(
 
 pub fn build_execution_plan_run_request_current(
     request: &RunProjectRequestCurrent,
-) -> Result<(crate::ExecutionPlan, Vec<RuntimeDiagnostic>), Vec<RuntimeDiagnostic>> {
+) -> Result<(crate::ExecutionPlan, Vec<RuntimeIssue>), Vec<RuntimeIssue>> {
     validate_patch_library_current(&request.patch_library)?;
     let graph = expand_project_graph_current(&request.graph, &request.patch_library)?;
     let nodes = normalized_node_definitions_current(&request.nodes, &request.patch_library);
@@ -233,35 +233,35 @@ fn normalized_node_definitions_current(
 
 fn validate_patch_library_current(
     patch_library: &[PatchDefinitionCurrent],
-) -> Result<(), Vec<RuntimeDiagnostic>> {
-    let mut diagnostics = Vec::new();
+) -> Result<(), Vec<RuntimeIssue>> {
+    let mut issues = Vec::new();
     let mut seen = HashSet::new();
 
     for patch in patch_library {
         if !seen.insert(patch.id.as_str()) {
-            diagnostics.push(RuntimeDiagnostic::structured_error(
+            issues.push(RuntimeIssue::structured_error(
                 "subpatch.duplicate-patch-id",
                 format!("duplicate patch id: {}", patch.id),
                 json!({ "patchId": patch.id }),
             ));
         }
 
-        if let Some(diagnostic) = schema_version_diagnostic_with_details(
+        if let Some(issue) = schema_version_issue_with_details(
             "graph",
             Some(patch.graph.schema_version.as_str()),
             json!({ "patchId": patch.id }),
         ) {
-            diagnostics.push(diagnostic);
+            issues.push(issue);
         }
 
         if let Err(report) = skenion_contracts::validate_patch_definition_v01(patch) {
-            diagnostics.extend(
+            issues.extend(
                 report
                     .errors()
                     .iter()
                     .filter(|error| !is_schema_version_contract_error(&error.message))
                     .map(|error| {
-                        RuntimeDiagnostic::structured_error(
+                        RuntimeIssue::structured_error(
                             "subpatch.invalid-patch-definition",
                             error.message.clone(),
                             json!({ "patchId": patch.id }),
@@ -272,7 +272,7 @@ fn validate_patch_library_current(
 
         for node in &patch.graph.nodes {
             if graph_node_object_id(node).is_some_and(is_payload_identity_node_kind_current) {
-                diagnostics.push(payload_identity_node_kind_diagnostic_current(
+                issues.push(payload_identity_node_kind_issue_current(
                     Some(&patch.id),
                     &patch.graph,
                     node,
@@ -281,10 +281,10 @@ fn validate_patch_library_current(
         }
     }
 
-    if diagnostics.is_empty() {
+    if issues.is_empty() {
         Ok(())
     } else {
-        Err(diagnostics)
+        Err(issues)
     }
 }
 
@@ -325,7 +325,7 @@ fn expand_graph_current(
             node_expansions.insert(node.id.clone(), NodeExpansion::Boundary(pin));
         } else if is_subpatch_node(node) {
             let Some(patch_ref) = subpatch_ref(node) else {
-                context.diagnostics.push(subpatch_diagnostic(
+                context.issues.push(subpatch_issue(
                     "subpatch.missing-ref",
                     format!(
                         "subpatch node {} is missing a patch reference",
@@ -343,7 +343,7 @@ fn expand_graph_current(
             if stack.iter().any(|id| id == &patch_ref) {
                 let mut path = stack.to_vec();
                 path.push(patch_ref.clone());
-                context.diagnostics.push(subpatch_diagnostic_with_path(
+                context.issues.push(subpatch_issue_with_path(
                     "subpatch.recursion",
                     format!(
                         "subpatch node {} recursively references patch definition {patch_ref}",
@@ -361,7 +361,7 @@ fn expand_graph_current(
             if depth + 1 > MAX_SUBPATCH_DEPTH {
                 let mut path = stack.to_vec();
                 path.push(patch_ref.clone());
-                context.diagnostics.push(subpatch_diagnostic_with_path(
+                context.issues.push(subpatch_issue_with_path(
                     "subpatch.depth-exceeded",
                     format!(
                         "subpatch node {} exceeds maximum expansion depth {MAX_SUBPATCH_DEPTH}",
@@ -381,7 +381,7 @@ fn expand_graph_current(
                 .get(patch_ref.as_str())
                 .map(|definition| definition.graph.clone())
             else {
-                context.diagnostics.push(subpatch_diagnostic(
+                context.issues.push(subpatch_issue(
                     "subpatch.missing-patch",
                     format!(
                         "subpatch node {} references missing patch definition {patch_ref}",
@@ -583,7 +583,7 @@ fn resolve_source_endpoint(
             .get(edge.source.port_id.as_str())
             .map(|pin| ExpansionEndpoint::Boundary(pin.clone()))
             .unwrap_or_else(|| {
-                context.diagnostics.push(boundary_diagnostic(
+                context.issues.push(boundary_issue(
                     "subpatch.missing-outlet",
                     format!(
                         "subpatch node {} has no outlet boundary for port {}",
@@ -623,7 +623,7 @@ fn resolve_target_endpoint(
             .get(edge.target.port_id.as_str())
             .map(|pin| ExpansionEndpoint::Boundary(pin.clone()))
             .unwrap_or_else(|| {
-                context.diagnostics.push(boundary_diagnostic(
+                context.issues.push(boundary_issue(
                     "subpatch.missing-inlet",
                     format!(
                         "subpatch node {} has no inlet boundary for port {}",
@@ -792,7 +792,7 @@ fn boundary_id_fragment(pin: &str) -> String {
         .collect()
 }
 
-fn subpatch_diagnostic(
+fn subpatch_issue(
     code: &'static str,
     message: String,
     namespace: &str,
@@ -800,11 +800,11 @@ fn subpatch_diagnostic(
     patch_ref: Option<&str>,
     depth: usize,
     stack: &[String],
-) -> RuntimeDiagnostic {
-    subpatch_diagnostic_with_path(code, message, namespace, node, patch_ref, depth, stack)
+) -> RuntimeIssue {
+    subpatch_issue_with_path(code, message, namespace, node, patch_ref, depth, stack)
 }
 
-fn subpatch_diagnostic_with_path(
+fn subpatch_issue_with_path(
     code: &'static str,
     message: String,
     namespace: &str,
@@ -812,8 +812,8 @@ fn subpatch_diagnostic_with_path(
     patch_ref: Option<&str>,
     depth: usize,
     path: &[String],
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
+) -> RuntimeIssue {
+    RuntimeIssue::structured_error(
         code,
         message,
         json!({
@@ -827,15 +827,15 @@ fn subpatch_diagnostic_with_path(
     )
 }
 
-fn boundary_diagnostic(
+fn boundary_issue(
     code: &'static str,
     message: String,
     namespace: &str,
     node_id: &str,
     port_id: &str,
     kind: BoundaryKind,
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
+) -> RuntimeIssue {
+    RuntimeIssue::structured_error(
         code,
         message,
         json!({
@@ -853,18 +853,16 @@ pub fn validate_project_current(
     graph: &GraphDocumentCurrent,
     nodes: &[NodeDefinitionCurrent],
 ) -> CurrentValidation {
-    let mut diagnostics = Vec::new();
+    let mut issues = Vec::new();
     let mut registry: HashMap<(&str, &str), &NodeDefinitionCurrent> = HashMap::new();
 
     for definition in nodes {
         if is_payload_identity_node_kind_current(&definition.id) {
-            diagnostics.push(payload_identity_node_definition_diagnostic_current(
-                definition,
-            ));
+            issues.push(payload_identity_node_definition_issue_current(definition));
         }
         if let Err(report) = skenion_contracts::validate_node_definition_v01(definition) {
-            diagnostics.extend(report.errors().iter().map(|error| {
-                contract_validation_diagnostic(
+            issues.extend(report.errors().iter().map(|error| {
+                contract_validation_issue(
                     "node-definition",
                     "node-definition.invalid-contract",
                     error.message.clone(),
@@ -881,19 +879,19 @@ pub fn validate_project_current(
 
     let graph_analysis = skenion_contracts::analyze_graph_document_v01(graph);
     let graph_analysis_error_messages = graph_analysis
-        .diagnostics
+        .issues
         .iter()
-        .filter(|diagnostic| diagnostic.severity == "error")
-        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+        .filter(|issue| issue.severity == "error")
+        .map(|issue| format!("{}: {}", issue.code, issue.message))
         .collect::<HashSet<_>>();
     if let Err(report) = skenion_contracts::validate_graph_document_v01(graph) {
-        diagnostics.extend(
+        issues.extend(
             report
                 .errors()
                 .iter()
                 .filter(|error| !graph_analysis_error_messages.contains(error.message.as_str()))
                 .map(|error| {
-                    contract_validation_diagnostic(
+                    contract_validation_issue(
                         "graph",
                         "graph.invalid-contract",
                         error.message.clone(),
@@ -903,19 +901,17 @@ pub fn validate_project_current(
                 }),
         );
     }
-    diagnostics.extend(
+    issues.extend(
         graph_analysis
-            .diagnostics
+            .issues
             .iter()
-            .map(|diagnostic| graph_analysis_diagnostic_current(graph, diagnostic)),
+            .map(|issue| graph_analysis_issue_current(graph, issue)),
     );
 
     for node in &graph.nodes {
-        diagnostics.extend(object_spec_diagnostics_current(graph, node));
+        issues.extend(object_spec_issues_current(graph, node));
         if graph_node_object_id(node).is_some_and(is_payload_identity_node_kind_current) {
-            diagnostics.push(payload_identity_node_kind_diagnostic_current(
-                None, graph, node,
-            ));
+            issues.push(payload_identity_node_kind_issue_current(None, graph, node));
         }
         if node_has_non_resolved_object_resolution(node) {
             continue;
@@ -927,8 +923,8 @@ pub fn validate_project_current(
             .zip(kind_version.as_deref())
             .and_then(|key| registry.get(&key))
         {
-            Some(definition) => validate_node_snapshot_current(node, definition, &mut diagnostics),
-            None => diagnostics.push(RuntimeDiagnostic::structured_error(
+            Some(definition) => validate_node_snapshot_current(node, definition, &mut issues),
+            None => issues.push(RuntimeIssue::structured_error(
                 "node-definition.missing",
                 format!(
                     "missing node definition: {}@{}",
@@ -945,15 +941,15 @@ pub fn validate_project_current(
             )),
         }
     }
-    validate_edges_current(graph, &mut diagnostics);
+    validate_edges_current(graph, &mut issues);
 
-    if diagnostics
+    if issues
         .iter()
-        .any(|diagnostic| diagnostic.severity == crate::DiagnosticSeverity::Error)
+        .any(|issue| issue.severity == crate::IssueSeverity::Error)
     {
-        Err(diagnostics)
+        Err(issues)
     } else {
-        Ok((diagnostics, graph_analysis))
+        Ok((issues, graph_analysis))
     }
 }
 
@@ -967,22 +963,22 @@ pub(crate) fn is_payload_identity_node_kind_current(kind: &str) -> bool {
     is_payload_identity_kind(kind)
 }
 
-fn object_spec_diagnostics_current(
+fn object_spec_issues_current(
     graph: &GraphDocumentCurrent,
     node: &GraphNodeCurrent,
-) -> Vec<RuntimeDiagnostic> {
+) -> Vec<RuntimeIssue> {
     let Some(object_spec) = node_object_spec(node) else {
         return Vec::new();
     };
     let resolution = resolve_object_spec_v01(&object_spec);
-    let mut diagnostics = resolution
-        .diagnostics
+    let mut issues = resolution
+        .issues
         .iter()
-        .filter(|diagnostic| diagnostic.code != "object-spec.unresolved")
-        .map(|diagnostic| {
-            RuntimeDiagnostic::structured_error(
-                diagnostic.code.clone(),
-                diagnostic.message.clone(),
+        .filter(|issue| issue.code != "object-spec.unresolved")
+        .map(|issue| {
+            RuntimeIssue::structured_error(
+                issue.code.clone(),
+                issue.message.clone(),
                 json!({
                     "surface": "object-spec",
                     "graphId": graph.id,
@@ -995,13 +991,13 @@ fn object_spec_diagnostics_current(
         })
         .collect::<Vec<_>>();
 
-    if diagnostics.is_empty()
+    if issues.is_empty()
         && let Some(resolved_implementation) = resolution.implementation.as_ref()
         && let Some(node_implementation) = node.implementation.as_ref()
         && resolved_implementation != node_implementation
         && !is_subpatch_node(node)
     {
-        diagnostics.push(RuntimeDiagnostic::structured_error(
+        issues.push(RuntimeIssue::structured_error(
             "object-spec.implementation-mismatch",
             format!(
                 "object spec {} resolves to implementation {}, but node {} uses implementation {}",
@@ -1022,14 +1018,14 @@ fn object_spec_diagnostics_current(
         ));
     }
 
-    diagnostics
+    issues
 }
 
-fn payload_identity_node_kind_diagnostic_current(
+fn payload_identity_node_kind_issue_current(
     patch_id: Option<&str>,
     graph: &GraphDocumentCurrent,
     node: &GraphNodeCurrent,
-) -> RuntimeDiagnostic {
+) -> RuntimeIssue {
     let mut details = json!({
         "surface": "graph-node",
         "graphId": graph.id,
@@ -1041,7 +1037,7 @@ fn payload_identity_node_kind_diagnostic_current(
         details["patchId"] = json!(patch_id);
     }
 
-    RuntimeDiagnostic::structured_error(
+    RuntimeIssue::structured_error(
         "graph.payload-node-kind",
         format!(
             "node {} uses payload identity {} as an executable implementation",
@@ -1052,10 +1048,10 @@ fn payload_identity_node_kind_diagnostic_current(
     )
 }
 
-fn payload_identity_node_definition_diagnostic_current(
+fn payload_identity_node_definition_issue_current(
     definition: &NodeDefinitionCurrent,
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
+) -> RuntimeIssue {
+    RuntimeIssue::structured_error(
         "node-definition.payload-identity-id",
         format!("payload identity node definition id: {}", definition.id),
         json!({
@@ -1066,29 +1062,27 @@ fn payload_identity_node_definition_diagnostic_current(
     )
 }
 
-fn graph_analysis_diagnostic_current(
+fn graph_analysis_issue_current(
     graph: &GraphDocumentCurrent,
-    diagnostic: &skenion_contracts::GraphValidationDiagnosticV01,
-) -> RuntimeDiagnostic {
-    let code = graph_analysis_runtime_code_current(&diagnostic.code);
+    issue: &skenion_contracts::GraphValidationIssueV01,
+) -> RuntimeIssue {
+    let code = graph_analysis_runtime_code_current(&issue.code);
     let details = json!({
         "surface": "graph",
         "graphId": graph.id,
-        "nodes": diagnostic.nodes,
-        "edges": diagnostic.edges,
+        "nodes": issue.nodes,
+        "edges": issue.edges,
     });
 
-    match diagnostic.severity.as_str() {
-        "warning" => {
-            RuntimeDiagnostic::structured_warning(code, diagnostic.message.clone(), details)
-        }
-        "info" => RuntimeDiagnostic {
-            severity: crate::DiagnosticSeverity::Info,
-            message: diagnostic.message.clone(),
+    match issue.severity.as_str() {
+        "warning" => RuntimeIssue::structured_warning(code, issue.message.clone(), details),
+        "info" => RuntimeIssue {
+            severity: crate::IssueSeverity::Info,
+            message: issue.message.clone(),
             code: Some(code),
             details: Some(details),
         },
-        _ => RuntimeDiagnostic::structured_error(code, diagnostic.message.clone(), details),
+        _ => RuntimeIssue::structured_error(code, issue.message.clone(), details),
     }
 }
 
@@ -1105,16 +1099,16 @@ fn graph_analysis_runtime_code_current(code: &str) -> String {
     .to_owned()
 }
 
-fn contract_validation_diagnostic(
+fn contract_validation_issue(
     surface: &'static str,
     code: &'static str,
     message: String,
     received_schema_version: &str,
     mut details: Value,
-) -> RuntimeDiagnostic {
+) -> RuntimeIssue {
     let object = details
         .as_object_mut()
-        .expect("contract validation diagnostic details should be an object");
+        .expect("contract validation issue details should be an object");
     object.insert("surface".to_owned(), json!(surface));
     object.insert(
         "expectedSchemaVersion".to_owned(),
@@ -1124,24 +1118,24 @@ fn contract_validation_diagnostic(
         "receivedSchemaVersion".to_owned(),
         json!(received_schema_version),
     );
-    RuntimeDiagnostic::structured_error(code, message, details)
+    RuntimeIssue::structured_error(code, message, details)
 }
 
-pub fn schema_version_diagnostic(
+pub fn schema_version_issue(
     surface: &'static str,
     received_schema_version: Option<&str>,
-) -> Option<RuntimeDiagnostic> {
-    schema_version_diagnostic_with_details(surface, received_schema_version, json!({}))
+) -> Option<RuntimeIssue> {
+    schema_version_issue_with_details(surface, received_schema_version, json!({}))
 }
 
-fn schema_version_diagnostic_with_details(
+fn schema_version_issue_with_details(
     surface: &'static str,
     received_schema_version: Option<&str>,
     mut details: Value,
-) -> Option<RuntimeDiagnostic> {
+) -> Option<RuntimeIssue> {
     let object = details
         .as_object_mut()
-        .expect("schema version diagnostic details should be an object");
+        .expect("schema version issue details should be an object");
     object.insert("surface".to_owned(), json!(surface));
     object.insert(
         "expectedSchemaVersion".to_owned(),
@@ -1154,12 +1148,12 @@ fn schema_version_diagnostic_with_details(
 
     match received_schema_version {
         Some(CURRENT_SCHEMA_VERSION) => None,
-        Some(version) => Some(RuntimeDiagnostic::structured_error(
+        Some(version) => Some(RuntimeIssue::structured_error(
             "project.unsupported-schema-version",
             format!("unsupported {surface}.schemaVersion: {version}"),
             details,
         )),
-        None => Some(RuntimeDiagnostic::structured_error(
+        None => Some(RuntimeIssue::structured_error(
             "project.missing-schema-version",
             format!("missing {surface}.schemaVersion in project request"),
             details,
@@ -1167,68 +1161,65 @@ fn schema_version_diagnostic_with_details(
     }
 }
 
-pub fn project_document_validation_diagnostics_current(
+pub fn project_document_validation_issues_current(
     document: &ProjectDocumentCurrent,
     report: &skenion_contracts::ValidationReportV01,
-) -> Vec<RuntimeDiagnostic> {
-    let mut diagnostics = Vec::new();
-    if let Some(diagnostic) =
-        schema_version_diagnostic("project", Some(document.schema_version.as_str()))
-    {
-        diagnostics.push(diagnostic);
+) -> Vec<RuntimeIssue> {
+    let mut issues = Vec::new();
+    if let Some(issue) = schema_version_issue("project", Some(document.schema_version.as_str())) {
+        issues.push(issue);
     }
-    if let Some(diagnostic) =
-        schema_version_diagnostic("graph", Some(document.graph.schema_version.as_str()))
+    if let Some(issue) = schema_version_issue("graph", Some(document.graph.schema_version.as_str()))
     {
-        diagnostics.push(diagnostic);
+        issues.push(issue);
     }
     for patch in &document.patch_library {
-        if let Some(diagnostic) = schema_version_diagnostic_with_details(
+        if let Some(issue) = schema_version_issue_with_details(
             "graph",
             Some(patch.graph.schema_version.as_str()),
             json!({ "patchId": patch.id }),
         ) {
-            diagnostics.push(diagnostic);
+            issues.push(issue);
         }
     }
 
-    diagnostics.extend(
+    issues.extend(
         report
             .errors()
             .iter()
             .filter(|error| !is_schema_version_contract_error(&error.message))
             .map(|error| {
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "project.invalid-0.1",
                     error.message.clone(),
                     json!({ "projectId": document.id }),
                 )
             }),
     );
-    diagnostics
+    issues
 }
 
-pub fn project_document_payload_schema_diagnostics(value: &Value) -> Vec<RuntimeDiagnostic> {
-    let mut diagnostics = Vec::new();
-    if let Some(diagnostic) = schema_version_diagnostic(
+pub fn project_document_payload_schema_issues(value: &Value) -> Vec<RuntimeIssue> {
+    let mut issues = Vec::new();
+    if let Some(issue) = schema_version_issue(
         "project",
         value.get("schemaVersion").and_then(Value::as_str),
     ) {
-        diagnostics.push(diagnostic);
+        issues.push(issue);
     }
-    if let Some(diagnostic) = schema_version_diagnostic(
+    if let Some(issue) = schema_version_issue(
         "graph",
         value
             .get("graph")
             .and_then(|graph| graph.get("schemaVersion"))
             .and_then(Value::as_str),
     ) {
-        diagnostics.push(diagnostic);
+        issues.push(issue);
     }
     if let Some(patches) = value.get("patchLibrary").and_then(Value::as_array) {
         for patch in patches {
             let patch_id = patch.get("id").and_then(Value::as_str);
-            if let Some(diagnostic) = schema_version_diagnostic_with_details(
+            if let Some(issue) = schema_version_issue_with_details(
                 "graph",
                 patch
                     .get("graph")
@@ -1236,11 +1227,11 @@ pub fn project_document_payload_schema_diagnostics(value: &Value) -> Vec<Runtime
                     .and_then(Value::as_str),
                 json!({ "patchId": patch_id }),
             ) {
-                diagnostics.push(diagnostic);
+                issues.push(issue);
             }
         }
     }
-    diagnostics
+    issues
 }
 
 fn is_schema_version_contract_error(message: &str) -> bool {
@@ -1250,8 +1241,8 @@ fn is_schema_version_contract_error(message: &str) -> bool {
 pub fn build_execution_plan_current(
     graph: &GraphDocumentCurrent,
     nodes: &[NodeDefinitionCurrent],
-) -> Result<(crate::ExecutionPlan, Vec<RuntimeDiagnostic>), Vec<RuntimeDiagnostic>> {
-    let (diagnostics, analysis) = validate_project_current(graph, nodes)?;
+) -> Result<(crate::ExecutionPlan, Vec<RuntimeIssue>), Vec<RuntimeIssue>> {
+    let (issues, analysis) = validate_project_current(graph, nodes)?;
     let registry = nodes
         .iter()
         .map(|definition| {
@@ -1315,7 +1306,7 @@ pub fn build_execution_plan_current(
                 .collect(),
             groups: groups_by_model.into_values().collect(),
         },
-        diagnostics,
+        issues,
     ))
 }
 
@@ -1384,7 +1375,7 @@ fn is_feedback_edge(edge: &EdgeSpecCurrent) -> bool {
 fn validate_node_snapshot_current(
     node: &crate::GraphNodeCurrent,
     definition: &NodeDefinitionCurrent,
-    diagnostics: &mut Vec<RuntimeDiagnostic>,
+    issues: &mut Vec<RuntimeIssue>,
 ) {
     let definition_ports = definition
         .ports
@@ -1399,7 +1390,7 @@ fn validate_node_snapshot_current(
 
     for definition_port in &definition.ports {
         if !snapshot_ports.contains_key(definition_port.id.as_str()) {
-            diagnostics.push(node_snapshot_diagnostic(
+            issues.push(node_snapshot_issue(
                 "node.port-snapshot.missing-manifest-port",
                 format!(
                     "port snapshot missing manifest port: {}.{}",
@@ -1413,7 +1404,7 @@ fn validate_node_snapshot_current(
 
     for snapshot_port in &node.ports {
         let Some(definition_port) = definition_ports.get(snapshot_port.id.as_str()) else {
-            diagnostics.push(node_snapshot_diagnostic(
+            issues.push(node_snapshot_issue(
                 "node.port-snapshot.unknown-manifest-port",
                 format!(
                     "port snapshot references missing manifest port: {}.{}",
@@ -1426,7 +1417,7 @@ fn validate_node_snapshot_current(
         };
 
         if snapshot_port.direction != definition_port.direction {
-            diagnostics.push(node_snapshot_diagnostic(
+            issues.push(node_snapshot_issue(
                 "node.port-snapshot.direction-mismatch",
                 format!(
                     "port snapshot mismatch: {}.{} direction differs from definition",
@@ -1437,7 +1428,7 @@ fn validate_node_snapshot_current(
             ));
         }
         if snapshot_port.port_type != definition_port.port_type {
-            diagnostics.push(node_snapshot_diagnostic(
+            issues.push(node_snapshot_issue(
                 "node.port-snapshot.type-mismatch",
                 format!(
                     "port snapshot mismatch: {}.{} type {} != definition type {}",
@@ -1450,7 +1441,7 @@ fn validate_node_snapshot_current(
     }
 }
 
-fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<RuntimeDiagnostic>) {
+fn validate_edges_current(graph: &GraphDocumentCurrent, issues: &mut Vec<RuntimeIssue>) {
     for edge in &graph.edges {
         let Some(source) = find_port(graph, &edge.source.node_id, &edge.source.port_id) else {
             continue;
@@ -1460,7 +1451,7 @@ fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<Ru
         };
 
         if source.direction != PortDirectionCurrent::Output {
-            diagnostics.push(edge_diagnostic(
+            issues.push(edge_issue(
                 "graph.edge-source-direction",
                 format!(
                     "edge source {}:{} is not an output port",
@@ -1470,7 +1461,7 @@ fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<Ru
             ));
         }
         if target.direction != PortDirectionCurrent::Input {
-            diagnostics.push(edge_diagnostic(
+            issues.push(edge_issue(
                 "graph.edge-target-direction",
                 format!(
                     "edge target {}:{} is not an input port",
@@ -1482,7 +1473,7 @@ fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<Ru
 
         let connection_policy = port_connection_policy(source, target);
         if !connection_policy.accepted && connection_policy.reason != "direction-mismatch" {
-            diagnostics.push(edge_diagnostic(
+            issues.push(edge_issue(
                 "graph.edge-incompatible-type",
                 format!(
                     "incompatible edge {}:{} {} -> {}:{} {} ({})",
@@ -1500,12 +1491,8 @@ fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<Ru
     }
 }
 
-fn edge_diagnostic(
-    code: &'static str,
-    message: String,
-    edge: &EdgeSpecCurrent,
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
+fn edge_issue(code: &'static str, message: String, edge: &EdgeSpecCurrent) -> RuntimeIssue {
+    RuntimeIssue::structured_error(
         code,
         message,
         json!({
@@ -1523,13 +1510,13 @@ fn edge_diagnostic(
     )
 }
 
-fn node_snapshot_diagnostic(
+fn node_snapshot_issue(
     code: &'static str,
     message: String,
     node: &crate::GraphNodeCurrent,
     port_id: &str,
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
+) -> RuntimeIssue {
+    RuntimeIssue::structured_error(
         code,
         message,
         json!({

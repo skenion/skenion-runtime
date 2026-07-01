@@ -14,7 +14,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::structured_error(
+                vec![RuntimeIssue::structured_error(
                     "collaboration.target.no-project",
                     "no project loaded in runtime session",
                     serde_json::json!({ "target": target }),
@@ -23,12 +23,12 @@ impl RuntimeSession {
         };
         let target_revision = match target_graph_revision_current(&project, &target) {
             Ok(revision) => revision,
-            Err(diagnostic) => {
+            Err(issue) => {
                 return self.patch_response(
                     false,
                     false,
                     false,
-                    vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                    vec![operation_issue_to_runtime_issue(*issue)],
                 );
             }
         };
@@ -37,7 +37,7 @@ impl RuntimeSession {
                 false,
                 false,
                 true,
-                vec![RuntimeDiagnostic::structured_error(
+                vec![RuntimeIssue::structured_error(
                     "collaboration.revision-conflict",
                     format!(
                         "target baseRevision {} does not match target graph revision {}",
@@ -60,8 +60,8 @@ impl RuntimeSession {
                 &changes,
             ) {
                 Ok(result) => result,
-                Err(diagnostics) => {
-                    return self.patch_response(false, false, false, diagnostics);
+                Err(issues) => {
+                    return self.patch_response(false, false, false, issues);
                 }
             };
         self.apply_project_document_update(
@@ -85,19 +85,19 @@ pub(super) fn apply_collaboration_changes_to_project_current(
     view_revision: u64,
     target: &GraphTargetRef,
     changes: &[RuntimeCollaborationChange],
-) -> Result<(ProjectDocumentCurrent, u64), Vec<RuntimeDiagnostic>> {
+) -> Result<(ProjectDocumentCurrent, u64), Vec<RuntimeIssue>> {
     if matches!(
         &target.path,
         PatchPath::PackagePatchDefinition { .. } | PatchPath::EmbeddedPatchInstance { .. }
     ) {
-        return Err(vec![RuntimeDiagnostic::structured_error(
+        return Err(vec![RuntimeIssue::structured_error(
             "collaboration.target.unsupported",
             "collaboration target cannot be mutated in the active Runtime session",
             serde_json::json!({ "target": target }),
         )]);
     }
     let mut graph = graph_for_path_current(&project, &target.path).ok_or_else(|| {
-        vec![RuntimeDiagnostic::structured_error(
+        vec![RuntimeIssue::structured_error(
             "collaboration.target.missing-graph",
             "collaboration target graph is not available in the active current 0.1 project",
             serde_json::json!({ "target": target }),
@@ -111,7 +111,7 @@ pub(super) fn apply_collaboration_changes_to_project_current(
         match change {
             RuntimeCollaborationChange::NodeAdd { node, view, .. } => {
                 if graph.nodes.iter().any(|existing| existing.id == node.id) {
-                    return Err(vec![RuntimeDiagnostic::structured_error(
+                    return Err(vec![RuntimeIssue::structured_error(
                         "collaboration.node-id-conflict",
                         format!("node id {} already exists in target graph", node.id),
                         serde_json::json!({ "nodeId": node.id, "target": target }),
@@ -133,7 +133,7 @@ pub(super) fn apply_collaboration_changes_to_project_current(
                         );
                         view_changed = true;
                     } else {
-                        return Err(vec![unsupported_patch_view_change_diagnostic(target)]);
+                        return Err(vec![unsupported_patch_view_change_issue(target)]);
                     }
                 }
             }
@@ -141,10 +141,10 @@ pub(super) fn apply_collaboration_changes_to_project_current(
                 node_id, from, to, ..
             } => {
                 if !target_supports_view_state(&target.path) {
-                    return Err(vec![unsupported_patch_view_change_diagnostic(target)]);
+                    return Err(vec![unsupported_patch_view_change_issue(target)]);
                 }
                 if !graph.nodes.iter().any(|node| node.id == *node_id) {
-                    return Err(vec![RuntimeDiagnostic::structured_error(
+                    return Err(vec![RuntimeIssue::structured_error(
                         "collaboration.node-missing",
                         format!("node {node_id} does not exist in target graph"),
                         serde_json::json!({ "nodeId": node_id, "target": target }),
@@ -166,7 +166,7 @@ pub(super) fn apply_collaboration_changes_to_project_current(
                 if let Some(from) = from
                     && (previous.x != from.x || previous.y != from.y)
                 {
-                    return Err(vec![RuntimeDiagnostic::structured_error(
+                    return Err(vec![RuntimeIssue::structured_error(
                         "collaboration.view-conflict",
                         format!("node {node_id} view does not match collaboration from position"),
                         serde_json::json!({
@@ -192,7 +192,7 @@ pub(super) fn apply_collaboration_changes_to_project_current(
                 let original_len = graph.nodes.len();
                 graph.nodes.retain(|node| node.id != *node_id);
                 if graph.nodes.len() == original_len {
-                    return Err(vec![RuntimeDiagnostic::structured_error(
+                    return Err(vec![RuntimeIssue::structured_error(
                         "collaboration.node-missing",
                         format!("node {node_id} does not exist in target graph"),
                         serde_json::json!({ "nodeId": node_id, "target": target }),
@@ -209,7 +209,7 @@ pub(super) fn apply_collaboration_changes_to_project_current(
             }
             RuntimeCollaborationChange::EdgeConnect { edge, .. } => {
                 if graph.edges.iter().any(|existing| existing.id == edge.id) {
-                    return Err(vec![RuntimeDiagnostic::structured_error(
+                    return Err(vec![RuntimeIssue::structured_error(
                         "collaboration.edge-id-conflict",
                         format!("edge id {} already exists in target graph", edge.id),
                         serde_json::json!({ "edgeId": edge.id, "target": target }),
@@ -222,7 +222,7 @@ pub(super) fn apply_collaboration_changes_to_project_current(
                 let original_len = graph.edges.len();
                 graph.edges.retain(|edge| edge.id != *edge_id);
                 if graph.edges.len() == original_len {
-                    return Err(vec![RuntimeDiagnostic::structured_error(
+                    return Err(vec![RuntimeIssue::structured_error(
                         "collaboration.edge-missing",
                         format!("collaboration edge.disconnect cannot resolve edge id {edge_id}"),
                         serde_json::json!({ "edgeId": edge_id, "target": target }),

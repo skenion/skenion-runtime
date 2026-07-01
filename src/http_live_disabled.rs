@@ -109,7 +109,7 @@ fn response(session_id: &str, channel: DisabledLiveChannel) -> Response {
             "schema": "skenion.runtime.http-live-channel-disabled",
             "schemaVersion": "0.1.0",
             "sessionId": session_id,
-            "diagnostics": [{
+            "issues": [{
                 "severity": "error",
                 "code": "runtime.http-live-channel-disabled",
                 "message": "HTTP live mutation and event channels are disabled; use the session WebSocket instead.",

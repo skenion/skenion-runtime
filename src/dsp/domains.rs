@@ -10,7 +10,7 @@ use super::{
 use crate::{
     AudioClockBridgeMethod, AudioClockBridgePlan, AudioClockDomain, AudioClockDomainAuthority,
     AudioEndpoint, AudioEndpointDirection, AudioGraphPartition, GraphDocument, GraphNode,
-    RuntimeDiagnostic, plan_audio_clock_bridge,
+    RuntimeIssue, plan_audio_clock_bridge,
 };
 
 pub(super) fn audio_endpoint_plan_nodes(graph: &GraphDocument) -> Vec<AudioEndpointPlanNode> {
@@ -186,7 +186,7 @@ pub(super) fn audio_clock_bridge_plans(
                     target_node_id: output.node_id.clone(),
                     source_clock_domain_id: source.clock_domain_id.clone(),
                     target_clock_domain_id: output.clock_domain_id.clone(),
-                    diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                    issue: Box::new(RuntimeIssue::structured_error(
                         "audio-dsp.clock-domain-crossing-requires-bridge",
                         format!(
                             "audio signal route from {} domain {} to {} domain {} requires object.core.audio.clock-bridge or object.core.audio.resample",

@@ -9,7 +9,7 @@ use super::values::control_input_f32_from_params;
 use super::*;
 use crate::{
     AudioClockBridgeMethod, AudioClockDomainAuthority, AudioEndpointDirection, Edge, GraphDocument,
-    NodeDefinition, NodeRegistry, PlanError, ProjectRequestCurrent, RuntimeDiagnostic,
+    NodeDefinition, NodeRegistry, PlanError, ProjectRequestCurrent, RuntimeIssue,
 };
 
 fn registry() -> NodeRegistry {
@@ -496,14 +496,14 @@ fn rejects_invalid_options_and_projects() {
             .unwrap_err();
 
     assert_eq!(
-        block_error.diagnostics()[0].code.as_deref(),
+        block_error.issues()[0].code.as_deref(),
         Some("audio-dsp.invalid-block-size")
     );
     assert_eq!(
-        rate_error.diagnostics()[0].code.as_deref(),
+        rate_error.issues()[0].code.as_deref(),
         Some("audio-dsp.invalid-sample-rate")
     );
-    assert!(!project_error.diagnostics().is_empty());
+    assert!(!project_error.issues().is_empty());
     assert!(matches!(
         block_error,
         AudioDspPlanError::InvalidBlockSize { .. }
@@ -519,33 +519,33 @@ fn rejects_invalid_options_and_projects() {
 }
 
 #[test]
-fn dsp_error_helpers_preserve_structured_diagnostics() {
-    let diagnostic = RuntimeDiagnostic::structured_error(
+fn dsp_error_helpers_preserve_structured_issues() {
+    let issue = RuntimeIssue::structured_error(
         "audio-dsp.test",
-        "test diagnostic",
+        "test issue",
         json!({ "source": "dsp-error-test" }),
     );
-    let invalid_project = AudioDspPlanError::from_diagnostics(vec![diagnostic.clone()]);
+    let invalid_project = AudioDspPlanError::from_issues(vec![issue.clone()]);
 
-    assert_eq!(invalid_project.diagnostics(), vec![diagnostic.clone()]);
+    assert_eq!(invalid_project.issues(), vec![issue.clone()]);
 
     let plan_error = AudioDspPlanError::from_plan_error(PlanError::Cycle {
         nodes: "osc -> osc".to_owned(),
     });
     assert_eq!(
-        plan_error.diagnostics()[0].code.as_deref(),
+        plan_error.issues()[0].code.as_deref(),
         Some("audio-dsp.plan")
     );
     assert_eq!(
-        AudioOfflineDspError::Plan(plan_error).diagnostics()[0]
+        AudioOfflineDspError::Plan(plan_error).issues()[0]
             .code
             .as_deref(),
         Some("audio-dsp.plan")
     );
 
     assert_eq!(
-        AudioRealtimeDspError::Plan(invalid_project).diagnostics(),
-        vec![diagnostic]
+        AudioRealtimeDspError::Plan(invalid_project).issues(),
+        vec![issue]
     );
 }
 
@@ -564,7 +564,7 @@ fn rejects_signal_ports_outside_audio_block_nodes() {
         build_audio_dsp_plan(&graph, &registry(), AudioDspPlanOptions::default()).unwrap_err();
 
     assert_eq!(
-        error.diagnostics()[0].code.as_deref(),
+        error.issues()[0].code.as_deref(),
         Some("audio-dsp.signal-port-outside-audio-block")
     );
     assert!(matches!(
@@ -771,11 +771,11 @@ fn rejects_invalid_offline_options_and_unsupported_nodes() {
         AudioOfflineDspError::UnsupportedNodeKind { .. }
     ));
     assert_eq!(
-        block_error.diagnostics()[0].code.as_deref(),
+        block_error.issues()[0].code.as_deref(),
         Some("audio-dsp.invalid-offline-block-count")
     );
     assert_eq!(
-        unsupported_error.diagnostics()[0].code.as_deref(),
+        unsupported_error.issues()[0].code.as_deref(),
         Some("audio-dsp.offline-unsupported-node-kind")
     );
     assert!(
@@ -969,15 +969,15 @@ fn realtime_executor_reports_output_and_kind_errors_without_processing() {
     .unwrap_err();
 
     assert_eq!(
-        invalid_channels.diagnostics()[0].code.as_deref(),
+        invalid_channels.issues()[0].code.as_deref(),
         Some("audio-dsp.invalid-realtime-channel-count")
     );
     assert_eq!(
-        missing_output.diagnostics()[0].code.as_deref(),
+        missing_output.issues()[0].code.as_deref(),
         Some("audio-dsp.realtime-output-count")
     );
     assert_eq!(
-        unsupported_kind.diagnostics()[0].code.as_deref(),
+        unsupported_kind.issues()[0].code.as_deref(),
         Some("audio-dsp.realtime-unsupported-node-kind")
     );
     assert!(matches!(
@@ -1158,9 +1158,12 @@ fn public_current_audio_dsp_entrypoints_validate_and_lower_internally() {
     unsupported_request.graph.schema_version = "9.9.9".to_owned();
     let error = build_audio_dsp_plan_current(&unsupported_request, AudioDspPlanOptions::default())
         .unwrap_err();
-    assert!(error.diagnostics().iter().any(|diagnostic| {
-        diagnostic.code.as_deref() == Some("project.unsupported-schema-version")
-    }));
+    assert!(
+        error
+            .issues()
+            .iter()
+            .any(|issue| { issue.code.as_deref() == Some("project.unsupported-schema-version") })
+    );
 }
 
 fn audio_source_definition(id: &str, input_port: &str) -> NodeDefinition {
@@ -1458,7 +1461,7 @@ fn current_core_node_json(
       "objectResolution": {
         "status": "resolved",
         "candidates": [],
-        "diagnostics": []
+        "issues": []
       },
       "params": params,
       "ports": ports

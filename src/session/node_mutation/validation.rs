@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::{
-    EdgeSpecCurrent, GraphDocumentCurrent, GraphTargetRef, PortDirectionCurrent, RuntimeDiagnostic,
+    EdgeSpecCurrent, GraphDocumentCurrent, GraphTargetRef, PortDirectionCurrent, RuntimeIssue,
     port_type_accepts,
     session::{RuntimePatchResponse, RuntimeSession},
 };
@@ -15,7 +15,7 @@ pub(super) fn node_target_revision_conflict_response(
         false,
         false,
         true,
-        vec![RuntimeDiagnostic::structured_error(
+        vec![RuntimeIssue::structured_error(
             "node.command.target-revision-conflict",
             format!(
                 "target baseRevision {} does not match target graph revision {}",

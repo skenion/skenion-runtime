@@ -125,9 +125,9 @@ fn cold_typed_ports_reject_set_selector_messages() {
     );
 
     assert!(!cold.ok);
-    assert!(cold.diagnostics[0].message.contains("value_1.cold"));
+    assert!(cold.issues[0].message.contains("value_1.cold"));
     assert!(!right.ok);
-    assert!(right.diagnostics[0].message.contains("add_1.right"));
+    assert!(right.issues[0].message.contains("add_1.right"));
     assert_eq!(
         state.value_for_node("value_1"),
         Some(&ControlValue::float(1.0))
@@ -496,7 +496,7 @@ fn control_edges_convert_bool_payloads_for_numeric_targets() {
 
     let response = state.apply_event(bang_request("message_1", "in"), &graph);
 
-    assert!(response.ok, "{:?}", response.diagnostics);
+    assert!(response.ok, "{:?}", response.issues);
     assert_eq!(
         state.value_for_node("float_1"),
         Some(&ControlValue::float(1.0))
@@ -576,7 +576,7 @@ fn message_controls_emit_strings() {
     );
     assert!(!cold_message.ok);
     assert!(
-        cold_message.diagnostics[0]
+        cold_message.issues[0]
             .message
             .contains("does not support runtime control input port cold")
     );
@@ -734,11 +734,7 @@ fn receive_name_dispatch_uses_numeric_conversion_policy() {
     );
 
     assert!(response.ok);
-    assert!(
-        response.diagnostics.is_empty(),
-        "{:?}",
-        response.diagnostics
-    );
+    assert!(response.issues.is_empty(), "{:?}", response.issues);
     assert_eq!(
         state.value_for_node("int_receiver"),
         Some(&ControlValue::int(12))
@@ -762,7 +758,7 @@ fn receive_name_dispatch_uses_numeric_conversion_policy() {
     let bool_response =
         bool_state.apply_event(bang_request("bool_sender", "in"), &bool_routing_graph);
 
-    assert!(bool_response.ok, "{:?}", bool_response.diagnostics);
+    assert!(bool_response.ok, "{:?}", bool_response.issues);
     assert_eq!(
         bool_state.value_for_node("float_receiver"),
         Some(&ControlValue::float(1.0))
@@ -826,14 +822,14 @@ fn comment_and_panel_inlets_reject_non_set_messages() {
     assert!(!comment_response.ok);
     assert!(comment_response.emitted.is_empty());
     assert!(
-        comment_response.diagnostics[0]
+        comment_response.issues[0]
             .message
             .contains("expects set message")
     );
     assert!(!panel_response.ok);
     assert!(panel_response.emitted.is_empty());
     assert!(
-        panel_response.diagnostics[0]
+        panel_response.issues[0]
             .message
             .contains("expects set message")
     );
@@ -894,7 +890,7 @@ fn message_set_updates_comment_and_panel_through_inlets() {
 
     let response = state.apply_event(bang_request("button_1", "in"), &graph);
 
-    assert!(response.ok, "{:?}", response.diagnostics);
+    assert!(response.ok, "{:?}", response.issues);
     assert_eq!(
         state.value_for_node("comment_1"),
         Some(&ControlValue::string("hello world".to_owned()))
@@ -957,9 +953,9 @@ fn object_channel_helpers_skip_missing_sources_empty_names_and_mismatched_receiv
         &mismatched_receiver_graph,
     );
     assert!(mismatched.ok);
-    assert_eq!(mismatched.diagnostics.len(), 1);
+    assert_eq!(mismatched.issues.len(), 1);
     assert!(
-        mismatched.diagnostics[0]
+        mismatched.issues[0]
             .message
             .contains("ignored incompatible routed value.core.float32")
     );
@@ -985,9 +981,9 @@ fn object_channel_helpers_skip_missing_sources_empty_names_and_mismatched_receiv
         &rejected_receiver_graph,
     );
     assert!(rejected.ok);
-    assert_eq!(rejected.diagnostics.len(), 1);
+    assert_eq!(rejected.issues.len(), 1);
     assert!(
-        rejected.diagnostics[0]
+        rejected.issues[0]
             .message
             .contains("rejected routed value.core.string")
     );
@@ -1283,7 +1279,7 @@ fn object_edge_propagation_rejects_invalid_target_port() {
     );
 
     assert!(!response.ok);
-    assert!(response.diagnostics[0].message.contains("port missing"));
+    assert!(response.issues[0].message.contains("port missing"));
     assert!(state.channels.is_empty());
     assert_eq!(
         state.value_for_node("slider_1"),
@@ -1313,11 +1309,7 @@ fn ui_panel_propagation_stops_at_runtime_safety_limit() {
     );
 
     assert!(!response.ok);
-    assert!(
-        response.diagnostics[0]
-            .message
-            .contains("runtime safety limit")
-    );
+    assert!(response.issues[0].message.contains("runtime safety limit"));
     assert_eq!(
         state.value_for_node("slider_1"),
         Some(&ControlValue::float(0.25))
@@ -1433,7 +1425,7 @@ fn ui_panel_controls_reject_wrong_ports_and_types() {
     let slider_missing_state = state.apply_event(bang_request("slider_1", "in"), &graph);
     assert!(!slider_missing_state.ok);
     assert!(
-        slider_missing_state.diagnostics[0]
+        slider_missing_state.issues[0]
             .message
             .contains("has no runtime control state")
     );
@@ -1454,7 +1446,7 @@ fn control_state_response_serializes_values_and_channels() {
         control_revision: 7,
         values,
         channels,
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     };
 
     assert_eq!(
@@ -1471,7 +1463,7 @@ fn control_state_response_serializes_values_and_channels() {
                     "atoms": [{ "type": "float", "representation": "f32", "value": 1.5 }]
                 }
             },
-            "diagnostics": []
+            "issues": []
         })
     );
 }
@@ -1686,7 +1678,7 @@ fn unsupported_control_kind_is_reported() {
 
     assert!(!response.ok);
     assert!(
-        response.diagnostics[0]
+        response.issues[0]
             .message
             .contains("does not support runtime control events")
     );
@@ -1706,7 +1698,7 @@ fn invalid_events_do_not_mutate_state() {
         let response = state.apply_event(request, &graph);
         assert!(!response.ok);
         assert!(response.emitted.is_empty());
-        assert!(!response.diagnostics.is_empty());
+        assert!(!response.issues.is_empty());
         assert_eq!(
             state.value_for_node("value_1"),
             Some(&ControlValue::float(1.0))
@@ -1742,7 +1734,7 @@ fn rejects_existing_unsupported_input_ports() {
     );
     assert!(!unsupported_set.ok);
     assert!(
-        unsupported_set.diagnostics[0]
+        unsupported_set.issues[0]
             .message
             .contains("does not support runtime control input port set")
     );
@@ -1757,7 +1749,7 @@ fn rejects_existing_unsupported_input_ports() {
     );
     assert!(!unsupported_message_cold.ok);
     assert!(
-        unsupported_message_cold.diagnostics[0]
+        unsupported_message_cold.issues[0]
             .message
             .contains("does not support runtime control input port cold")
     );
@@ -1777,7 +1769,7 @@ fn rejects_non_control_nodes_and_missing_control_state() {
     );
     assert!(!non_control.ok);
     assert!(
-        non_control.diagnostics[0]
+        non_control.issues[0]
             .message
             .contains("does not support runtime control events")
     );
@@ -1789,7 +1781,7 @@ fn rejects_non_control_nodes_and_missing_control_state() {
     );
     assert!(!missing_state.ok);
     assert!(
-        missing_state.diagnostics[0]
+        missing_state.issues[0]
             .message
             .contains("has no runtime control state")
     );

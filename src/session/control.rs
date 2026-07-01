@@ -1,7 +1,7 @@
 use crate::{
     PreviewControlStateSnapshot, RuntimeControlEventRequest, RuntimeControlEventResponse,
     RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlReadTarget,
-    RuntimeControlStateResponse, RuntimeDiagnostic, read_graph_param, read_graph_port,
+    RuntimeControlStateResponse, RuntimeIssue, read_graph_param, read_graph_port,
 };
 
 use super::RuntimeSession;
@@ -17,9 +17,7 @@ impl RuntimeSession {
                 changed: false,
                 control_revision: Some(self.control_revision),
                 emitted: Vec::new(),
-                diagnostics: vec![RuntimeDiagnostic::error(
-                    "no project loaded in runtime session",
-                )],
+                issues: vec![RuntimeIssue::error("no project loaded in runtime session")],
             };
         };
 
@@ -30,10 +28,10 @@ impl RuntimeSession {
             if changed {
                 self.control_revision += 1;
             }
-            self.diagnostics = Vec::new();
+            self.issues = Vec::new();
             return response.with_runtime_metadata(changed, self.control_revision);
         } else {
-            self.diagnostics = response.diagnostics.clone();
+            self.issues = response.issues.clone();
         }
         response.with_runtime_metadata(false, self.control_revision)
     }
@@ -44,12 +42,10 @@ impl RuntimeSession {
             control_revision: self.control_revision,
             values: self.control_state.values.clone(),
             channels: self.control_state.channels.clone(),
-            diagnostics: if self.graph.is_some() {
+            issues: if self.graph.is_some() {
                 Vec::new()
             } else {
-                vec![RuntimeDiagnostic::error(
-                    "no project loaded in runtime session",
-                )]
+                vec![RuntimeIssue::error("no project loaded in runtime session")]
             },
         }
     }

@@ -46,7 +46,7 @@ impl RuntimeSession {
                     false,
                     false,
                     false,
-                    vec![RuntimeDiagnostic::structured_error(
+                    vec![RuntimeIssue::structured_error(
                         "node.target.no-project",
                         "no project loaded in runtime session",
                         json!({ "target": target }),
@@ -58,13 +58,13 @@ impl RuntimeSession {
 
         let target_revision = match target_graph_revision_current(&project, &target) {
             Ok(revision) => revision,
-            Err(diagnostic) => {
+            Err(issue) => {
                 return (
                     self.patch_response(
                         false,
                         false,
                         false,
-                        vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                        vec![operation_issue_to_runtime_issue(*issue)],
                     ),
                     Vec::new(),
                 );
@@ -85,7 +85,7 @@ impl RuntimeSession {
                         false,
                         false,
                         false,
-                        vec![RuntimeDiagnostic::structured_error(
+                        vec![RuntimeIssue::structured_error(
                             "node.target.missing-graph",
                             "node target graph is not available in the active current 0.1 project",
                             json!({ "target": target }),
@@ -101,7 +101,7 @@ impl RuntimeSession {
                     false,
                     false,
                     false,
-                    vec![RuntimeDiagnostic::structured_error(
+                    vec![RuntimeIssue::structured_error(
                         "node.delete.node-missing",
                         format!("node {node_id} does not exist in target graph"),
                         json!({ "nodeId": node_id, "target": target }),
@@ -170,7 +170,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::structured_error(
+                vec![RuntimeIssue::structured_error(
                     "node.update.params-required",
                     "node.update requires at least one payload.params entry",
                     json!({ "nodeId": node_id, "target": target }),
@@ -182,7 +182,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::structured_error(
+                vec![RuntimeIssue::structured_error(
                     "node.target.no-project",
                     "no project loaded in runtime session",
                     json!({ "target": target }),
@@ -192,12 +192,12 @@ impl RuntimeSession {
 
         let target_revision = match target_graph_revision_current(&project, &target) {
             Ok(revision) => revision,
-            Err(diagnostic) => {
+            Err(issue) => {
                 return self.patch_response(
                     false,
                     false,
                     false,
-                    vec![operation_diagnostic_to_runtime_diagnostic(*diagnostic)],
+                    vec![operation_issue_to_runtime_issue(*issue)],
                 );
             }
         };
@@ -212,7 +212,7 @@ impl RuntimeSession {
                     false,
                     false,
                     false,
-                    vec![RuntimeDiagnostic::structured_error(
+                    vec![RuntimeIssue::structured_error(
                         "node.target.missing-graph",
                         "node target graph is not available in the active current 0.1 project",
                         json!({ "target": target }),
@@ -225,7 +225,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::structured_error(
+                vec![RuntimeIssue::structured_error(
                     "node.update.node-missing",
                     format!("node {node_id} does not exist in target graph"),
                     json!({ "nodeId": node_id, "target": target }),

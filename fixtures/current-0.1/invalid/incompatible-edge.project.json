@@ -18,7 +18,7 @@
         "objectResolution": {
           "status": "resolved",
           "candidates": [],
-          "diagnostics": []
+          "issues": []
         },
         "params": {
           "value": 0.5
@@ -75,7 +75,7 @@
         "objectResolution": {
           "status": "resolved",
           "candidates": [],
-          "diagnostics": []
+          "issues": []
         },
         "params": {},
         "ports": [

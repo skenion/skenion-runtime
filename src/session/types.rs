@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CanvasNodeView, DummyExecutionReport, EndpointBindingValueFormat, ExecutionPlan, GraphPatch,
-    ProjectDocumentCurrent, RuntimeDiagnostic, ViewState,
+    ProjectDocumentCurrent, RuntimeIssue, ViewState,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -15,7 +15,7 @@ pub struct RuntimeSessionSnapshot {
     pub package_registry_revision: Option<u64>,
     pub project: Option<ProjectDocumentCurrent>,
     pub binding_formats: Vec<EndpointBindingValueFormat>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
     pub plan: Option<ExecutionPlan>,
 }
 
@@ -46,7 +46,7 @@ impl RuntimeSessionSnapshot {
 pub struct RuntimeSessionResponse {
     pub ok: bool,
     pub snapshot: RuntimeSessionSnapshot,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
     pub report: Option<DummyExecutionReport>,
 }
 
@@ -58,7 +58,7 @@ pub struct RuntimePatchResponse {
     pub conflict: bool,
     pub snapshot: RuntimeSessionSnapshot,
     pub history: RuntimeHistory,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -18,7 +18,7 @@ mod types;
 
 pub(crate) use types::{
     ObjectRegistry, ObjectRegistryCandidate, ObjectSpecAtom, ObjectSpecCandidateSummary,
-    ObjectSpecDiagnostic, ObjectSpecPort, ObjectSpecPortActivation, ObjectSpecPortDirection,
+    ObjectSpecIssue, ObjectSpecPort, ObjectSpecPortActivation, ObjectSpecPortDirection,
     ObjectSpecPortRate, ObjectSpecResolution, ParsedObjectSpec,
 };
 
@@ -121,8 +121,7 @@ impl ObjectRegistry {
             schema_version: CURRENT_KIND_VERSION.to_owned(),
             catalog_revision: zero_catalog_revision_checksum(),
             entries,
-            diagnostic_node_definitions: Vec::new(),
-            diagnostics: None,
+            issues: None,
         };
         snapshot.catalog_revision = skenion_contracts::compute_node_catalog_revision_v01(&snapshot);
         snapshot
@@ -168,7 +167,7 @@ impl ObjectRegistry {
                 description: None,
                 help_id: Some(candidate.executable_kind.clone()),
             },
-            diagnostics: None,
+            issues: None,
         })
     }
 
@@ -425,7 +424,7 @@ fn project_patch_catalog_entry(candidate: &ObjectRegistryCandidate) -> Option<No
             description: patch.description.clone(),
             help_id: None,
         },
-        diagnostics: None,
+        issues: None,
     })
 }
 
@@ -459,7 +458,7 @@ fn package_catalog_entry(candidate: &ObjectRegistryCandidate) -> Option<NodeCata
             description: None,
             help_id: None,
         },
-        diagnostics: None,
+        issues: None,
     })
 }
 
@@ -642,7 +641,7 @@ use resolver::{
     unresolved_resolution, unsupported_first_party_audio_message,
 };
 #[cfg(test)]
-use resolver::{contract_object_spec_atom_to_runtime, runtime_object_spec_diagnostic_code};
+use resolver::{contract_object_spec_atom_to_runtime, runtime_object_spec_issue_code};
 pub(crate) use resolver::{
     resolve_core_audio, resolve_core_boundary_port, resolve_core_control_operator,
     resolve_core_control_value, resolve_core_subpatch,

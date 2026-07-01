@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeDiagnostic {
-    pub severity: DiagnosticSeverity,
+pub struct RuntimeIssue {
+    pub severity: IssueSeverity,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -13,16 +13,16 @@ pub struct RuntimeDiagnostic {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum DiagnosticSeverity {
+pub enum IssueSeverity {
     Error,
     Warning,
     Info,
 }
 
-impl RuntimeDiagnostic {
+impl RuntimeIssue {
     pub(crate) fn error(message: impl Into<String>) -> Self {
         Self {
-            severity: DiagnosticSeverity::Error,
+            severity: IssueSeverity::Error,
             message: message.into(),
             code: None,
             details: None,
@@ -31,7 +31,7 @@ impl RuntimeDiagnostic {
 
     pub(crate) fn warning(message: impl Into<String>) -> Self {
         Self {
-            severity: DiagnosticSeverity::Warning,
+            severity: IssueSeverity::Warning,
             message: message.into(),
             code: None,
             details: None,
@@ -44,7 +44,7 @@ impl RuntimeDiagnostic {
         details: serde_json::Value,
     ) -> Self {
         Self {
-            severity: DiagnosticSeverity::Error,
+            severity: IssueSeverity::Error,
             message: message.into(),
             code: Some(code.into()),
             details: Some(details),
@@ -57,7 +57,7 @@ impl RuntimeDiagnostic {
         details: serde_json::Value,
     ) -> Self {
         Self {
-            severity: DiagnosticSeverity::Warning,
+            severity: IssueSeverity::Warning,
             message: message.into(),
             code: Some(code.into()),
             details: Some(details),

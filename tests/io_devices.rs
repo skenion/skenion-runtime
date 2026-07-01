@@ -1,5 +1,5 @@
 use skenion_runtime::{
-    RuntimeIoDeviceManager, RuntimeIoDiagnosticSeverity, RuntimeIoDirection, RuntimeIoTransportKind,
+    RuntimeIoDeviceManager, RuntimeIoDirection, RuntimeIoIssueSeverity, RuntimeIoTransportKind,
 };
 
 #[test]
@@ -9,9 +9,9 @@ fn production_io_discovery_returns_structured_midi_response() {
     if response.ok {
         assert!(
             response
-                .diagnostics
+                .issues
                 .iter()
-                .all(|diagnostic| diagnostic.severity != RuntimeIoDiagnosticSeverity::Error)
+                .all(|issue| issue.severity != RuntimeIoIssueSeverity::Error)
         );
         for (expected_index, device) in response.devices.iter().enumerate() {
             assert!(!device.id.is_empty());
@@ -26,14 +26,14 @@ fn production_io_discovery_returns_structured_midi_response() {
         assert!(response.devices.is_empty());
         assert!(
             response
-                .diagnostics
+                .issues
                 .iter()
-                .any(|diagnostic| diagnostic.severity == RuntimeIoDiagnosticSeverity::Error)
+                .any(|issue| issue.severity == RuntimeIoIssueSeverity::Error)
         );
     }
 
-    for diagnostic in &response.diagnostics {
-        assert!(!diagnostic.code.is_empty());
-        assert!(!diagnostic.message.is_empty());
+    for issue in &response.issues {
+        assert!(!issue.code.is_empty());
+        assert!(!issue.message.is_empty());
     }
 }

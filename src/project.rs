@@ -163,8 +163,8 @@ fn validate_node_snapshot(
                 "port snapshot mismatch: {}.{} type {} is not compatible with definition type {}",
                 node.id,
                 snapshot_port.id,
-                diagnostic_type_label(&snapshot_port.data_type),
-                diagnostic_type_label(&definition_port.data_type)
+                issue_type_label(&snapshot_port.data_type),
+                issue_type_label(&definition_port.data_type)
             )));
         }
     }
@@ -225,16 +225,16 @@ fn validate_edges(
                 "incompatible edge {}:{} {} -> {}:{} {}",
                 edge.from.node,
                 edge.from.port,
-                diagnostic_type_label(&from.data_type),
+                issue_type_label(&from.data_type),
                 edge.to.node,
                 edge.to.port,
-                diagnostic_type_label(&to.data_type)
+                issue_type_label(&to.data_type)
             )));
         }
     }
 }
 
-fn diagnostic_type_label(data_type: &crate::DataType) -> String {
+fn issue_type_label(data_type: &crate::DataType) -> String {
     match data_type.flow {
         DataFlow::Control => match data_type.data_kind.as_str() {
             "value.core.float32" => "value.core.float32".to_owned(),

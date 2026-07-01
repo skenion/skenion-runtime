@@ -75,18 +75,18 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::error("no patch event available to undo")],
+                vec![RuntimeIssue::error("no patch event available to undo")],
             );
         };
         let outcome = self.apply_history_entry(entry.clone(), HistoryDirection::Undo);
         if outcome.applied {
             let response = outcome.response;
             self.redo_stack.push(entry);
-            self.patch_response(true, true, false, response.diagnostics)
+            self.patch_response(true, true, false, response.issues)
         } else {
             let response = outcome.response;
             self.undo_stack.push(entry);
-            self.patch_response(false, false, response.conflict, response.diagnostics)
+            self.patch_response(false, false, response.conflict, response.issues)
         }
     }
 
@@ -100,7 +100,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::error(format!(
+                vec![RuntimeIssue::error(format!(
                     "no patch event available to undo for actor {actor_id}"
                 ))],
             );
@@ -110,11 +110,11 @@ impl RuntimeSession {
         if outcome.applied {
             let response = outcome.response;
             self.redo_stack.push(entry);
-            self.patch_response(true, true, false, response.diagnostics)
+            self.patch_response(true, true, false, response.issues)
         } else {
             let response = outcome.response;
             self.undo_stack.insert(index, entry);
-            self.patch_response(false, false, response.conflict, response.diagnostics)
+            self.patch_response(false, false, response.conflict, response.issues)
         }
     }
 
@@ -124,18 +124,18 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::error("no patch event available to redo")],
+                vec![RuntimeIssue::error("no patch event available to redo")],
             );
         };
         let outcome = self.apply_history_entry(entry.clone(), HistoryDirection::Redo);
         if outcome.applied {
             let response = outcome.response;
             self.undo_stack.push(entry);
-            self.patch_response(true, true, false, response.diagnostics)
+            self.patch_response(true, true, false, response.issues)
         } else {
             let response = outcome.response;
             self.redo_stack.push(entry);
-            self.patch_response(false, false, response.conflict, response.diagnostics)
+            self.patch_response(false, false, response.conflict, response.issues)
         }
     }
 
@@ -149,7 +149,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::error(format!(
+                vec![RuntimeIssue::error(format!(
                     "no patch event available to redo for actor {actor_id}"
                 ))],
             );
@@ -159,11 +159,11 @@ impl RuntimeSession {
         if outcome.applied {
             let response = outcome.response;
             self.undo_stack.push(entry);
-            self.patch_response(true, true, false, response.diagnostics)
+            self.patch_response(true, true, false, response.issues)
         } else {
             let response = outcome.response;
             self.redo_stack.insert(index, entry);
-            self.patch_response(false, false, response.conflict, response.diagnostics)
+            self.patch_response(false, false, response.conflict, response.issues)
         }
     }
 }

@@ -21,7 +21,7 @@ use skenion_contracts::{
 use tower::ServiceExt;
 
 use crate::{
-    RUNTIME_API_VERSION, RuntimeEndpointConfig, RuntimeExtensionManager,
+    IssueSeverity, RUNTIME_API_VERSION, RuntimeEndpointConfig, RuntimeExtensionManager,
     RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,
     RuntimeIoDeviceManager, RuntimeLogStore, RuntimePackageManager, RuntimePackageRegistrySnapshot,
     RuntimeSessionRegistry,
@@ -42,7 +42,7 @@ impl RuntimeIoDeviceRegistry for ServerFakeIoDeviceRegistry {
         RuntimeIoDeviceListResponse {
             ok: true,
             devices: self.devices.clone(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }
     }
 }
@@ -59,7 +59,7 @@ fn current_core_node_json(id: &str, object_id: &str, params: Value, ports: Value
       "objectResolution": {
         "status": "resolved",
         "candidates": [],
-        "diagnostics": []
+        "issues": []
       },
       "params": params,
       "ports": ports
@@ -273,15 +273,15 @@ async fn legacy_http_live_routes_return_gone_with_ws_replacements() {
         assert_eq!(body["ok"], false, "{path}");
         assert_eq!(body["schema"], "skenion.runtime.http-live-channel-disabled");
         assert_eq!(
-            body["diagnostics"][0]["code"],
+            body["issues"][0]["code"],
             "runtime.http-live-channel-disabled"
         );
         assert_eq!(
-            body["diagnostics"][0]["details"]["websocketEndpoint"],
+            body["issues"][0]["details"]["websocketEndpoint"],
             "/v0/sessions/default"
         );
         assert_eq!(
-            body["diagnostics"][0]["details"]["replacement"]["type"], replacement_type,
+            body["issues"][0]["details"]["replacement"]["type"], replacement_type,
             "{path}"
         );
     }
@@ -378,7 +378,7 @@ async fn runtime_extensions_response_defaults_to_empty_package_list() {
 
     assert_eq!(response["ok"], true);
     assert_eq!(response["extensions"], json!([]));
-    assert_eq!(response["diagnostics"], json!([]));
+    assert_eq!(response["issues"], json!([]));
 }
 
 #[tokio::test]
@@ -389,7 +389,7 @@ async fn successful_extension_startup_keeps_runtime_logs_empty() {
 
     let extensions = get_json_with(app.clone(), "/v0/extensions").await;
     assert_eq!(extensions["ok"], true);
-    assert_eq!(extensions["diagnostics"], json!([]));
+    assert_eq!(extensions["issues"], json!([]));
     assert_eq!(extensions["extensions"][0]["status"], "loaded");
 
     let logs = get_json_with(app, "/v0/runtime/logs").await;
@@ -432,17 +432,14 @@ async fn runtime_packages_endpoint_returns_startup_snapshot_without_rescan() {
 }
 
 #[tokio::test]
-async fn runtime_packages_and_logs_redact_absolute_package_paths() {
+async fn runtime_packages_redact_absolute_package_paths_without_log_projection() {
     let package_dir = server_temp_package_dir("redacted-extension-only");
     write_server_valid_extension_manifest(&package_dir);
     let (app, _) = runtime_router_with_package_dirs(vec![package_dir.clone()]);
 
     let packages = get_json_with(app.clone(), "/v0/packages").await;
     assert_eq!(packages["ok"], false);
-    assert_eq!(
-        packages["diagnostics"][0]["code"],
-        "package.root.extension-only"
-    );
+    assert_eq!(packages["issues"][0]["code"], "package.root.extension-only");
     assert!(
         !packages
             .to_string()
@@ -450,12 +447,7 @@ async fn runtime_packages_and_logs_redact_absolute_package_paths() {
     );
 
     let logs = get_json_with(app, "/v0/runtime/logs").await;
-    assert_eq!(logs["events"][0]["code"], "package.root.extension-only");
-    assert!(
-        !logs
-            .to_string()
-            .contains(&package_dir.display().to_string())
-    );
+    assert_eq!(logs["events"], json!([]));
 }
 
 #[tokio::test]
@@ -484,7 +476,7 @@ async fn session_load_pins_package_registry_snapshot_revision() {
 }
 
 #[tokio::test]
-async fn startup_extension_scan_logs_package_diagnostics_once() {
+async fn startup_extension_scan_reports_package_issues_without_log_projection() {
     let missing_manifest_dir = server_temp_extension_dir("startup-missing-manifest");
     let malformed_manifest_dir = server_temp_extension_dir("startup-malformed-manifest");
     write_server_extension_manifest(&malformed_manifest_dir, "{ not-json");
@@ -494,69 +486,42 @@ async fn startup_extension_scan_logs_package_diagnostics_once() {
     ]);
 
     let startup_logs = get_json_with(app.clone(), "/v0/runtime/logs").await;
-    let startup_events = startup_logs["events"].as_array().unwrap();
-    let malformed_manifest_path =
-        malformed_manifest_dir.join(crate::RUNTIME_EXTENSION_MANIFEST_FILE);
-    let expected_malformed_manifest_path =
-        std::fs::canonicalize(&malformed_manifest_path).unwrap_or(malformed_manifest_path);
-    assert_eq!(startup_events.len(), 2);
-    assert!(startup_events.iter().any(|event| {
-        event["code"] == "extension.manifest.missing"
-            && event["details"]["packagePath"] == missing_manifest_dir.display().to_string()
-            && event["details"]["action"] == "scan"
-            && event["details"]["registryEvent"] == "extension-package-load"
-    }));
-    assert!(startup_events.iter().any(|event| {
-        event["code"] == "extension.manifest.parse-failed"
-            && event["details"]["packagePath"] == malformed_manifest_dir.display().to_string()
-            && event["details"]["manifestPath"]
-                == expected_malformed_manifest_path.display().to_string()
-    }));
+    assert_eq!(startup_logs["events"], json!([]));
 
     let first_extensions = get_json_with(app.clone(), "/v0/extensions").await;
     let second_extensions = get_json_with(app.clone(), "/v0/extensions").await;
     assert_eq!(first_extensions, second_extensions);
     assert_eq!(first_extensions["ok"], false);
     assert_eq!(
-        first_extensions["diagnostics"][0]["code"],
+        first_extensions["issues"][0]["code"],
         "extension.manifest.missing"
     );
     assert_eq!(
-        first_extensions["extensions"][0]["diagnostics"][0]["code"],
+        first_extensions["extensions"][0]["issues"][0]["code"],
         "extension.manifest.parse-failed"
     );
 
     let logs_after_polling = get_json_with(app, "/v0/runtime/logs").await;
-    assert_eq!(logs_after_polling["events"].as_array().unwrap().len(), 2);
+    assert_eq!(logs_after_polling["events"], json!([]));
 }
 
 #[tokio::test]
-async fn runtime_log_stream_preserves_package_diagnostic_context() {
+async fn runtime_extension_issues_preserve_package_context_without_log_backlog() {
     let missing_manifest_dir = server_temp_extension_dir("stream-missing-manifest");
     let app = runtime_router_with_extension_package_dirs(vec![missing_manifest_dir.clone()]);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/v0/runtime/logs/stream")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("router should respond");
-    let mut stream = response.into_body().into_data_stream();
-    let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
-        .await
-        .expect("runtime log stream should emit")
-        .expect("runtime log stream should have a chunk")
-        .expect("runtime log stream chunk should be ok");
-    let text = std::str::from_utf8(&chunk).expect("runtime log stream should be utf8");
+    let extensions = get_json_with(app.clone(), "/v0/extensions").await;
+    assert_eq!(
+        extensions["issues"][0]["code"],
+        "extension.manifest.missing"
+    );
+    assert_eq!(
+        extensions["issues"][0]["details"]["packagePath"],
+        missing_manifest_dir.display().to_string()
+    );
 
-    assert!(text.contains("event: log"));
-    assert!(text.contains("\"code\":\"extension.manifest.missing\""));
-    assert!(text.contains("\"details\""));
-    assert!(text.contains("\"registryEvent\":\"extension-package-load\""));
-    assert!(text.contains(&missing_manifest_dir.display().to_string()));
+    let logs = get_json_with(app, "/v0/runtime/logs").await;
+    assert_eq!(logs["events"], json!([]));
 }
 
 #[tokio::test]
@@ -573,13 +538,12 @@ async fn runtime_log_snapshot_replays_warning_error_backlog() {
         json!(["warning", "error"])
     );
 
-    state
-        .logs
-        .record_runtime_diagnostics(&[RuntimeDiagnostic::structured_error(
-            "runtime.test-no-undo",
-            "no patch event available to undo",
-            json!({ "source": "test" }),
-        )]);
+    state.logs.record_event(
+        IssueSeverity::Error,
+        Some("runtime.test-no-undo".to_owned()),
+        "no patch event available to undo".to_owned(),
+        Some(json!({ "source": "test" })),
+    );
 
     let snapshot = get_json_with(app, "/v0/runtime/logs").await;
     let events = snapshot["events"].as_array().unwrap();
@@ -598,13 +562,12 @@ async fn runtime_log_snapshot_replays_warning_error_backlog() {
 async fn runtime_log_stream_replays_backlog_as_sse() {
     let state = runtime_state_with_dry_preview();
     let app = runtime_router_with_state(state.clone());
-    state
-        .logs
-        .record_runtime_diagnostics(&[RuntimeDiagnostic::structured_error(
-            "runtime.test-no-undo",
-            "no patch event available to undo",
-            json!({ "source": "test" }),
-        )]);
+    state.logs.record_event(
+        IssueSeverity::Error,
+        Some("runtime.test-no-undo".to_owned()),
+        "no patch event available to undo".to_owned(),
+        Some(json!({ "source": "test" })),
+    );
 
     let response = app
         .oneshot(
@@ -776,7 +739,7 @@ async fn asset_import_list_and_get_endpoints() {
     let missing = body_json(missing.into_body()).await;
     assert_eq!(missing["ok"], false);
     assert!(
-        missing["diagnostics"][0]["message"]
+        missing["issues"][0]["message"]
             .as_str()
             .unwrap()
             .contains("missing")
@@ -802,7 +765,7 @@ async fn asset_import_list_and_get_endpoints() {
     let missing_file = body_json(missing_file.into_body()).await;
     assert_eq!(missing_file["ok"], false);
     assert!(
-        missing_file["diagnostics"][0]["message"]
+        missing_file["issues"][0]["message"]
             .as_str()
             .unwrap()
             .contains("did not include a file field")
@@ -852,7 +815,7 @@ fn asset_store_helpers_report_filesystem_errors_and_kind_labels() {
     );
     assert!(!create_error.ok);
     assert!(
-        create_error.diagnostics[0]
+        create_error.issues[0]
             .message
             .contains("failed to create runtime asset directory")
     );
@@ -871,7 +834,7 @@ fn asset_store_helpers_report_filesystem_errors_and_kind_labels() {
     );
     assert!(!write_error.ok);
     assert!(
-        write_error.diagnostics[0]
+        write_error.issues[0]
             .message
             .contains("failed to store runtime asset")
     );
@@ -946,7 +909,7 @@ async fn project_endpoints_reject_missing_graph_schema_version() {
 
         assert_eq!(response["ok"], false);
         assert_eq!(
-            response["diagnostics"][0]["code"],
+            response["issues"][0]["code"],
             "project.missing-schema-version"
         );
         assert_eq!(response["plan"], Value::Null);
@@ -958,7 +921,7 @@ async fn project_endpoints_reject_missing_graph_schema_version() {
 async fn current_project_endpoints_validate_plan_and_run_with_edge_metadata() {
     let validation = post_json("/v0/validate", sample_project_current()).await;
     assert_eq!(validation["ok"], true);
-    assert_eq!(validation["diagnostics"].as_array().unwrap().len(), 0);
+    assert_eq!(validation["issues"].as_array().unwrap().len(), 0);
     assert_eq!(validation["plan"], Value::Null);
 
     let plan = post_json("/v0/plan", sample_project_current()).await;
@@ -998,7 +961,7 @@ async fn current_project_endpoints_validate_plan_and_run_with_edge_metadata() {
 async fn current_project_document_payload_expands_patch_library_before_plan_and_run() {
     let validation = post_json("/v0/validate", sample_subpatch_project_document_current()).await;
     assert_eq!(validation["ok"], true);
-    assert_eq!(validation["diagnostics"].as_array().unwrap().len(), 0);
+    assert_eq!(validation["issues"].as_array().unwrap().len(), 0);
 
     let plan = post_json("/v0/plan", sample_subpatch_project_document_current()).await;
     assert_eq!(plan["ok"], true);
@@ -1038,11 +1001,11 @@ async fn current_project_document_payload_reports_decode_and_contract_errors() {
     let malformed_response = post_json("/v0/validate", malformed_project).await;
     assert_eq!(malformed_response["ok"], false);
     assert_eq!(
-        malformed_response["diagnostics"][0]["code"],
+        malformed_response["issues"][0]["code"],
         "project.missing-schema-version"
     );
     assert_eq!(
-        malformed_response["diagnostics"][0]["details"]["surface"],
+        malformed_response["issues"][0]["details"]["surface"],
         "graph"
     );
 
@@ -1055,12 +1018,9 @@ async fn current_project_document_payload_reports_decode_and_contract_errors() {
 
     let response = post_json("/v0/plan", duplicate_patch).await;
     assert_eq!(response["ok"], false);
+    assert_eq!(response["issues"][0]["code"], json!("project.invalid-0.1"));
     assert_eq!(
-        response["diagnostics"][0]["code"],
-        json!("project.invalid-0.1")
-    );
-    assert_eq!(
-        response["diagnostics"][0]["details"]["projectId"],
+        response["issues"][0]["details"]["projectId"],
         json!("subpatch-project")
     );
 }
@@ -1071,31 +1031,31 @@ async fn current_project_endpoints_reject_ambiguous_algebraic_loop() {
 
     assert_eq!(response["ok"], false);
     assert!(
-        response["diagnostics"]
+        response["issues"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
+            .any(|issue| issue["code"] == "graph.ambiguous-algebraic-loop")
     );
 
     let plan = post_json("/v0/plan", sample_ambiguous_loop_project_current()).await;
     assert_eq!(plan["ok"], false);
     assert!(
-        plan["diagnostics"]
+        plan["issues"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
+            .any(|issue| issue["code"] == "graph.ambiguous-algebraic-loop")
     );
 
     let run = post_json("/v0/run", sample_ambiguous_loop_project_current()).await;
     assert_eq!(run["ok"], false);
     assert!(
-        run["diagnostics"]
+        run["issues"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
+            .any(|issue| issue["code"] == "graph.ambiguous-algebraic-loop")
     );
 }
 
@@ -1109,19 +1069,16 @@ async fn project_endpoints_reject_missing_and_unsupported_schema_versions() {
     let missing_response = post_json("/v0/validate", missing).await;
     assert_eq!(missing_response["ok"], false);
     assert_eq!(
-        missing_response["diagnostics"][0]["code"],
+        missing_response["issues"][0]["code"],
         "project.missing-schema-version"
     );
+    assert_eq!(missing_response["issues"][0]["details"]["surface"], "graph");
     assert_eq!(
-        missing_response["diagnostics"][0]["details"]["surface"],
-        "graph"
-    );
-    assert_eq!(
-        missing_response["diagnostics"][0]["details"]["expectedSchemaVersion"],
+        missing_response["issues"][0]["details"]["expectedSchemaVersion"],
         "0.1.0"
     );
     assert_eq!(
-        missing_response["diagnostics"][0]["details"]["receivedSchemaVersion"],
+        missing_response["issues"][0]["details"]["receivedSchemaVersion"],
         Value::Null
     );
 
@@ -1130,19 +1087,19 @@ async fn project_endpoints_reject_missing_and_unsupported_schema_versions() {
     let unsupported_response = post_json("/v0/plan", unsupported).await;
     assert_eq!(unsupported_response["ok"], false);
     assert_eq!(
-        unsupported_response["diagnostics"][0]["code"],
+        unsupported_response["issues"][0]["code"],
         "project.unsupported-schema-version"
     );
     assert_eq!(
-        unsupported_response["diagnostics"][0]["details"]["surface"],
+        unsupported_response["issues"][0]["details"]["surface"],
         "graph"
     );
     assert_eq!(
-        unsupported_response["diagnostics"][0]["details"]["expectedSchemaVersion"],
+        unsupported_response["issues"][0]["details"]["expectedSchemaVersion"],
         "0.1.0"
     );
     assert_eq!(
-        unsupported_response["diagnostics"][0]["details"]["receivedSchemaVersion"],
+        unsupported_response["issues"][0]["details"]["receivedSchemaVersion"],
         "9.9.9"
     );
 
@@ -1154,7 +1111,7 @@ async fn project_endpoints_reject_missing_and_unsupported_schema_versions() {
     let missing_run_response = post_json("/v0/run", missing_run).await;
     assert_eq!(missing_run_response["ok"], false);
     assert_eq!(
-        missing_run_response["diagnostics"][0]["code"],
+        missing_run_response["issues"][0]["code"],
         "project.missing-schema-version"
     );
 
@@ -1163,7 +1120,7 @@ async fn project_endpoints_reject_missing_and_unsupported_schema_versions() {
     let unsupported_run_response = post_json("/v0/run", unsupported_run).await;
     assert_eq!(unsupported_run_response["ok"], false);
     assert_eq!(
-        unsupported_run_response["diagnostics"][0]["code"],
+        unsupported_run_response["issues"][0]["code"],
         "project.unsupported-schema-version"
     );
 
@@ -1172,19 +1129,19 @@ async fn project_endpoints_reject_missing_and_unsupported_schema_versions() {
     let unsupported_project_response = post_json("/v0/validate", unsupported_project).await;
     assert_eq!(unsupported_project_response["ok"], false);
     assert_eq!(
-        unsupported_project_response["diagnostics"][0]["code"],
+        unsupported_project_response["issues"][0]["code"],
         "project.unsupported-schema-version"
     );
     assert_eq!(
-        unsupported_project_response["diagnostics"][0]["details"]["surface"],
+        unsupported_project_response["issues"][0]["details"]["surface"],
         "project"
     );
     assert_eq!(
-        unsupported_project_response["diagnostics"][0]["details"]["expectedSchemaVersion"],
+        unsupported_project_response["issues"][0]["details"]["expectedSchemaVersion"],
         "0.1.0"
     );
     assert_eq!(
-        unsupported_project_response["diagnostics"][0]["details"]["receivedSchemaVersion"],
+        unsupported_project_response["issues"][0]["details"]["receivedSchemaVersion"],
         "9.9.9"
     );
 
@@ -1194,19 +1151,19 @@ async fn project_endpoints_reject_missing_and_unsupported_schema_versions() {
         post_json("/v0/validate", unsupported_project_graph).await;
     assert_eq!(unsupported_project_graph_response["ok"], false);
     assert_eq!(
-        unsupported_project_graph_response["diagnostics"][0]["code"],
+        unsupported_project_graph_response["issues"][0]["code"],
         "project.unsupported-schema-version"
     );
     assert_eq!(
-        unsupported_project_graph_response["diagnostics"][0]["details"]["surface"],
+        unsupported_project_graph_response["issues"][0]["details"]["surface"],
         "graph"
     );
     assert_eq!(
-        unsupported_project_graph_response["diagnostics"][0]["details"]["expectedSchemaVersion"],
+        unsupported_project_graph_response["issues"][0]["details"]["expectedSchemaVersion"],
         "0.1.0"
     );
     assert_eq!(
-        unsupported_project_graph_response["diagnostics"][0]["details"]["receivedSchemaVersion"],
+        unsupported_project_graph_response["issues"][0]["details"]["receivedSchemaVersion"],
         "9.9.9"
     );
 }
@@ -1220,7 +1177,7 @@ async fn project_endpoints_reject_malformed_payloads() {
 
     assert_eq!(response["ok"], false);
     assert!(
-        response["diagnostics"][0]["message"]
+        response["issues"][0]["message"]
             .as_str()
             .unwrap()
             .contains("invalid project request")
@@ -1236,7 +1193,7 @@ async fn project_document_ingest_rejects_top_level_nodes() {
         let response = post_json(path, project.clone()).await;
         assert_eq!(response["ok"], false, "{path}");
         assert_eq!(
-            response["diagnostics"][0]["code"], "project.document.top-level-nodes-rejected",
+            response["issues"][0]["code"], "project.document.top-level-nodes-rejected",
             "{path}"
         );
     }
@@ -1252,7 +1209,7 @@ async fn session_load_rejects_raw_project_body() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["snapshot"]["project"], Value::Null);
     assert_eq!(
-        response["diagnostics"][0]["code"],
+        response["issues"][0]["code"],
         "runtime.session-load.raw-project-rejected"
     );
     let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
@@ -1269,7 +1226,7 @@ async fn session_endpoint_returns_empty_state() {
     assert_eq!(response["snapshot"]["sessionRevision"], 0);
     assert_eq!(response["snapshot"]["viewRevision"], 0);
     assert_eq!(response["snapshot"]["controlRevision"], 0);
-    assert_eq!(response["diagnostics"].as_array().unwrap().len(), 0);
+    assert_eq!(response["issues"].as_array().unwrap().len(), 0);
     assert_eq!(response["snapshot"]["plan"], Value::Null);
     assert_eq!(response["report"], Value::Null);
 }
@@ -1388,12 +1345,9 @@ async fn session_load_if_empty_rejects_loaded_session() {
 
     assert_eq!(first["ok"], true);
     assert_eq!(second["ok"], false);
+    assert_eq!(second["issues"][0]["code"], "runtime.session-load.conflict");
     assert_eq!(
-        second["diagnostics"][0]["code"],
-        "runtime.session-load.conflict"
-    );
-    assert_eq!(
-        second["diagnostics"][0]["details"]["current"]["documentId"],
+        second["issues"][0]["details"]["current"]["documentId"],
         "10000000-0000-0000-0000-000000000001"
     );
     assert_eq!(second["snapshot"]["sessionRevision"], 1);
@@ -1440,11 +1394,11 @@ async fn session_load_replace_if_match_enforces_preconditions() {
 
     assert_eq!(rejected["ok"], false);
     assert_eq!(
-        rejected["diagnostics"][0]["code"],
+        rejected["issues"][0]["code"],
         "runtime.session-load.conflict"
     );
     assert_eq!(
-        rejected["diagnostics"][0]["details"]["mismatches"][0]["field"],
+        rejected["issues"][0]["details"]["mismatches"][0]["field"],
         "sessionRevision"
     );
     assert_eq!(rejected["snapshot"]["sessionRevision"], 1);
@@ -1523,7 +1477,7 @@ async fn session_load_rejects_missing_graph_schema_version() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["snapshot"]["project"], Value::Null);
     assert_eq!(
-        response["diagnostics"][0]["code"],
+        response["issues"][0]["code"],
         "project.missing-schema-version"
     );
 }
@@ -1620,7 +1574,7 @@ async fn invalid_session_load_does_not_replace_existing_session() {
     );
     assert_eq!(response["snapshot"]["sessionRevision"], 1);
     assert_eq!(
-        response["diagnostics"][0]["code"],
+        response["issues"][0]["code"],
         "project.document.top-level-nodes-rejected"
     );
 
@@ -1630,17 +1584,11 @@ async fn invalid_session_load_does_not_replace_existing_session() {
         snapshot["snapshot"]["project"]["graph"]["id"],
         "minimal-value"
     );
-    assert_eq!(
-        snapshot["snapshot"]["diagnostics"]
-            .as_array()
-            .unwrap()
-            .len(),
-        0
-    );
+    assert_eq!(snapshot["snapshot"]["issues"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
-async fn invalid_session_load_returns_diagnostics_and_keeps_runtime_healthy() {
+async fn invalid_session_load_returns_issues_and_keeps_runtime_healthy() {
     let app = runtime_router();
     let mut invalid = sample_project_document_current();
     invalid["graph"]["nodes"][1]["ports"][1]["type"] = json!("value.core.bool");
@@ -1656,11 +1604,11 @@ async fn invalid_session_load_returns_diagnostics_and_keeps_runtime_healthy() {
     assert_eq!(response["snapshot"]["project"], Value::Null);
     assert_eq!(response["snapshot"]["plan"], Value::Null);
     assert!(
-        response["diagnostics"]
+        response["issues"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|diagnostic| diagnostic["message"]
+            .any(|issue| issue["message"]
                 .as_str()
                 .unwrap()
                 .contains(
@@ -1677,11 +1625,7 @@ async fn invalid_session_load_returns_diagnostics_and_keeps_runtime_healthy() {
     assert_eq!(snapshot["snapshot"]["sessionRevision"], 0);
 
     let logs = get_json_with(app, "/v0/runtime/logs").await;
-    assert!(logs["events"].as_array().unwrap().iter().any(|event| {
-        event["message"].as_str().unwrap().contains(
-            "edge edge_value_target cannot connect value_1:value value.core.float32 to target_1:cold value.core.bool",
-        )
-    }));
+    assert_eq!(logs["events"], json!([]));
 }
 
 #[tokio::test]
@@ -1696,7 +1640,7 @@ async fn session_validate_plan_and_run_use_loaded_project_document_patch_library
 
     let validation = post_empty_with(app.clone(), "/v0/sessions/default/validate").await;
     assert_eq!(validation["ok"], true);
-    assert_eq!(validation["diagnostics"].as_array().unwrap().len(), 0);
+    assert_eq!(validation["issues"].as_array().unwrap().len(), 0);
 
     let plan = post_empty_with(app.clone(), "/v0/sessions/default/plan").await;
     assert_eq!(plan["ok"], true);
@@ -1729,10 +1673,10 @@ fn registry_from_nodes_reports_duplicate_definitions() {
         .expect("sample project nodes should parse");
     let duplicate_nodes = vec![nodes[0].clone(), nodes[0].clone()];
 
-    let diagnostics =
+    let issues =
         registry_from_nodes(duplicate_nodes).expect_err("duplicate definitions should fail");
 
-    assert!(diagnostics[0].message.contains("duplicate node definition"));
+    assert!(issues[0].message.contains("duplicate node definition"));
 }
 
 #[tokio::test]
@@ -1742,7 +1686,7 @@ async fn session_run_fails_without_loaded_project() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["snapshot"]["project"], Value::Null);
     assert!(
-        response["diagnostics"][0]["message"]
+        response["issues"][0]["message"]
             .as_str()
             .unwrap()
             .contains("no project loaded in runtime session")
@@ -1794,7 +1738,7 @@ async fn preview_start_requires_loaded_session() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["state"], "stopped");
     assert!(
-        response["diagnostics"][0]["message"]
+        response["issues"][0]["message"]
             .as_str()
             .unwrap()
             .contains("no project loaded")
@@ -1846,7 +1790,7 @@ async fn preview_start_rejects_invalid_request_json() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["state"], "stopped");
     assert!(
-        response["diagnostics"][0]["message"]
+        response["issues"][0]["message"]
             .as_str()
             .unwrap()
             .contains("invalid preview start request")
@@ -1887,7 +1831,7 @@ async fn telemetry_endpoint_reports_empty_session() {
     assert_eq!(response["session"]["project"], Value::Null);
     assert_eq!(response["preview"]["state"], "stopped");
     assert_eq!(response["render"]["active"], false);
-    assert_eq!(response["render"]["diagnostics"], json!([]));
+    assert_eq!(response["render"]["issues"], json!([]));
     assert_eq!(response["render"]["generatedSourceAvailable"], false);
     assert_eq!(
         response["process"]["runtimeVersion"],
@@ -1913,7 +1857,7 @@ async fn telemetry_endpoint_reports_loaded_session_without_preview() {
     assert_eq!(response["session"]["sessionRevision"], 1);
     assert_eq!(response["preview"]["state"], "stopped");
     assert_eq!(response["render"]["active"], false);
-    assert_eq!(response["render"]["diagnostics"], json!([]));
+    assert_eq!(response["render"]["issues"], json!([]));
     assert_eq!(response["render"]["generatedSourceAvailable"], false);
 }
 
@@ -1936,7 +1880,7 @@ async fn telemetry_endpoint_reports_dry_run_preview() {
     assert_eq!(response["render"]["backend"], "dry-run");
     assert_eq!(response["render"]["renderer"], "clear-color");
     assert_eq!(response["render"]["framesRendered"], 0);
-    assert_eq!(response["render"]["diagnostics"], json!([]));
+    assert_eq!(response["render"]["issues"], json!([]));
     assert_eq!(response["render"]["generatedSourceAvailable"], false);
 }
 
@@ -1962,18 +1906,18 @@ async fn generated_shader_endpoint_returns_source_and_source_map() {
             .unwrap()
             > 1
     );
-    assert_eq!(response["diagnostics"], json!([]));
+    assert_eq!(response["issues"], json!([]));
 }
 
 #[tokio::test]
-async fn generated_shader_endpoint_reports_session_or_shader_diagnostics() {
+async fn generated_shader_endpoint_reports_session_or_shader_issues() {
     let empty = get_json_with(
         runtime_router_with_dry_preview(),
         "/v0/sessions/default/render/generated-shader",
     )
     .await;
     assert_eq!(empty["ok"], false);
-    assert_eq!(empty["diagnostics"][0]["phase"], json!("source-sync"));
+    assert_eq!(empty["issues"][0]["phase"], json!("source-sync"));
 
     let mut project = sample_shader_project_current();
     project["graph"]["nodes"][0]["params"]["source"] = json!(
@@ -1983,15 +1927,12 @@ async fn generated_shader_endpoint_reports_session_or_shader_diagnostics() {
 
     let response = get_json_with(app, "/v0/sessions/default/render/generated-shader").await;
     assert_eq!(response["ok"], false);
+    assert_eq!(response["issues"][0]["phase"], json!("interface-analysis"));
     assert_eq!(
-        response["diagnostics"][0]["phase"],
-        json!("interface-analysis")
-    );
-    assert_eq!(
-        response["diagnostics"][0]["code"],
+        response["issues"][0]["code"],
         json!("unsupported-uniform-type")
     );
-    assert_eq!(response["diagnostics"][0]["line"], json!(1));
+    assert_eq!(response["issues"][0]["line"], json!(1));
 }
 
 #[tokio::test]
@@ -2212,7 +2153,7 @@ fn runtime_router_with_loaded_shader_dry_preview(project: Value) -> Router {
         assert!(
             response.ok,
             "shader test project should load: {:?}",
-            response.diagnostics
+            response.issues
         );
     }
     runtime_router_with_state(state)
@@ -2253,7 +2194,6 @@ fn runtime_router_with_fake_io_devices(devices: Vec<RuntimeIoDeviceDescriptor>) 
 fn runtime_router_with_extension_package_dirs(package_dirs: Vec<PathBuf>) -> Router {
     let logs = Arc::new(RuntimeLogStore::default());
     let extension_scan = RuntimeExtensionManager::with_package_dirs(package_dirs).scan_registry();
-    logs.record_runtime_diagnostics(extension_scan.log_diagnostics());
     runtime_router_with_state(RuntimeServerState {
         sessions: RuntimeSessionRegistry::dry_preview(),
         assets: RuntimeAssetStore::shared(),
@@ -2270,7 +2210,6 @@ fn runtime_router_with_extension_package_dirs(package_dirs: Vec<PathBuf>) -> Rou
 fn runtime_router_with_package_dirs(package_dirs: Vec<PathBuf>) -> (Router, RuntimeServerState) {
     let logs = Arc::new(RuntimeLogStore::default());
     let package_scan = RuntimePackageManager::with_package_dirs(package_dirs).scan_registry();
-    logs.record_runtime_diagnostics(package_scan.log_diagnostics());
     let state = RuntimeServerState {
         sessions: RuntimeSessionRegistry::dry_preview(),
         assets: RuntimeAssetStore::shared(),
@@ -2529,13 +2468,13 @@ fn sample_shader_project_current() -> Value {
     current_fixture_value(json!({
       "schema": "skenion.project",
       "schemaVersion": "0.1.0",
-      "id": "shader-diagnostics-project",
+      "id": "shader-issues-project",
       "documentId": "10000000-0000-0000-0000-000000000003",
       "revision": "1",
       "graph": {
         "schema": "skenion.graph",
         "schemaVersion": "0.1.0",
-        "id": "shader-diagnostics",
+        "id": "shader-issues",
         "revision": "1",
         "nodes": [
           {

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    ControlValue, RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeDiagnostic,
+    ControlValue, RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeIssue,
     RuntimeSessionRecord,
 };
 
@@ -43,11 +43,9 @@ pub(super) fn apply_control_command(
             .lock()
             .expect("runtime preview lock should not be poisoned");
         if let Err(error) = preview.update_control_state(control_snapshot) {
-            response
-                .diagnostics
-                .push(RuntimeDiagnostic::warning(format!(
-                    "failed to update running preview control state: {error}"
-                )));
+            response.issues.push(RuntimeIssue::warning(format!(
+                "failed to update running preview control state: {error}"
+            )));
         }
     }
 

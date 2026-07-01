@@ -11,7 +11,7 @@ use super::graph_command::{
     apply_object_create_graph_command, apply_object_replace_graph_command,
     apply_object_resolve_graph_command, control_emitted_event, graph_ack_from_cached,
     materialize_object_command_node, next_generated_node_id, node_command_result, node_id_slug,
-    node_input_result, object_spec_runtime_diagnostics, validate_object_command_target,
+    node_input_result, object_spec_runtime_issues, validate_object_command_target,
 };
 use super::node_catalog::{NodeCatalogHelloMode, catalog_revision_matches};
 use super::state::{
@@ -270,17 +270,15 @@ fn object_spec_resolution_with_all_port_variants() -> ObjectSpecResolution {
         object_spec: Some("sig~".to_owned()),
         display_name: "Signal".to_owned(),
     }];
-    resolution
-        .diagnostics
-        .push(crate::object_spec::ObjectSpecDiagnostic {
-            code: "object-spec.test-warning".to_owned(),
-            message: "test warning".to_owned(),
-        });
+    resolution.issues.push(crate::object_spec::ObjectSpecIssue {
+        code: "object-spec.test-warning".to_owned(),
+        message: "test warning".to_owned(),
+    });
     resolution
 }
 
-fn assert_response_diagnostic_code(response: &RuntimePatchResponse, code: &str) {
-    assert_eq!(response.diagnostics[0].code.as_deref(), Some(code));
+fn assert_response_issue_code(response: &RuntimePatchResponse, code: &str) {
+    assert_eq!(response.issues[0].code.as_deref(), Some(code));
 }
 
 #[test]
@@ -300,12 +298,12 @@ fn value_occurrence_header_guard_rejects_invalid_header() {
     let mut header = test_occurrence_header();
     header.binding_id.clear();
 
-    let diagnostic =
+    let issue =
         validate_value_occurrence_header_for_session_binding(&header, &[test_binding_format()])
             .expect_err("invalid header should be rejected");
 
     assert_eq!(
-        diagnostic.code.as_deref(),
+        issue.code.as_deref(),
         Some("runtime.value-binding.invalid-header")
     );
 }
@@ -315,12 +313,12 @@ fn value_occurrence_header_guard_rejects_unknown_binding() {
     let mut header = test_occurrence_header();
     header.binding_id = "missing_edge".to_owned();
 
-    let diagnostic =
+    let issue =
         validate_value_occurrence_header_for_session_binding(&header, &[test_binding_format()])
             .expect_err("unknown binding should be rejected");
 
     assert_eq!(
-        diagnostic.code.as_deref(),
+        issue.code.as_deref(),
         Some("runtime.value-binding.unknown-binding")
     );
 }
@@ -330,23 +328,23 @@ fn value_occurrence_header_guard_rejects_stale_binding_metadata() {
     let binding = test_binding_format();
     let mut stale_epoch = test_occurrence_header();
     stale_epoch.binding_epoch = 1;
-    let epoch_diagnostic = validate_value_occurrence_header_for_session_binding(
+    let epoch_issue = validate_value_occurrence_header_for_session_binding(
         &stale_epoch,
         std::slice::from_ref(&binding),
     )
     .expect_err("stale epoch should be rejected");
     assert_eq!(
-        epoch_diagnostic.code.as_deref(),
+        epoch_issue.code.as_deref(),
         Some("runtime.value-binding.stale-epoch")
     );
 
     let mut stale_format = test_occurrence_header();
     stale_format.format_revision = 6;
-    let format_diagnostic =
+    let format_issue =
         validate_value_occurrence_header_for_session_binding(&stale_format, &[binding])
             .expect_err("stale format revision should be rejected");
     assert_eq!(
-        format_diagnostic.code.as_deref(),
+        format_issue.code.as_deref(),
         Some("runtime.value-binding.stale-format-revision")
     );
 }
@@ -403,7 +401,7 @@ fn idempotency_results_follow_retained_event_window() {
 }
 
 #[test]
-fn replay_after_reports_cursor_diagnostics_and_marks_replayed_events() {
+fn replay_after_reports_cursor_issues_and_marks_replayed_events() {
     let state = RuntimeRealtimeState::new("default", 2);
     let current_cursor = state.current_cursor();
     let (incarnation_id, _) = current_cursor
@@ -561,7 +559,7 @@ fn hello_catalog_and_error_envelopes_preserve_client_context() {
         &identity,
         &frame,
         &snapshot,
-        sync_required_diagnostic(
+        sync_required_issue(
             "realtime.cursor.test",
             "test sync required",
             Some(json!({ "currentCursor": record.realtime.current_cursor() })),
@@ -572,7 +570,7 @@ fn hello_catalog_and_error_envelopes_preserve_client_context() {
         }),
     );
     assert_eq!(sync.message_type, "session.syncRequired");
-    assert_eq!(sync.payload["diagnostic"]["code"], "realtime.cursor.test");
+    assert_eq!(sync.payload["issue"]["code"], "realtime.cursor.test");
     assert_eq!(sync.payload["nodeCatalog"]["status"], "unchanged");
 
     let error = runtime_error(
@@ -590,7 +588,7 @@ fn hello_catalog_and_error_envelopes_preserve_client_context() {
     );
     assert_eq!(error.command_id.as_deref(), Some("hello-1-command"));
     assert_eq!(error.correlation_id.as_deref(), Some("hello-1"));
-    assert_eq!(error.payload["diagnostic"]["details"]["field"], "payload");
+    assert_eq!(error.payload["issue"]["details"]["field"], "payload");
 
     let internal = empty_correlation_frame(&record.id);
     assert_eq!(internal.message_type, "runtime.internal");
@@ -676,7 +674,7 @@ fn command_handlers_reject_invalid_payloads_and_clamp_presence_ttl() {
 }
 
 #[test]
-fn node_command_result_serializes_resolution_ports_diagnostics_and_input() {
+fn node_command_result_serializes_resolution_ports_issues_and_input() {
     let payload = graph_payload(json!({
         "kind": "node.replace",
         "target": root_target("1"),
@@ -728,21 +726,15 @@ fn node_command_result_serializes_resolution_ports_diagnostics_and_input() {
             Value::String("passive".to_owned())
         ]
     );
-    assert_eq!(
-        node_result["diagnostics"][0]["code"],
-        "object-spec.test-warning"
-    );
+    assert_eq!(node_result["issues"][0]["code"], "object-spec.test-warning");
 
-    let diagnostics = object_spec_runtime_diagnostics(&resolution);
+    let issues = object_spec_runtime_issues(&resolution);
+    assert_eq!(issues[0].code.as_deref(), Some("object-spec.test-warning"));
     assert_eq!(
-        diagnostics[0].code.as_deref(),
-        Some("object-spec.test-warning")
-    );
-    assert_eq!(
-        diagnostics[0]
+        issues[0]
             .details
             .as_ref()
-            .expect("object spec diagnostics should include structured details")["candidateCount"],
+            .expect("object spec issues should include structured details")["candidateCount"],
         1
     );
 
@@ -757,7 +749,7 @@ fn node_command_result_serializes_resolution_ports_diagnostics_and_input() {
             changed: true,
             control_revision: Some(7),
             emitted: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         },
     );
     assert_eq!(input_result["accepted"], true);
@@ -783,14 +775,14 @@ fn object_command_materialization_respects_params_and_unresolved_policy() {
     assert_eq!(materialized.0.params["frequency"], 880.0);
 
     let unresolved = ObjectRegistry::first_party_core().resolve("missingObject 1");
-    let diagnostic_payload = graph_payload(json!({
+    let issue_payload = graph_payload(json!({
         "kind": "node.create",
         "target": root_target("1"),
         "objectSpec": "missingObject 1",
         "params": { "label": "keep me" }
     }));
     let unresolved_materialized =
-        materialize_object_command_node(&session, &diagnostic_payload, &unresolved, "missing_1")
+        materialize_object_command_node(&session, &issue_payload, &unresolved, "missing_1")
             .expect("default unresolved policy should materialize an unresolved Object node");
     assert_eq!(
         unresolved_materialized.0.object_spec.as_deref(),
@@ -830,7 +822,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
         &session,
         &graph_payload(json!({ "kind": "node.resolve" })),
     );
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &missing_resolve.response,
         "graph.command.object-spec-required",
     );
@@ -840,14 +832,14 @@ fn object_command_helpers_validate_required_fields_and_targets() {
         &frame,
         &graph_payload(json!({ "kind": "node.create" })),
     );
-    assert_response_diagnostic_code(&missing_create.response, "graph.command.target-required");
+    assert_response_issue_code(&missing_create.response, "graph.command.target-required");
     let missing_replace = apply_object_replace_graph_command(
         &mut session,
         &identity,
         &frame,
         &graph_payload(json!({ "kind": "node.replace" })),
     );
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &missing_replace.response,
         "graph.command.object-spec-required",
     );
@@ -897,7 +889,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
         &frame,
         &graph_payload(json!({ "kind": "node.delete", "target": root_target("1") })),
     );
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &missing_delete_node.response,
         "graph.command.node-id-required",
     );
@@ -907,7 +899,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
         &frame,
         &graph_payload(json!({ "kind": "node.update", "target": root_target("1") })),
     );
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &missing_update_node.response,
         "graph.command.node-id-required",
     );
@@ -921,7 +913,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
             "nodeId": "value_1"
         })),
     );
-    assert_response_diagnostic_code(&empty_update.response, "graph.command.params-required");
+    assert_response_issue_code(&empty_update.response, "graph.command.params-required");
 
     let no_target = validate_object_command_target(
         &session,
@@ -929,7 +921,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
         true,
     )
     .expect_err("node commands require a target");
-    assert_response_diagnostic_code(&no_target, "graph.command.target-required");
+    assert_response_issue_code(&no_target, "graph.command.target-required");
     let revision_conflict = validate_object_command_target(
         &session,
         &graph_payload(json!({
@@ -941,14 +933,14 @@ fn object_command_helpers_validate_required_fields_and_targets() {
     )
     .expect_err("baseGraphRevision must agree with target.baseRevision");
     assert!(revision_conflict.conflict);
-    assert_response_diagnostic_code(&revision_conflict, "graph.command.target-revision-conflict");
+    assert_response_issue_code(&revision_conflict, "graph.command.target-revision-conflict");
     let missing_graph = validate_object_command_target(
         &session,
         &graph_payload(json!({ "kind": "node.resolve", "target": root_target("1") })),
         true,
     )
     .expect_err("node.resolve requires an existing target graph");
-    assert_response_diagnostic_code(&missing_graph, "node.target.missing-graph");
+    assert_response_issue_code(&missing_graph, "node.target.missing-graph");
 }
 
 #[test]
@@ -981,7 +973,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
         &graph_payload(json!({ "kind": "node.resolve", "baseSessionRevision": 99 })),
     );
     assert!(session_conflict.response.conflict);
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &session_conflict.response,
         "graph.command.session-revision-conflict",
     );
@@ -992,7 +984,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
         &frame,
         &graph_payload(json!({ "kind": "view.patch" })),
     );
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &missing_view_patch.response,
         "graph.command.view-patch-required",
     );
@@ -1008,7 +1000,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
         })),
     );
     assert!(view_revision_conflict.response.conflict);
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &view_revision_conflict.response,
         "graph.command.view-revision-conflict",
     );
@@ -1024,7 +1016,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
         })),
     );
     assert!(graph_revision_conflict.response.conflict);
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &graph_revision_conflict.response,
         "graph.command.graph-revision-conflict",
     );
@@ -1039,7 +1031,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
             "viewPatch": { "baseViewRevision": 0, "ops": [] }
         })),
     );
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &unsupported_view_target.response,
         "graph.command.view-target-unsupported",
     );
@@ -1055,7 +1047,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
         })),
     );
     assert!(target_revision_conflict.response.conflict);
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &target_revision_conflict.response,
         "graph.command.target-revision-conflict",
     );
@@ -1066,7 +1058,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
         &frame,
         &graph_payload(json!({ "kind": "graph.changeSet" })),
     );
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &missing_change_target.response,
         "graph.command.target-required",
     );
@@ -1081,7 +1073,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
             "changes": []
         })),
     );
-    assert_response_diagnostic_code(&empty_changes.response, "graph.command.changes-required");
+    assert_response_issue_code(&empty_changes.response, "graph.command.changes-required");
 
     let change_revision_conflict = apply_graph_command(
         &record,
@@ -1097,7 +1089,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
         })),
     );
     assert!(change_revision_conflict.response.conflict);
-    assert_response_diagnostic_code(
+    assert_response_issue_code(
         &change_revision_conflict.response,
         "graph.command.target-revision-conflict",
     );
@@ -1135,7 +1127,7 @@ fn cached_ack_and_control_event_helpers_preserve_payload_flags() {
         changed: false,
         control_revision: Some(1),
         emitted: Vec::new(),
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     };
     assert!(
         control_emitted_event(

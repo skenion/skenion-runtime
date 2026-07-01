@@ -14,8 +14,8 @@ use super::{
 };
 use crate::{
     ExecutionModel, ExecutionPlan, GraphDocument, GraphNode, NodeRegistry, PortDirection,
-    ProjectRequestCurrent, RuntimeDiagnostic, build_execution_plan,
-    build_execution_plan_request_current, expand_project_graph_current, schema_version_diagnostic,
+    ProjectRequestCurrent, RuntimeIssue, build_execution_plan,
+    build_execution_plan_request_current, expand_project_graph_current, schema_version_issue,
     validate_project,
 };
 
@@ -32,10 +32,10 @@ pub(crate) fn build_audio_dsp_plan_with_graph_current(
 ) -> Result<(AudioDspPlan, GraphDocument), AudioDspPlanError> {
     validate_audio_dsp_plan_options(options)?;
     validate_audio_dsp_request_schema_versions_current(request)?;
-    let (execution_plan, _diagnostics) = build_execution_plan_request_current(request)
-        .map_err(AudioDspPlanError::from_diagnostics)?;
+    let (execution_plan, _issues) =
+        build_execution_plan_request_current(request).map_err(AudioDspPlanError::from_issues)?;
     let expanded_graph = expand_project_graph_current(&request.graph, &request.patch_library)
-        .map_err(AudioDspPlanError::from_diagnostics)?;
+        .map_err(AudioDspPlanError::from_issues)?;
     let graph = lower_graph_for_execution(&expanded_graph);
     let plan = build_audio_dsp_plan_from_execution_plan(&graph, &execution_plan, options)?;
     Ok((plan, graph))
@@ -44,25 +44,23 @@ pub(crate) fn build_audio_dsp_plan_with_graph_current(
 fn validate_audio_dsp_request_schema_versions_current(
     request: &ProjectRequestCurrent,
 ) -> Result<(), AudioDspPlanError> {
-    let mut diagnostics = Vec::new();
+    let mut issues = Vec::new();
     if let Some(document) = &request.document {
-        if let Some(diagnostic) =
-            schema_version_diagnostic("project", Some(document.schema_version.as_str()))
+        if let Some(issue) = schema_version_issue("project", Some(document.schema_version.as_str()))
         {
-            diagnostics.push(diagnostic);
+            issues.push(issue);
         }
     }
-    if let Some(diagnostic) =
-        schema_version_diagnostic("graph", Some(request.graph.schema_version.as_str()))
+    if let Some(issue) = schema_version_issue("graph", Some(request.graph.schema_version.as_str()))
     {
-        diagnostics.push(diagnostic);
+        issues.push(issue);
     }
 
-    if diagnostics.is_empty() {
+    if issues.is_empty() {
         Ok(())
     } else {
         Err(AudioDspPlanError::InvalidProject {
-            diagnostics: diagnostics.into_boxed_slice(),
+            issues: issues.into_boxed_slice(),
         })
     }
 }
@@ -208,7 +206,7 @@ fn lower_graph_for_execution(graph: &crate::GraphDocumentCurrent) -> GraphDocume
 fn validate_audio_dsp_plan_options(options: AudioDspPlanOptions) -> Result<(), AudioDspPlanError> {
     if options.block_size == 0 {
         return Err(AudioDspPlanError::InvalidBlockSize {
-            diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+            issue: Box::new(RuntimeIssue::structured_error(
                 "audio-dsp.invalid-block-size",
                 "audio dsp block size must be greater than zero",
                 json!({ "blockSize": options.block_size }),
@@ -217,7 +215,7 @@ fn validate_audio_dsp_plan_options(options: AudioDspPlanOptions) -> Result<(), A
     }
     if options.sample_rate == 0 {
         return Err(AudioDspPlanError::InvalidSampleRate {
-            diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+            issue: Box::new(RuntimeIssue::structured_error(
                 "audio-dsp.invalid-sample-rate",
                 "audio dsp sample rate must be greater than zero",
                 json!({ "sampleRate": options.sample_rate }),
@@ -239,7 +237,7 @@ fn reject_signal_ports_outside_audio_block(
             return Err(AudioDspPlanError::SignalPortOutsideAudioBlock {
                 node_id: node.id.clone(),
                 port_id: port.id.clone(),
-                diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                issue: Box::new(RuntimeIssue::structured_error(
                     "audio-dsp.signal-port-outside-audio-block",
                     format!(
                         "audio signal port {}.{} is not an audio_block node",

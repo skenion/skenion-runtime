@@ -43,7 +43,7 @@ Skenion v0 does not support legacy, deprecated, or import-only compatibility
 paths. Runtime endpoints, CLI commands, payload decoders, sessions, and
 capability responses must model the current product surface only. Unsupported
 schema, protocol, graph, project, package, manifest, extension, or ABI versions
-must be rejected with structured diagnostics rather than migrated, imported,
+must be rejected with structured issues rather than migrated, imported,
 shimmed, or kept behind deprecated aliases.
 
 The forward graph/project contract label is `0.1`. Runtime should follow

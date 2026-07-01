@@ -2,10 +2,10 @@ use serde_json::{Value, json};
 
 use crate::{
     CURRENT_SCHEMA_VERSION, ProjectDocumentCurrent, ProjectRequestCurrent,
-    RunProjectRequestCurrent, RuntimeDiagnostic, RuntimeSession, RuntimeSessionLoadModeCurrent,
+    RunProjectRequestCurrent, RuntimeIssue, RuntimeSession, RuntimeSessionLoadModeCurrent,
     RuntimeSessionLoadRequestCurrent, RuntimeSessionSnapshot,
-    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
-    schema_version_diagnostic,
+    project_document_payload_schema_issues, project_document_validation_issues_current,
+    schema_version_issue,
 };
 
 const RUNTIME_SESSION_LOAD_REQUEST_SCHEMA: &str = "skenion.runtime.session-load-request";
@@ -24,9 +24,9 @@ pub(crate) enum RuntimeSessionLoadPayload {
 
 pub(crate) fn decode_runtime_session_load_request_payload(
     value: Value,
-) -> Result<RuntimeSessionLoadPayload, Vec<RuntimeDiagnostic>> {
+) -> Result<RuntimeSessionLoadPayload, Vec<RuntimeIssue>> {
     if is_project_document(&value) {
-        return Err(vec![RuntimeDiagnostic::structured_error(
+        return Err(vec![RuntimeIssue::structured_error(
             "runtime.session-load.raw-project-rejected",
             "Runtime session load requires a skenion.runtime.session-load-request envelope; raw ProjectDocument bodies are no longer accepted.",
             json!({
@@ -44,7 +44,7 @@ pub(crate) fn decode_runtime_session_load_request_payload(
         Some(CURRENT_SCHEMA_VERSION) => decode_runtime_session_load_request_current(value)
             .map(Box::new)
             .map(RuntimeSessionLoadPayload::Current),
-        received => Err(vec![runtime_session_load_schema_version_diagnostic(
+        received => Err(vec![runtime_session_load_schema_version_issue(
             &value, received,
         )]),
     }
@@ -53,12 +53,12 @@ pub(crate) fn decode_runtime_session_load_request_payload(
 pub(crate) fn validate_session_load_precondition(
     session: &RuntimeSession,
     request: &RuntimeSessionLoadRequestCurrent,
-) -> Result<(), Vec<RuntimeDiagnostic>> {
+) -> Result<(), Vec<RuntimeIssue>> {
     let snapshot = session.snapshot();
     match &request.mode {
         RuntimeSessionLoadModeCurrent::ForceReplace => Ok(()),
         RuntimeSessionLoadModeCurrent::LoadIfEmpty if !snapshot.loaded() => Ok(()),
-        RuntimeSessionLoadModeCurrent::LoadIfEmpty => Err(vec![session_load_conflict_diagnostic(
+        RuntimeSessionLoadModeCurrent::LoadIfEmpty => Err(vec![session_load_conflict_issue(
             request,
             &snapshot,
             "loadIfEmpty requires an empty Runtime session",
@@ -66,7 +66,7 @@ pub(crate) fn validate_session_load_precondition(
         )]),
         RuntimeSessionLoadModeCurrent::ReplaceIfMatch => {
             let Some(current_project) = snapshot.project.as_ref() else {
-                return Err(vec![session_load_conflict_diagnostic(
+                return Err(vec![session_load_conflict_issue(
                     request,
                     &snapshot,
                     "replaceIfMatch requires an existing Runtime session project",
@@ -74,7 +74,7 @@ pub(crate) fn validate_session_load_precondition(
                 )]);
             };
             let Some(precondition) = request.precondition.as_ref() else {
-                return Err(vec![RuntimeDiagnostic::structured_error(
+                return Err(vec![RuntimeIssue::structured_error(
                     "runtime.session-load.precondition-required",
                     "replaceIfMatch requires a precondition",
                     session_load_request_details(request, &snapshot, Vec::new()),
@@ -115,7 +115,7 @@ pub(crate) fn validate_session_load_precondition(
             if mismatches.is_empty() {
                 Ok(())
             } else {
-                Err(vec![session_load_conflict_diagnostic(
+                Err(vec![session_load_conflict_issue(
                     request,
                     &snapshot,
                     "replaceIfMatch precondition does not match the current Runtime session",
@@ -126,15 +126,13 @@ pub(crate) fn validate_session_load_precondition(
     }
 }
 
-pub(crate) fn decode_project_payload(
-    value: Value,
-) -> Result<ProjectPayload, Vec<RuntimeDiagnostic>> {
+pub(crate) fn decode_project_payload(value: Value) -> Result<ProjectPayload, Vec<RuntimeIssue>> {
     match project_schema_version(&value).as_deref() {
         Some(CURRENT_SCHEMA_VERSION) => decode_project_payload_current(value)
             .map(Box::new)
             .map(ProjectPayload::Current),
         received => Err(vec![
-            schema_version_diagnostic(project_schema_surface(&value), received)
+            schema_version_issue(project_schema_surface(&value), received)
                 .expect("current schema version should have decoded as current 0.1"),
         ]),
     }
@@ -142,13 +140,13 @@ pub(crate) fn decode_project_payload(
 
 pub(crate) fn decode_run_project_payload(
     value: Value,
-) -> Result<RunProjectPayload, Vec<RuntimeDiagnostic>> {
+) -> Result<RunProjectPayload, Vec<RuntimeIssue>> {
     match project_schema_version(&value).as_deref() {
         Some(CURRENT_SCHEMA_VERSION) => decode_run_project_payload_current(value)
             .map(Box::new)
             .map(RunProjectPayload::Current),
         received => Err(vec![
-            schema_version_diagnostic(project_schema_surface(&value), received)
+            schema_version_issue(project_schema_surface(&value), received)
                 .expect("current schema version should have decoded as current 0.1"),
         ]),
     }
@@ -156,18 +154,18 @@ pub(crate) fn decode_run_project_payload(
 
 fn decode_runtime_session_load_request_current(
     value: Value,
-) -> Result<RuntimeSessionLoadRequestCurrent, Vec<RuntimeDiagnostic>> {
+) -> Result<RuntimeSessionLoadRequestCurrent, Vec<RuntimeIssue>> {
     if let Some(project) = value.get("project") {
         reject_top_level_nodes_current(project)?;
-        let schema_diagnostics = project_document_payload_schema_diagnostics(project);
-        if !schema_diagnostics.is_empty() {
-            return Err(schema_diagnostics);
+        let schema_issues = project_document_payload_schema_issues(project);
+        if !schema_issues.is_empty() {
+            return Err(schema_issues);
         }
     }
     let request = serde_json::from_value::<RuntimeSessionLoadRequestCurrent>(value)
         .map_err(invalid_runtime_session_load_payload)?;
     if let Err(report) = skenion_contracts::validate_runtime_session_load_request_v01(&request) {
-        return Err(runtime_session_load_validation_diagnostics_current(
+        return Err(runtime_session_load_validation_issues_current(
             &request, &report,
         ));
     }
@@ -187,13 +185,13 @@ fn runtime_session_load_request_schema_version(value: &Value) -> Option<String> 
         .map(str::to_owned)
 }
 
-fn runtime_session_load_schema_version_diagnostic(
+fn runtime_session_load_schema_version_issue(
     value: &Value,
     received_schema_version: Option<&str>,
-) -> RuntimeDiagnostic {
+) -> RuntimeIssue {
     let received_schema = value.get("schema").and_then(|schema| schema.as_str());
     if received_schema != Some(RUNTIME_SESSION_LOAD_REQUEST_SCHEMA) {
-        return RuntimeDiagnostic::structured_error(
+        return RuntimeIssue::structured_error(
             "runtime.session-load.invalid-schema",
             "Runtime session load requires a skenion.runtime.session-load-request envelope",
             json!({
@@ -206,7 +204,7 @@ fn runtime_session_load_schema_version_diagnostic(
     }
 
     match received_schema_version {
-        Some(version) => RuntimeDiagnostic::structured_error(
+        Some(version) => RuntimeIssue::structured_error(
             "runtime.session-load.unsupported-schema-version",
             format!("unsupported Runtime session load schemaVersion: {version}"),
             json!({
@@ -215,7 +213,7 @@ fn runtime_session_load_schema_version_diagnostic(
                 "receivedSchemaVersion": version,
             }),
         ),
-        None => RuntimeDiagnostic::structured_error(
+        None => RuntimeIssue::structured_error(
             "runtime.session-load.missing-schema-version",
             "missing schemaVersion in Runtime session load request",
             json!({
@@ -227,15 +225,15 @@ fn runtime_session_load_schema_version_diagnostic(
     }
 }
 
-fn runtime_session_load_validation_diagnostics_current(
+fn runtime_session_load_validation_issues_current(
     request: &RuntimeSessionLoadRequestCurrent,
     report: &skenion_contracts::ValidationReportV01,
-) -> Vec<RuntimeDiagnostic> {
+) -> Vec<RuntimeIssue> {
     report
         .errors()
         .iter()
         .map(|error| {
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "runtime.session-load.invalid-0.1",
                 error.message.clone(),
                 json!({
@@ -250,8 +248,8 @@ fn runtime_session_load_validation_diagnostics_current(
         .collect()
 }
 
-fn invalid_runtime_session_load_payload(error: serde_json::Error) -> Vec<RuntimeDiagnostic> {
-    vec![RuntimeDiagnostic::structured_error(
+fn invalid_runtime_session_load_payload(error: serde_json::Error) -> Vec<RuntimeIssue> {
+    vec![RuntimeIssue::structured_error(
         "runtime.session-load.invalid-payload",
         format!("invalid Runtime session load request: {error}"),
         json!({
@@ -261,13 +259,13 @@ fn invalid_runtime_session_load_payload(error: serde_json::Error) -> Vec<Runtime
     )]
 }
 
-fn session_load_conflict_diagnostic(
+fn session_load_conflict_issue(
     request: &RuntimeSessionLoadRequestCurrent,
     snapshot: &RuntimeSessionSnapshot,
     message: &'static str,
     mismatches: Vec<Value>,
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic::structured_error(
+) -> RuntimeIssue {
+    RuntimeIssue::structured_error(
         "runtime.session-load.conflict",
         message,
         session_load_request_details(request, snapshot, mismatches),
@@ -315,7 +313,7 @@ fn runtime_session_load_mode_label(mode: &RuntimeSessionLoadModeCurrent) -> &'st
 
 fn decode_project_payload_current(
     value: Value,
-) -> Result<ProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
+) -> Result<ProjectRequestCurrent, Vec<RuntimeIssue>> {
     if is_project_document_current(&value) {
         return decode_project_document_request_current(value);
     }
@@ -325,7 +323,7 @@ fn decode_project_payload_current(
 
 fn decode_run_project_payload_current(
     value: Value,
-) -> Result<RunProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
+) -> Result<RunProjectRequestCurrent, Vec<RuntimeIssue>> {
     if is_project_document_current(&value) {
         return decode_run_project_document_request_current(value);
     }
@@ -335,7 +333,7 @@ fn decode_run_project_payload_current(
 
 fn decode_project_document_request_current(
     mut value: Value,
-) -> Result<ProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
+) -> Result<ProjectRequestCurrent, Vec<RuntimeIssue>> {
     reject_top_level_nodes_current(&value)?;
     let _ = take_frames_current(&mut value)?;
     let document = decode_project_document_current(value)?;
@@ -347,7 +345,7 @@ fn decode_project_document_request_current(
 
 fn decode_run_project_document_request_current(
     mut value: Value,
-) -> Result<RunProjectRequestCurrent, Vec<RuntimeDiagnostic>> {
+) -> Result<RunProjectRequestCurrent, Vec<RuntimeIssue>> {
     reject_top_level_nodes_current(&value)?;
     let frames = take_frames_current(&mut value)?;
     let document = decode_project_document_current(value)?;
@@ -360,27 +358,27 @@ fn decode_run_project_document_request_current(
 
 fn decode_project_document_current(
     value: Value,
-) -> Result<ProjectDocumentCurrent, Vec<RuntimeDiagnostic>> {
-    let schema_diagnostics = project_document_payload_schema_diagnostics(&value);
-    if !schema_diagnostics.is_empty() {
-        return Err(schema_diagnostics);
+) -> Result<ProjectDocumentCurrent, Vec<RuntimeIssue>> {
+    let schema_issues = project_document_payload_schema_issues(&value);
+    if !schema_issues.is_empty() {
+        return Err(schema_issues);
     }
     let document =
         serde_json::from_value::<ProjectDocumentCurrent>(value).map_err(invalid_project_payload)?;
     if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
-        return Err(project_document_validation_diagnostics_current(
+        return Err(project_document_validation_issues_current(
             &document, &report,
         ));
     }
     Ok(document)
 }
 
-fn reject_top_level_nodes_current(value: &Value) -> Result<(), Vec<RuntimeDiagnostic>> {
+fn reject_top_level_nodes_current(value: &Value) -> Result<(), Vec<RuntimeIssue>> {
     if value.get("nodes").is_none() {
         return Ok(());
     }
 
-    Err(vec![RuntimeDiagnostic::structured_error(
+    Err(vec![RuntimeIssue::structured_error(
         "project.document.top-level-nodes-rejected",
         "ProjectDocument payloads must not include top-level nodes; node definitions must come from Runtime registry/catalog sources or an explicit legacy ProjectRequest wrapper",
         json!({
@@ -391,7 +389,7 @@ fn reject_top_level_nodes_current(value: &Value) -> Result<(), Vec<RuntimeDiagno
     )])
 }
 
-fn take_frames_current(value: &mut Value) -> Result<Option<usize>, Vec<RuntimeDiagnostic>> {
+fn take_frames_current(value: &mut Value) -> Result<Option<usize>, Vec<RuntimeIssue>> {
     let frames = value
         .as_object_mut()
         .and_then(|object| object.remove("frames"))
@@ -434,8 +432,8 @@ fn project_schema_surface(value: &Value) -> &'static str {
     }
 }
 
-fn invalid_project_payload(error: serde_json::Error) -> Vec<RuntimeDiagnostic> {
-    vec![RuntimeDiagnostic::error(format!(
+fn invalid_project_payload(error: serde_json::Error) -> Vec<RuntimeIssue> {
+    vec![RuntimeIssue::error(format!(
         "invalid project request: {error}"
     ))]
 }

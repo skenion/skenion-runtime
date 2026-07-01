@@ -4,9 +4,9 @@ use skenion_contracts::{
 };
 
 use crate::{
-    DiagnosticSeverity, RUNTIME_API_VERSION, RuntimeConnectionProfile,
-    RuntimeConnectionProfileMode, RuntimeDiagnostic, RuntimeEndpointMetadata,
-    RuntimeEndpointProtocol, RuntimeOwnershipMode, RuntimeProcessMetadata,
+    IssueSeverity, RUNTIME_API_VERSION, RuntimeConnectionProfile, RuntimeConnectionProfileMode,
+    RuntimeEndpointMetadata, RuntimeEndpointProtocol, RuntimeIssue, RuntimeOwnershipMode,
+    RuntimeProcessMetadata,
 };
 
 #[derive(Debug, Clone)]
@@ -37,7 +37,7 @@ pub struct RuntimeSidecarStartupResponse {
     pub health: RuntimeSidecarHealthInfo,
     pub token: RuntimeSidecarTokenInfo,
     pub shutdown: RuntimeSidecarShutdownInfo,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,7 +81,7 @@ pub struct RuntimeSidecarHealthResponse {
     pub runtime: RuntimeSidecarRuntimeInfo,
     pub endpoint: RuntimeEndpointMetadata,
     pub profile: RuntimeConnectionProfile,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,7 +120,7 @@ pub struct RuntimeSidecarShutdownResponse {
     pub accepted: bool,
     pub action: &'static str,
     pub scope: &'static str,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 pub(crate) fn sidecar_startup_response(
@@ -149,7 +149,7 @@ pub(crate) fn sidecar_startup_response(
             url: format!("{}/v0/sidecar/shutdown", endpoint.url),
             scope: "owned-child-only",
         },
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     }
 }
 
@@ -165,7 +165,7 @@ pub(crate) fn sidecar_health_response(
         runtime: RuntimeSidecarRuntimeInfo::current(),
         endpoint: runtime_endpoint_metadata(endpoint_config),
         profile: runtime_connection_profile(endpoint_config, started_at_wall_clock),
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     }
 }
 
@@ -223,22 +223,22 @@ fn runtime_sidecar_token_from_value(token: Option<String>) -> RuntimeSidecarToke
 }
 
 pub(crate) fn sidecar_shutdown_response(body: &[u8]) -> RuntimeSidecarShutdownResponse {
-    let diagnostics = match sidecar_shutdown_request(body) {
-        Ok(request) => shutdown_request_diagnostics(request),
-        Err(error) => vec![RuntimeDiagnostic::error(format!(
+    let issues = match sidecar_shutdown_request(body) {
+        Ok(request) => shutdown_request_issues(request),
+        Err(error) => vec![RuntimeIssue::error(format!(
             "invalid sidecar shutdown request: {error}"
         ))],
     };
     RuntimeSidecarShutdownResponse {
         schema: "skenion.runtime.sidecar.shutdown",
         schema_version: "0.1.0",
-        ok: diagnostics
+        ok: issues
             .iter()
-            .all(|diagnostic| diagnostic.severity != DiagnosticSeverity::Error),
+            .all(|issue| issue.severity != IssueSeverity::Error),
         accepted: false,
         action: "host-owned-process-stop-required",
         scope: "owned-child-only",
-        diagnostics,
+        issues,
     }
 }
 
@@ -254,13 +254,13 @@ fn sidecar_shutdown_request(
     serde_json::from_slice(body)
 }
 
-fn shutdown_request_diagnostics(request: RuntimeSidecarShutdownRequest) -> Vec<RuntimeDiagnostic> {
-    let mut diagnostics = vec![RuntimeDiagnostic::warning(
+fn shutdown_request_issues(request: RuntimeSidecarShutdownRequest) -> Vec<RuntimeIssue> {
+    let mut issues = vec![RuntimeIssue::warning(
         "runtime shutdown is a structured primitive; the host must stop only its owned child process",
     )];
     if let Some(reason) = request.reason.filter(|reason| !reason.is_empty()) {
-        diagnostics.push(RuntimeDiagnostic {
-            severity: DiagnosticSeverity::Info,
+        issues.push(RuntimeIssue {
+            severity: IssueSeverity::Info,
             message: format!("shutdown requested: {reason}"),
             code: Some("sidecar.shutdown.reason".to_owned()),
             details: request
@@ -268,7 +268,7 @@ fn shutdown_request_diagnostics(request: RuntimeSidecarShutdownRequest) -> Vec<R
                 .map(|owner_window_id| serde_json::json!({ "ownerWindowId": owner_window_id })),
         });
     }
-    diagnostics
+    issues
 }
 
 #[cfg(test)]
@@ -329,7 +329,7 @@ mod tests {
         assert!(empty.ok);
         assert!(!empty.accepted);
         assert!(reason.ok);
-        assert_eq!(reason.diagnostics.len(), 2);
+        assert_eq!(reason.issues.len(), 2);
         assert!(!invalid.ok);
     }
 }

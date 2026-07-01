@@ -17,10 +17,9 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::{
     GeneratedShaderResponse, NodeDefinition, NodeRegistry, PackageRegistryListResponseV01,
     PreviewDocument, ProjectRequestCurrent, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlStateResponse, RuntimeDiagnostic, RuntimeExtensionListResponse,
-    RuntimeIoDeviceListResponse, RuntimePreviewStartRequest, RuntimeSessionEventKind,
-    RuntimeSessionInfoResponse, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
-    ShaderDiagnosticSource,
+    RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeIoDeviceListResponse,
+    RuntimeIssue, RuntimePreviewStartRequest, RuntimeSessionEventKind, RuntimeSessionInfoResponse,
+    SessionRunRequest, ShaderIssue, ShaderIssuePhase, ShaderIssueSource,
     asset_store::{
         RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse, store_asset,
     },
@@ -206,11 +205,10 @@ async fn sidecar_health(
 }
 
 async fn sidecar_shutdown(
-    State(state): State<RuntimeServerState>,
+    State(_state): State<RuntimeServerState>,
     body: Bytes,
 ) -> Json<RuntimeSidecarShutdownResponse> {
     let response = sidecar_shutdown_response(&body);
-    state.logs.record_runtime_diagnostics(&response.diagnostics);
     Json(response)
 }
 
@@ -227,64 +225,56 @@ async fn runtime_packages(
 }
 
 fn runtime_api_json(
-    state: &RuntimeServerState,
+    _state: &RuntimeServerState,
     response: RuntimeApiResponse,
 ) -> Json<RuntimeApiResponse> {
-    state.logs.record_runtime_diagnostics(&response.diagnostics);
     Json(response)
 }
 
 fn session_json(
-    state: &RuntimeServerState,
+    _state: &RuntimeServerState,
     response: crate::RuntimeSessionResponse,
 ) -> Json<crate::RuntimeSessionResponse> {
-    state.logs.record_runtime_diagnostics(&response.diagnostics);
     Json(response)
 }
 
 fn control_read_json(
-    state: &RuntimeServerState,
+    _state: &RuntimeServerState,
     response: RuntimeControlReadResponse,
 ) -> Json<RuntimeControlReadResponse> {
-    state.logs.record_runtime_diagnostics(&response.diagnostics);
     Json(response)
 }
 
 fn preview_status_json(
-    state: &RuntimeServerState,
+    _state: &RuntimeServerState,
     response: crate::RuntimePreviewStatusResponse,
 ) -> Json<crate::RuntimePreviewStatusResponse> {
-    state.logs.record_runtime_diagnostics(&response.diagnostics);
     Json(response)
 }
 
 fn asset_import_json(
-    state: &RuntimeServerState,
+    _state: &RuntimeServerState,
     response: RuntimeAssetImportResponse,
 ) -> Json<RuntimeAssetImportResponse> {
-    state.logs.record_runtime_diagnostics(&response.diagnostics);
     Json(response)
 }
 
 fn asset_get_json(
-    state: &RuntimeServerState,
+    _state: &RuntimeServerState,
     response: RuntimeAssetGetResponse,
 ) -> Json<RuntimeAssetGetResponse> {
-    state.logs.record_runtime_diagnostics(&response.diagnostics);
     Json(response)
 }
 
 fn generated_shader_json(
-    state: &RuntimeServerState,
+    _state: &RuntimeServerState,
     response: GeneratedShaderResponse,
 ) -> Json<GeneratedShaderResponse> {
-    state.logs.record_shader_diagnostics(&response.diagnostics);
     Json(response)
 }
 
 async fn io_devices(State(state): State<RuntimeServerState>) -> Json<RuntimeIoDeviceListResponse> {
     let response = state.io_devices.list_devices();
-    state.logs.record_io_diagnostics(&response.diagnostics);
     Json(response)
 }
 
@@ -294,15 +284,15 @@ async fn validate_project_endpoint(
 ) -> Json<RuntimeApiResponse> {
     let response = match decode_project_payload(value) {
         Ok(ProjectPayload::Current(request)) => match validate_project_request_current(&request) {
-            Ok((diagnostics, _)) => RuntimeApiResponse {
+            Ok((issues, _)) => RuntimeApiResponse {
                 ok: true,
-                diagnostics,
+                issues,
                 plan: None,
                 report: None,
             },
-            Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
+            Err(issues) => RuntimeApiResponse::issues(issues),
         },
-        Err(diagnostics) => RuntimeApiResponse::diagnostics(diagnostics),
+        Err(issues) => RuntimeApiResponse::issues(issues),
     };
     runtime_api_json(&state, response)
 }
@@ -314,21 +304,19 @@ async fn plan_project_endpoint(
     match decode_project_payload(value) {
         Ok(ProjectPayload::Current(request)) => {
             match build_execution_plan_request_current(&request) {
-                Ok((plan, diagnostics)) => runtime_api_json(
+                Ok((plan, issues)) => runtime_api_json(
                     &state,
                     RuntimeApiResponse {
                         ok: true,
-                        diagnostics,
+                        issues,
                         plan: Some(plan),
                         report: None,
                     },
                 ),
-                Err(diagnostics) => {
-                    runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics))
-                }
+                Err(issues) => runtime_api_json(&state, RuntimeApiResponse::issues(issues)),
             }
         }
-        Err(diagnostics) => runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics)),
+        Err(issues) => runtime_api_json(&state, RuntimeApiResponse::issues(issues)),
     }
 }
 
@@ -339,24 +327,22 @@ async fn run_project_endpoint(
     match decode_run_project_payload(value) {
         Ok(RunProjectPayload::Current(request)) => {
             match build_execution_plan_run_request_current(&request) {
-                Ok((plan, diagnostics)) => {
+                Ok((plan, issues)) => {
                     let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
                     runtime_api_json(
                         &state,
                         RuntimeApiResponse {
                             ok: true,
-                            diagnostics,
+                            issues,
                             plan: Some(plan),
                             report: Some(report),
                         },
                     )
                 }
-                Err(diagnostics) => {
-                    runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics))
-                }
+                Err(issues) => runtime_api_json(&state, RuntimeApiResponse::issues(issues)),
             }
         }
-        Err(diagnostics) => runtime_api_json(&state, RuntimeApiResponse::diagnostics(diagnostics)),
+        Err(issues) => runtime_api_json(&state, RuntimeApiResponse::issues(issues)),
     }
 }
 
@@ -379,7 +365,7 @@ async fn realtime_session_by_id(
                 "schemaVersion": "0.1.0",
                 "ok": false,
                 "sessionId": session_id,
-                "diagnostic": {
+                "issue": {
                     "code": "realtime.websocket-upgrade-required",
                     "message": "GET /v0/sessions/{sessionId} is the Runtime realtime WebSocket endpoint; send a WebSocket Upgrade request.",
                     "details": {
@@ -441,7 +427,7 @@ async fn session_node_catalog_by_id(
                 "schemaVersion": "0.1.0",
                 "ok": false,
                 "sessionId": session_id,
-                "diagnostic": {
+                "issue": {
                     "code": "runtime.session-not-found",
                     "message": "No Runtime session exists for the requested sessionId."
                 }
@@ -472,13 +458,13 @@ fn load_session_for(
         .expect("runtime session lock should not be poisoned");
     let request = match decode_runtime_session_load_request_payload(value) {
         Ok(RuntimeSessionLoadPayload::Current(request)) => request,
-        Err(diagnostics) => {
-            let response = session.response(false, diagnostics, None);
+        Err(issues) => {
+            let response = session.response(false, issues, None);
             return session_json(state, response);
         }
     };
-    if let Err(diagnostics) = validate_session_load_precondition(&session, &request) {
-        let response = session.response(false, diagnostics, None);
+    if let Err(issues) = validate_session_load_precondition(&session, &request) {
+        let response = session.response(false, issues, None);
         return session_json(state, response);
     }
     let project_request =
@@ -493,7 +479,7 @@ fn load_session_for(
             &record,
             RuntimeSessionEventKind::Load,
             &session,
-            response.diagnostics.clone(),
+            response.issues.clone(),
         );
     }
     session_json(state, response)
@@ -644,7 +630,7 @@ fn clear_session_for(
             &record,
             RuntimeSessionEventKind::Clear,
             &session,
-            response.diagnostics.clone(),
+            response.issues.clone(),
         );
     }
     session_json(state, response)
@@ -698,12 +684,12 @@ fn start_preview_for(
     };
     let request = match preview_start_request(&body) {
         Ok(request) => request,
-        Err(diagnostic) => {
+        Err(issue) => {
             let preview = record
                 .preview
                 .lock()
                 .expect("runtime preview lock should not be poisoned");
-            let response = preview.request_error(snapshot, diagnostic);
+            let response = preview.request_error(snapshot, issue);
             return preview_status_json(state, response);
         }
     };
@@ -803,20 +789,20 @@ fn generated_shader_for(
             );
             generated_shader_response_from_preview_document(&document)
         }
-        Err(diagnostics) => GeneratedShaderResponse {
+        Err(issues) => GeneratedShaderResponse {
             ok: false,
             node_id: None,
             language: None,
             source: None,
             source_map: None,
-            diagnostics: diagnostics
+            issues: issues
                 .into_iter()
-                .map(|diagnostic| {
-                    ShaderDiagnostic::error(
-                        ShaderDiagnosticPhase::SourceSync,
+                .map(|issue| {
+                    ShaderIssue::error(
+                        ShaderIssuePhase::SourceSync,
                         "generated-shader-unavailable",
-                        diagnostic.message,
-                        ShaderDiagnosticSource::Runtime,
+                        issue.message,
+                        ShaderIssueSource::Runtime,
                     )
                 })
                 .collect(),
@@ -848,7 +834,7 @@ async fn import_asset(
                 let response = RuntimeAssetImportResponse {
                     ok: false,
                     asset: None,
-                    diagnostics: vec![RuntimeDiagnostic::error(format!(
+                    issues: vec![RuntimeIssue::error(format!(
                         "failed to read uploaded asset bytes: {error}"
                     ))],
                 };
@@ -863,7 +849,7 @@ async fn import_asset(
     let response = RuntimeAssetImportResponse {
         ok: false,
         asset: None,
-        diagnostics: vec![RuntimeDiagnostic::error(
+        issues: vec![RuntimeIssue::error(
             "asset import request did not include a file field",
         )],
     };
@@ -879,7 +865,7 @@ async fn list_assets(State(state): State<RuntimeServerState>) -> Json<RuntimeAss
     Json(RuntimeAssetListResponse {
         ok: true,
         assets,
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
     })
 }
 
@@ -896,10 +882,10 @@ async fn get_asset(
     let response = RuntimeAssetGetResponse {
         ok,
         asset,
-        diagnostics: if ok {
+        issues: if ok {
             Vec::new()
         } else {
-            vec![RuntimeDiagnostic::error(format!(
+            vec![RuntimeIssue::error(format!(
                 "asset {asset_id} does not exist"
             ))]
         },
@@ -909,30 +895,29 @@ async fn get_asset(
 
 pub(crate) fn registry_from_nodes(
     nodes: Vec<NodeDefinition>,
-) -> Result<NodeRegistry, Vec<RuntimeDiagnostic>> {
+) -> Result<NodeRegistry, Vec<RuntimeIssue>> {
     let mut registry = NodeRegistry::new();
-    let mut diagnostics = Vec::new();
+    let mut issues = Vec::new();
 
     for definition in nodes {
         if let Err(error) = registry.insert(definition) {
-            diagnostics.push(RuntimeDiagnostic::error(error.to_string()));
+            issues.push(RuntimeIssue::error(error.to_string()));
         }
     }
 
-    if diagnostics.is_empty() {
+    if issues.is_empty() {
         Ok(registry)
     } else {
-        Err(diagnostics)
+        Err(issues)
     }
 }
 
-fn preview_start_request(body: &[u8]) -> Result<RuntimePreviewStartRequest, RuntimeDiagnostic> {
+fn preview_start_request(body: &[u8]) -> Result<RuntimePreviewStartRequest, RuntimeIssue> {
     if body.is_empty() {
         return Ok(RuntimePreviewStartRequest { restart: false });
     }
-    serde_json::from_slice(body).map_err(|error| {
-        RuntimeDiagnostic::error(format!("invalid preview start request: {error}"))
-    })
+    serde_json::from_slice(body)
+        .map_err(|error| RuntimeIssue::error(format!("invalid preview start request: {error}")))
 }
 
 fn cors_layer() -> CorsLayer {

@@ -9,7 +9,7 @@ use super::{
     AudioOfflineDspError, AudioOfflineDspOptions, AudioOfflineDspReport, build_audio_dsp_plan,
     build_audio_dsp_plan_with_graph_current,
 };
-use crate::{GraphDocument, GraphNode, NodeRegistry, ProjectRequestCurrent, RuntimeDiagnostic};
+use crate::{GraphDocument, GraphNode, NodeRegistry, ProjectRequestCurrent, RuntimeIssue};
 
 pub fn run_offline_audio_dsp_current(
     request: &ProjectRequestCurrent,
@@ -35,7 +35,7 @@ pub(crate) fn run_offline_audio_dsp(
 fn validate_options(options: AudioOfflineDspOptions) -> Result<(), AudioOfflineDspError> {
     if options.blocks == 0 {
         return Err(AudioOfflineDspError::InvalidBlockCount {
-            diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+            issue: Box::new(RuntimeIssue::structured_error(
                 "audio-dsp.invalid-offline-block-count",
                 "audio offline dsp block count must be greater than zero",
                 json!({ "blocks": options.blocks }),
@@ -86,7 +86,7 @@ fn run_with_plan(
                     return Err(AudioOfflineDspError::UnsupportedNodeKind {
                         node_id: node.node_id.clone(),
                         kind: node.kind.clone(),
-                        diagnostic: Box::new(RuntimeDiagnostic::structured_error(
+                        issue: Box::new(RuntimeIssue::structured_error(
                             "audio-dsp.offline-unsupported-node-kind",
                             format!(
                                 "offline audio dsp node {} uses unsupported kind {}",

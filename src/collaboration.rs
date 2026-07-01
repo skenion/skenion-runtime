@@ -582,7 +582,7 @@ mod tests {
             ack: None,
             nack: None,
             rebase: None,
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
             created_at: created_at.to_owned(),
         }
     }

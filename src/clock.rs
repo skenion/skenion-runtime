@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::contract::{
-    ClockAuthority, ClockCapability, ClockField, ClockState, ClockTimeSignature,
-    MidiClockDiagnostic, MidiClockDiagnosticSeverity, MidiClockMessage, MidiClockMessageKind,
-    MidiClockSnapshot, apply_midi_clock_message, midi_clock_snapshot_to_clock_state,
-    parse_midi_clock_message,
+    ClockAuthority, ClockCapability, ClockField, ClockState, ClockTimeSignature, MidiClockIssue,
+    MidiClockIssueSeverity, MidiClockMessage, MidiClockMessageKind, MidiClockSnapshot,
+    apply_midi_clock_message, midi_clock_snapshot_to_clock_state, parse_midi_clock_message,
 };
 
 pub const RUNTIME_MIDI_CLOCK_FIXTURE_SCHEMA: &str = "skenion.clock.midi.fixture";
@@ -69,15 +68,15 @@ impl MidiSongPositionSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RuntimeClockDiagnosticSeverity {
+pub enum RuntimeClockIssueSeverity {
     Warning,
     Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeClockDiagnostic {
-    pub severity: RuntimeClockDiagnosticSeverity,
+pub struct RuntimeClockIssue {
+    pub severity: RuntimeClockIssueSeverity,
     pub code: String,
     pub message: String,
 }
@@ -91,7 +90,7 @@ pub struct RuntimeMidiClockStateSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub received_host_time_ns: Option<u64>,
     pub song_position_source: MidiSongPositionSource,
-    pub diagnostics: Vec<RuntimeClockDiagnostic>,
+    pub issues: Vec<RuntimeClockIssue>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -163,7 +162,7 @@ pub struct RuntimeMidiClockFixtureReport {
     pub event_count: usize,
     pub timeline: RuntimeMidiClockTimeline,
     pub latest_snapshot: RuntimeMidiClockStateSnapshot,
-    pub diagnostics: Vec<RuntimeClockDiagnostic>,
+    pub issues: Vec<RuntimeClockIssue>,
 }
 
 #[derive(Debug, Error)]
@@ -216,28 +215,28 @@ impl MidiClockAdapter {
         self.last_received_host_time_ns = Some(received_host_time_ns);
 
         let Some(mut message) = parse_runtime_midi_clock_message(&timestamped.bytes) else {
-            let diagnostic = invalid_or_unsupported_message_diagnostic(&timestamped.bytes);
-            return self.runtime_snapshot(vec![diagnostic], Some(received_host_time_ns));
+            let issue = invalid_or_unsupported_message_issue(&timestamped.bytes);
+            return self.runtime_snapshot(vec![issue], Some(received_host_time_ns));
         };
         message.received_host_time_ns = Some(received_host_time_ns);
 
         let message_kind = message.kind;
         let result = apply_midi_clock_message(&self.snapshot, &message);
         self.snapshot = result.snapshot;
-        let diagnostics: Vec<RuntimeClockDiagnostic> = result
-            .diagnostics
+        let issues: Vec<RuntimeClockIssue> = result
+            .issues
             .into_iter()
-            .map(runtime_clock_diagnostic_from_midi)
+            .map(runtime_clock_issue_from_midi)
             .collect();
 
-        if !diagnostics
+        if !issues
             .iter()
-            .any(|diagnostic| diagnostic.severity == RuntimeClockDiagnosticSeverity::Error)
+            .any(|issue| issue.severity == RuntimeClockIssueSeverity::Error)
         {
             self.update_song_position_source(message_kind);
         }
 
-        self.runtime_snapshot(diagnostics, Some(received_host_time_ns))
+        self.runtime_snapshot(issues, Some(received_host_time_ns))
     }
 
     fn update_song_position_source(&mut self, message_kind: MidiClockMessageKind) {
@@ -260,7 +259,7 @@ impl MidiClockAdapter {
 
     fn runtime_snapshot(
         &self,
-        diagnostics: Vec<RuntimeClockDiagnostic>,
+        issues: Vec<RuntimeClockIssue>,
         received_host_time_ns: Option<u64>,
     ) -> RuntimeMidiClockStateSnapshot {
         RuntimeMidiClockStateSnapshot {
@@ -269,7 +268,7 @@ impl MidiClockAdapter {
             clock_state: self.corrected_clock_state(),
             received_host_time_ns,
             song_position_source: self.song_position_source,
-            diagnostics,
+            issues,
         }
     }
 
@@ -324,7 +323,7 @@ pub fn run_midi_clock_fixture(
 
     let mut adapter = MidiClockAdapter::new(fixture.source_id.clone(), fixture.time_signature);
     let mut timeline = RuntimeMidiClockTimeline::new();
-    let mut diagnostics = Vec::new();
+    let mut issues = Vec::new();
     let mut latest_snapshot = adapter.current_snapshot();
 
     for event in &fixture.events {
@@ -332,7 +331,7 @@ pub fn run_midi_clock_fixture(
             bytes: event.bytes.clone(),
             received_host_time_ns: event.at_ns,
         });
-        diagnostics.extend(latest_snapshot.diagnostics.clone());
+        issues.extend(latest_snapshot.issues.clone());
         timeline.record(latest_snapshot.clone());
     }
 
@@ -347,7 +346,7 @@ pub fn run_midi_clock_fixture(
         event_count: fixture.events.len(),
         timeline,
         latest_snapshot,
-        diagnostics,
+        issues,
     })
 }
 
@@ -369,11 +368,11 @@ pub fn format_midi_clock_fixture_report_text(report: &RuntimeMidiClockFixtureRep
     push_field(&mut lines, "bar", state.bar.as_ref());
     push_field(&mut lines, "beat", state.beat.as_ref());
     push_field(&mut lines, "tempoBpm", state.tempo_bpm.as_ref());
-    lines.push(format!("diagnostics: {}", report.diagnostics.len()));
-    for diagnostic in &report.diagnostics {
+    lines.push(format!("issues: {}", report.issues.len()));
+    for issue in &report.issues {
         lines.push(format!(
-            "diagnostic: {:?} {} {}",
-            diagnostic.severity, diagnostic.code, diagnostic.message
+            "issue: {:?} {} {}",
+            issue.severity, issue.code, issue.message
         ));
     }
     lines.join("\n") + "\n"
@@ -428,9 +427,9 @@ fn parse_runtime_midi_clock_message(bytes: &[u8]) -> Option<MidiClockMessage> {
     })
 }
 
-fn invalid_or_unsupported_message_diagnostic(_bytes: &[u8]) -> RuntimeClockDiagnostic {
-    RuntimeClockDiagnostic {
-        severity: RuntimeClockDiagnosticSeverity::Error,
+fn invalid_or_unsupported_message_issue(_bytes: &[u8]) -> RuntimeClockIssue {
+    RuntimeClockIssue {
+        severity: RuntimeClockIssueSeverity::Error,
         code: "unsupported-midi-clock-message".to_owned(),
         message: "MIDI Clock adapter supports tick/start/continue/stop/SPP messages only"
             .to_owned(),
@@ -500,14 +499,14 @@ fn push_field<T: fmt::Display>(
     ));
 }
 
-fn runtime_clock_diagnostic_from_midi(diagnostic: MidiClockDiagnostic) -> RuntimeClockDiagnostic {
-    RuntimeClockDiagnostic {
-        severity: match diagnostic.severity {
-            MidiClockDiagnosticSeverity::Warning => RuntimeClockDiagnosticSeverity::Warning,
-            MidiClockDiagnosticSeverity::Error => RuntimeClockDiagnosticSeverity::Error,
+fn runtime_clock_issue_from_midi(issue: MidiClockIssue) -> RuntimeClockIssue {
+    RuntimeClockIssue {
+        severity: match issue.severity {
+            MidiClockIssueSeverity::Warning => RuntimeClockIssueSeverity::Warning,
+            MidiClockIssueSeverity::Error => RuntimeClockIssueSeverity::Error,
         },
-        code: diagnostic.code,
-        message: diagnostic.message,
+        code: issue.code,
+        message: issue.message,
     }
 }
 
@@ -551,7 +550,7 @@ mod tests {
                 .authority,
             ClockAuthority::Derived
         );
-        assert!(report.diagnostics.is_empty());
+        assert!(report.issues.is_empty());
     }
 
     #[test]
@@ -640,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_spp_bytes_produce_diagnostic_without_state_change() {
+    fn invalid_spp_bytes_produce_issue_without_state_change() {
         let mut adapter = MidiClockAdapter::new("midi-clock-invalid", None);
 
         let snapshot = adapter.apply_timestamped_message(TimestampedMidiMessage {
@@ -648,9 +647,9 @@ mod tests {
             received_host_time_ns: 10,
         });
 
-        assert_eq!(snapshot.diagnostics.len(), 1);
+        assert_eq!(snapshot.issues.len(), 1);
         assert_eq!(
-            snapshot.diagnostics[0].code,
+            snapshot.issues[0].code,
             "invalid-midi-song-position-pointer"
         );
         assert_eq!(
@@ -812,25 +811,22 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_messages_and_tick_overflow_report_diagnostics() {
-        let mut adapter = MidiClockAdapter::new("midi-clock-diagnostics", None);
+    fn unsupported_messages_and_tick_overflow_report_issues() {
+        let mut adapter = MidiClockAdapter::new("midi-clock-issues", None);
 
         let unsupported = adapter.apply_timestamped_message(TimestampedMidiMessage {
             bytes: vec![0x90, 60, 127],
             received_host_time_ns: 1,
         });
-        assert_eq!(unsupported.diagnostics.len(), 1);
-        assert_eq!(
-            unsupported.diagnostics[0].code,
-            "unsupported-midi-clock-message"
-        );
+        assert_eq!(unsupported.issues.len(), 1);
+        assert_eq!(unsupported.issues[0].code, "unsupported-midi-clock-message");
 
         let invalid_spp = adapter.apply_timestamped_message(TimestampedMidiMessage {
             bytes: vec![0xf2],
             received_host_time_ns: 2,
         });
         assert_eq!(
-            invalid_spp.diagnostics[0].code,
+            invalid_spp.issues[0].code,
             "invalid-midi-song-position-pointer"
         );
 
@@ -842,10 +838,10 @@ mod tests {
         });
         assert!(
             overflow
-                .diagnostics
+                .issues
                 .iter()
-                .any(|diagnostic| diagnostic.code == "midi-clock-tick-overflow"
-                    && diagnostic.severity == RuntimeClockDiagnosticSeverity::Warning)
+                .any(|issue| issue.code == "midi-clock-tick-overflow"
+                    && issue.severity == RuntimeClockIssueSeverity::Warning)
         );
         assert_eq!(
             overflow.song_position_source,
@@ -854,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_fixture_text_report_formats_diagnostics_and_error_severity() {
+    fn invalid_fixture_text_report_formats_issues_and_error_severity() {
         let report = run_midi_clock_fixture(
             RuntimeMidiClockFixture {
                 schema: RUNTIME_MIDI_CLOCK_FIXTURE_SCHEMA.to_owned(),
@@ -868,16 +864,16 @@ mod tests {
         .unwrap();
         let text = format_midi_clock_fixture_report_text(&report);
 
-        assert!(text.contains("diagnostics: 1"));
-        assert!(text.contains("diagnostic:"));
+        assert!(text.contains("issues: 1"));
+        assert!(text.contains("issue:"));
         assert!(text.contains("invalid-midi-song-position-pointer"));
 
-        let diagnostic = runtime_clock_diagnostic_from_midi(MidiClockDiagnostic {
-            severity: MidiClockDiagnosticSeverity::Error,
+        let issue = runtime_clock_issue_from_midi(MidiClockIssue {
+            severity: MidiClockIssueSeverity::Error,
             code: "runtime-midi-clock-error".to_owned(),
             message: "runtime MIDI Clock error".to_owned(),
         });
-        assert_eq!(diagnostic.severity, RuntimeClockDiagnosticSeverity::Error);
+        assert_eq!(issue.severity, RuntimeClockIssueSeverity::Error);
     }
 
     #[test]

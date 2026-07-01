@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_kind_labels_for_diagnostics() {
+    fn reports_kind_labels_for_issues() {
         assert_eq!(
             ControlValue::float(1.0).kind_label(),
             "value.core.float32/f32"

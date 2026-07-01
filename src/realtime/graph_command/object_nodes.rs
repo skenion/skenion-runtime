@@ -13,8 +13,8 @@ use crate::object_spec::{
 use crate::session::{ApplyObjectNodeCreateCurrentRequest, ApplyObjectNodeReplaceCurrentRequest};
 use crate::{
     GraphTargetRef, ObjectResolutionCurrent, ObjectResolutionStatusCurrent, PatchPath,
-    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeDiagnostic,
-    RuntimeMutationRequest, RuntimePatchResponse,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeIssue, RuntimeMutationRequest,
+    RuntimePatchResponse,
 };
 
 fn resolve_object_command_text(
@@ -35,7 +35,7 @@ pub(in crate::realtime) fn apply_object_resolve_graph_command(
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             session,
             false,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "graph.command.object-spec-required",
                 "graph.command kind node.resolve requires payload.objectSpec",
                 json!({ "commandKind": payload.kind }),
@@ -55,7 +55,7 @@ pub(in crate::realtime) fn apply_object_resolve_graph_command(
             conflict: false,
             snapshot: session.snapshot(),
             history: session.history(),
-            diagnostics: object_spec_runtime_diagnostics(&resolution),
+            issues: object_spec_runtime_issues(&resolution),
         },
         node_result,
     )
@@ -132,7 +132,7 @@ pub(in crate::realtime) fn apply_object_create_graph_command(
             graph_command_rejected_response(
                 session,
                 false,
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "node.command.unresolved",
                     "object spec could not be resolved for node.create",
                     json!({
@@ -179,7 +179,7 @@ pub(in crate::realtime) fn apply_object_replace_graph_command(
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             session,
             false,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "graph.command.object-spec-required",
                 "graph.command kind node.replace requires payload.objectSpec",
                 json!({ "commandKind": payload.kind }),
@@ -204,7 +204,7 @@ pub(in crate::realtime) fn apply_object_replace_graph_command(
             graph_command_rejected_response(
                 session,
                 false,
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "graph.command.node-id-required",
                     "graph.command kind node.replace requires payload.nodeId",
                     json!({ "commandKind": payload.kind, "target": target }),
@@ -220,7 +220,7 @@ pub(in crate::realtime) fn apply_object_replace_graph_command(
             graph_command_rejected_response(
                 session,
                 false,
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "node.command.unresolved",
                     "object spec could not be resolved for node.replace",
                     json!({
@@ -282,7 +282,7 @@ pub(in crate::realtime) fn apply_node_delete_graph_command(
             graph_command_rejected_response(
                 session,
                 false,
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "graph.command.node-id-required",
                     "graph.command kind node.delete requires payload.nodeId",
                     json!({ "commandKind": payload.kind, "target": target }),
@@ -323,7 +323,7 @@ pub(in crate::realtime) fn apply_node_update_graph_command(
             graph_command_rejected_response(
                 session,
                 false,
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "graph.command.node-id-required",
                     "graph.command kind node.update requires payload.nodeId",
                     json!({ "commandKind": payload.kind, "target": target }),
@@ -338,7 +338,7 @@ pub(in crate::realtime) fn apply_node_update_graph_command(
             graph_command_rejected_response(
                 session,
                 false,
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "graph.command.params-required",
                     "graph.command kind node.update requires non-empty payload.params",
                     json!({
@@ -376,7 +376,7 @@ pub(in crate::realtime) fn validate_object_command_target(
         return Err(Box::new(graph_command_rejected_response(
             session,
             false,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "graph.command.target-required",
                 format!(
                     "graph.command kind {} requires payload.target",
@@ -392,7 +392,7 @@ pub(in crate::realtime) fn validate_object_command_target(
         return Err(Box::new(graph_command_rejected_response(
             session,
             true,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "graph.command.target-revision-conflict",
                 format!(
                     "baseGraphRevision {base_graph_revision} does not match target.baseRevision {}",
@@ -412,7 +412,7 @@ pub(in crate::realtime) fn validate_object_command_target(
             Err(Box::new(graph_command_rejected_response(
                 session,
                 true,
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "graph.command.target-revision-conflict",
                     format!(
                         "target baseRevision {} does not match target graph revision {}",
@@ -431,7 +431,7 @@ pub(in crate::realtime) fn validate_object_command_target(
         None if require_existing => Err(Box::new(graph_command_rejected_response(
             session,
             false,
-            RuntimeDiagnostic::structured_error(
+            RuntimeIssue::structured_error(
                 "node.target.missing-graph",
                 "node target graph is not available in the active current 0.1 project",
                 json!({ "target": target, "commandKind": payload.kind }),
@@ -547,7 +547,7 @@ pub(in crate::realtime) fn materialize_object_command_node(
         let definition = object_spec_node_definition_v01(resolution)?;
         return Some((node, Some(definition)));
     }
-    if object_unresolved_policy(payload) == ObjectUnresolvedPolicy::MaterializeDiagnostic {
+    if object_unresolved_policy(payload) == ObjectUnresolvedPolicy::MaterializeIssue {
         let mut node = materialize_unresolved_object_spec_node_v01(resolution, node_id);
         merge_payload_params(&mut node.params, payload.params.as_ref());
         return Some((node, None));
@@ -573,7 +573,7 @@ fn empty_unresolved_object_command_node(node_id: &str) -> crate::GraphNodeCurren
             status: ObjectResolutionStatusCurrent::Unresolved,
             selected_spec: None,
             candidates: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }),
         binding_ref: None,
         params: Map::new(),
@@ -585,19 +585,19 @@ fn empty_unresolved_object_command_node(node_id: &str) -> crate::GraphNodeCurren
 fn object_unresolved_policy(payload: &GraphCommandPayload) -> ObjectUnresolvedPolicy {
     payload
         .unresolved_policy
-        .unwrap_or(ObjectUnresolvedPolicy::MaterializeDiagnostic)
+        .unwrap_or(ObjectUnresolvedPolicy::MaterializeIssue)
 }
 
-pub(in crate::realtime) fn object_spec_runtime_diagnostics(
+pub(in crate::realtime) fn object_spec_runtime_issues(
     resolution: &ObjectSpecResolution,
-) -> Vec<RuntimeDiagnostic> {
+) -> Vec<RuntimeIssue> {
     resolution
-        .diagnostics
+        .issues
         .iter()
-        .map(|diagnostic| {
-            RuntimeDiagnostic::structured_error(
-                diagnostic.code.clone(),
-                diagnostic.message.clone(),
+        .map(|issue| {
+            RuntimeIssue::structured_error(
+                issue.code.clone(),
+                issue.message.clone(),
                 json!({
                     "surface": "object-spec",
                     "objectSpec": resolution.input,
@@ -629,7 +629,7 @@ pub(in crate::realtime) fn node_command_result(
         "params": resolution.map(|resolution| resolution.params.clone()),
         "ports": resolution.map(|resolution| resolution.instance_ports.iter().map(object_spec_port_json).collect::<Vec<_>>()),
         "candidates": resolution.map(|resolution| resolution.candidates.iter().map(object_spec_candidate_json).collect::<Vec<_>>()),
-        "diagnostics": resolution.map(|resolution| resolution.diagnostics.iter().map(object_spec_diagnostic_json).collect::<Vec<_>>()),
+        "issues": resolution.map(|resolution| resolution.issues.iter().map(object_spec_issue_json).collect::<Vec<_>>()),
         "unresolvedPolicy": object_unresolved_policy(payload),
         "interfaceIncidentEdgePolicy": payload.interface_incident_edge_policy,
         "droppedEdgeIds": dropped_edge_ids,
@@ -648,12 +648,12 @@ fn empty_object_node_result(payload: &GraphCommandPayload, node_id: &str) -> Val
         "objectResolution": {
             "status": "unresolved",
             "candidates": [],
-            "diagnostics": []
+            "issues": []
         },
         "params": {},
         "ports": [],
         "candidates": [],
-        "diagnostics": [],
+        "issues": [],
         "unresolvedPolicy": object_unresolved_policy(payload),
         "interfaceIncidentEdgePolicy": payload.interface_incident_edge_policy,
         "droppedEdgeIds": [],
@@ -686,10 +686,10 @@ fn object_spec_candidate_json(candidate: &crate::object_spec::ObjectSpecCandidat
     })
 }
 
-fn object_spec_diagnostic_json(diagnostic: &crate::object_spec::ObjectSpecDiagnostic) -> Value {
+fn object_spec_issue_json(issue: &crate::object_spec::ObjectSpecIssue) -> Value {
     json!({
-        "code": diagnostic.code,
-        "message": diagnostic.message,
+        "code": issue.code,
+        "message": issue.message,
     })
 }
 

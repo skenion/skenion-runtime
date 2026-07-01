@@ -16,9 +16,9 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use crate::RuntimeEventReplayGapReason;
 use crate::{
     COLLABORATION_EVENT_REPLAY_LIMIT, PreviewManager, RUNTIME_REALTIME_REPLAY_LIMIT,
-    RuntimeCollaborationLog, RuntimeConnectionProfile, RuntimeDiagnostic, RuntimeEventReplayGap,
-    RuntimeEventReplayMetadata, RuntimeEventReplayWindow, RuntimeRealtimeState, RuntimeSession,
-    RuntimeSessionCapabilitySet, RuntimeSessionEvent, RuntimeSessionEventKind,
+    RuntimeCollaborationLog, RuntimeConnectionProfile, RuntimeEventReplayGap,
+    RuntimeEventReplayMetadata, RuntimeEventReplayWindow, RuntimeIssue, RuntimeRealtimeState,
+    RuntimeSession, RuntimeSessionCapabilitySet, RuntimeSessionEvent, RuntimeSessionEventKind,
     RuntimeSessionInfoResponse, RuntimeSessionLifecycleState, RuntimeSessionSnapshot,
     RuntimeTransportHistory as ContractRuntimeHistory,
     RuntimeTransportHistoryEntry as ContractRuntimeHistoryEntry, RuntimeTransportSessionSnapshot,
@@ -184,7 +184,7 @@ impl RuntimeSessionRecord {
             "profile": profile,
             "capabilities": runtime_session_capabilities(),
             "eventReplay": self.event_replay_window(),
-            "diagnostics": contract_diagnostics(&snapshot.diagnostics),
+            "issues": contract_issues(&snapshot.issues),
         }))
         .expect("runtime session info response should match contract shape")
     }
@@ -194,7 +194,7 @@ pub fn publish_session_event(
     record: &RuntimeSessionRecord,
     kind: RuntimeSessionEventKind,
     session: &RuntimeSession,
-    diagnostics: Vec<RuntimeDiagnostic>,
+    issues: Vec<RuntimeIssue>,
 ) {
     let sequence = next_session_event_sequence(record);
     let event = session_event_from_session(
@@ -202,7 +202,7 @@ pub fn publish_session_event(
         kind,
         session,
         event_replay_fields(session_event_id(&record.id, sequence), sequence),
-        diagnostics,
+        issues,
     );
     store_session_event(record, event.clone());
     let _ = record.events.send(event);
@@ -213,7 +213,7 @@ fn session_event_from_session(
     kind: RuntimeSessionEventKind,
     session: &RuntimeSession,
     replay: SessionEventReplayFields,
-    diagnostics: Vec<RuntimeDiagnostic>,
+    issues: Vec<RuntimeIssue>,
 ) -> RuntimeSessionEvent {
     let snapshot = session.snapshot();
     let history = session.history();
@@ -235,7 +235,7 @@ fn session_event_from_session(
             gap: replay.gap,
             overflow: replay.overflow,
         },
-        "diagnostics": contract_diagnostics(&diagnostics),
+        "issues": contract_issues(&issues),
         "createdAt": created_at_now(),
     }))
     .expect("runtime session event should match contract shape");
@@ -514,12 +514,10 @@ fn contract_history_entry(entry: &crate::RuntimeHistoryEntry) -> ContractRuntime
     .expect("runtime history entry should match contract shape")
 }
 
-fn contract_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> Vec<Value> {
+fn contract_issues(issues: &[RuntimeIssue]) -> Vec<Value> {
     let mut values = Vec::new();
-    for diagnostic in diagnostics {
-        values.push(
-            serde_json::to_value(diagnostic).expect("runtime diagnostic should serialize to JSON"),
-        );
+    for issue in issues {
+        values.push(serde_json::to_value(issue).expect("runtime issue should serialize to JSON"));
     }
     values
 }
@@ -643,7 +641,7 @@ mod tests {
             &record,
             RuntimeSessionEventKind::Snapshot,
             &session,
-            vec![RuntimeDiagnostic::warning("covered diagnostic")],
+            vec![RuntimeIssue::warning("covered issue")],
         );
         let stored = record
             .event_store
@@ -655,8 +653,8 @@ mod tests {
         assert_eq!(stored.sequence, 1);
         assert_eq!(stored.replay.cursor, "1");
         assert_eq!(
-            serde_json::to_value(&stored.diagnostics[0]).unwrap()["message"],
-            "covered diagnostic"
+            serde_json::to_value(&stored.issues[0]).unwrap()["message"],
+            "covered issue"
         );
         assert_eq!(current_session_event_sequence(&record), 1);
     }
@@ -827,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn session_info_preserves_snapshot_diagnostics() {
+    fn session_info_preserves_snapshot_issues() {
         let endpoint = RuntimeEndpointConfig::new("127.0.0.1".to_owned(), 3761);
         let profile = crate::sidecar::runtime_connection_profile(&endpoint, "unix-ms:1");
         let record = RuntimeSessionRegistry::dry_preview().default_record();
@@ -839,9 +837,9 @@ mod tests {
 
         let response = record.info_response(profile);
 
-        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(response.issues.len(), 1);
         assert_eq!(
-            serde_json::to_value(&response.diagnostics[0]).unwrap()["message"],
+            serde_json::to_value(&response.issues[0]).unwrap()["message"],
             "no project loaded in runtime session"
         );
     }

@@ -38,8 +38,6 @@ impl RuntimeServerState {
         let logs = Arc::new(RuntimeLogStore::default());
         let extension_scan = RuntimeExtensionManager::from_env().scan_registry();
         let package_scan = RuntimePackageManager::from_env().scan_registry();
-        logs.record_runtime_diagnostics(extension_scan.log_diagnostics());
-        logs.record_runtime_diagnostics(package_scan.log_diagnostics());
         Self {
             sessions: RuntimeSessionRegistry::default(),
             assets: RuntimeAssetStore::shared(),

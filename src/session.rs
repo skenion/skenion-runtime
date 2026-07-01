@@ -12,11 +12,11 @@ use crate::{
     IdConflictPolicy, IdRemapResult, NodeDefinitionCurrent, NodeRegistry,
     PackageRegistryListResponseV01, PasteGraphFragmentRequest, PasteGraphFragmentResponse,
     PastePlacement, PatchPath, PreviewContext, ProjectDocumentCurrent, ProjectRequestCurrent,
-    RuntimeCollaborationChange, RuntimeDiagnostic, RuntimeOperationDiagnostic,
-    RuntimeOperationEnvelope, ViewState, build_execution_plan_request_current,
+    RuntimeCollaborationChange, RuntimeIssue, RuntimeOperationEnvelope, RuntimeOperationIssue,
+    ViewState, build_execution_plan_request_current,
     project_current::is_payload_identity_node_kind_current,
-    project_document_validation_diagnostics_current, run_dummy_execution,
-    server::registry_from_nodes, validate_project_request_current,
+    project_document_validation_issues_current, run_dummy_execution, server::registry_from_nodes,
+    validate_project_request_current,
 };
 
 mod binding_formats;
@@ -56,9 +56,9 @@ pub(crate) use node_mutation::{
 use paste::{
     lower_fragment_view_patch, next_available_edge_id, paste_graph_fragment_into_graph_current,
     paste_graph_fragment_into_project_current, remap_edge_current,
-    runtime_diagnostic_to_operation_diagnostic,
+    runtime_issue_to_operation_issue,
 };
-use planning::{build_session_execution_plan, unresolved_object_diagnostics_current};
+use planning::{build_session_execution_plan, unresolved_object_issues_current};
 pub(crate) use projection::{lower_edge_for_execution, lower_graph_node_for_execution};
 #[cfg(test)]
 use projection::{lower_execution_model_for_execution, lower_port_for_execution, remap_edge};
@@ -74,7 +74,7 @@ pub use types::{
 use view_state::{
     apply_view_patch_to_view_state, reconcile_view_state_with_execution_graph,
     reconcile_view_state_with_graph_current, runtime_owned_view_state, target_supports_view_state,
-    unsupported_patch_view_change_diagnostic,
+    unsupported_patch_view_change_issue,
 };
 
 #[derive(Debug)]
@@ -86,7 +86,7 @@ pub struct RuntimeSession {
     plan: Option<ExecutionPlan>,
     view_state: Option<ViewState>,
     control_state: ControlState,
-    diagnostics: Vec<RuntimeDiagnostic>,
+    issues: Vec<RuntimeIssue>,
     revision: u64,
     view_revision: u64,
     control_revision: u64,
@@ -109,7 +109,7 @@ impl Default for RuntimeSession {
             plan: None,
             view_state: None,
             control_state: ControlState::default(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
             revision: 0,
             view_revision: 0,
             control_revision: 0,
@@ -121,7 +121,7 @@ impl Default for RuntimeSession {
             package_registry: PackageRegistryListResponseV01 {
                 ok: true,
                 packages: Vec::new(),
-                diagnostics: Vec::new(),
+                issues: Vec::new(),
             },
             node_catalog: RuntimeNodeCatalogCache::default(),
         }
@@ -137,7 +137,7 @@ impl RuntimeSession {
             package_registry_revision: self.package_registry_revision,
             project: self.project.clone(),
             binding_formats: derive_runtime_binding_formats(self.project.as_ref()),
-            diagnostics: self.diagnostics.clone(),
+            issues: self.issues.clone(),
             plan: self.plan.clone(),
         }
     }
@@ -146,14 +146,14 @@ impl RuntimeSession {
         self.node_catalog.snapshot()
     }
 
-    pub(crate) fn preview_context(&self) -> Result<PreviewContext, Vec<RuntimeDiagnostic>> {
+    pub(crate) fn preview_context(&self) -> Result<PreviewContext, Vec<RuntimeIssue>> {
         let Some(graph) = &self.graph else {
-            return Err(vec![RuntimeDiagnostic::error(
+            return Err(vec![RuntimeIssue::error(
                 "no project loaded in runtime session",
             )]);
         };
         let Some(plan) = &self.plan else {
-            return Err(vec![RuntimeDiagnostic::error(
+            return Err(vec![RuntimeIssue::error(
                 "no execution plan available in runtime session",
             )]);
         };
@@ -193,7 +193,7 @@ impl RuntimeSession {
         let package_registry = package_registry.unwrap_or_else(|| PackageRegistryListResponseV01 {
             ok: true,
             packages: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         });
         let mut document = project_document_from_request_current(&request);
         let nodes_current =
@@ -211,19 +211,18 @@ impl RuntimeSession {
             view_state: Some(view_state.clone()),
         };
         if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
-            let mut diagnostics =
-                project_document_validation_diagnostics_current(&document, &report);
-            if let Err(runtime_diagnostics) = validate_project_request_current(&request) {
-                diagnostics.extend(runtime_diagnostics);
+            let mut issues = project_document_validation_issues_current(&document, &report);
+            if let Err(runtime_issues) = validate_project_request_current(&request) {
+                issues.extend(runtime_issues);
             }
-            return self.response(false, diagnostics, None);
+            return self.response(false, issues, None);
         }
 
-        let (plan, mut diagnostics) = match build_execution_plan_request_current(&request) {
+        let (plan, mut issues) = match build_execution_plan_request_current(&request) {
             Ok(result) => result,
-            Err(diagnostics) => return self.response(false, diagnostics, None),
+            Err(issues) => return self.response(false, issues, None),
         };
-        diagnostics.extend(unresolved_object_diagnostics_current(&document.graph));
+        issues.extend(unresolved_object_issues_current(&document.graph));
 
         let graph = lower_graph_for_execution(&document.graph);
         let lowered_nodes = request
@@ -233,7 +232,7 @@ impl RuntimeSession {
             .collect::<Vec<_>>();
         let registry = match registry_from_nodes(lowered_nodes) {
             Ok(registry) => registry,
-            Err(diagnostics) => return self.response(false, diagnostics, None),
+            Err(issues) => return self.response(false, issues, None),
         };
         let control_state = ControlState::from_graph(&graph);
         self.project = Some(document);
@@ -245,70 +244,64 @@ impl RuntimeSession {
         self.control_state = control_state;
         self.view_revision = 1;
         self.control_revision = 0;
-        self.diagnostics = diagnostics.clone();
+        self.issues = issues.clone();
         self.clear_history();
         self.revision += 1;
         self.package_registry_revision = package_registry_revision;
         self.package_registry = package_registry;
         self.refresh_node_catalog_cache();
 
-        self.response(true, diagnostics, None)
+        self.response(true, issues, None)
     }
 
     pub fn validate_current(&mut self) -> RuntimeSessionResponse {
-        let diagnostics = match self.current_project_request_current() {
+        let issues = match self.current_project_request_current() {
             Some(request) => match crate::validate_project_request_current(&request) {
-                Ok((mut diagnostics, _)) => {
-                    diagnostics.extend(unresolved_object_diagnostics_current(&request.graph));
-                    diagnostics
+                Ok((mut issues, _)) => {
+                    issues.extend(unresolved_object_issues_current(&request.graph));
+                    issues
                 }
-                Err(diagnostics) => diagnostics,
+                Err(issues) => issues,
             },
-            None => vec![RuntimeDiagnostic::error(
-                "no project loaded in runtime session",
-            )],
+            None => vec![RuntimeIssue::error("no project loaded in runtime session")],
         };
-        let ok = diagnostics
+        let ok = issues
             .iter()
-            .all(|diagnostic| diagnostic.severity != crate::DiagnosticSeverity::Error);
-        self.diagnostics = diagnostics.clone();
-        self.response(ok, diagnostics, None)
+            .all(|issue| issue.severity != crate::IssueSeverity::Error);
+        self.issues = issues.clone();
+        self.response(ok, issues, None)
     }
 
     pub fn plan_current(&mut self) -> RuntimeSessionResponse {
         let request = match self.current_project_request_current() {
             Some(request) => request,
             None => {
-                let diagnostics = vec![RuntimeDiagnostic::error(
-                    "no project loaded in runtime session",
-                )];
-                self.diagnostics = diagnostics.clone();
-                return self.response(false, diagnostics, None);
+                let issues = vec![RuntimeIssue::error("no project loaded in runtime session")];
+                self.issues = issues.clone();
+                return self.response(false, issues, None);
             }
         };
 
         match build_execution_plan_request_current(&request) {
-            Ok((plan, mut diagnostics)) => {
-                diagnostics.extend(unresolved_object_diagnostics_current(&request.graph));
+            Ok((plan, mut issues)) => {
+                issues.extend(unresolved_object_issues_current(&request.graph));
                 self.plan = Some(plan);
-                self.diagnostics = diagnostics.clone();
-                self.response(true, diagnostics, None)
+                self.issues = issues.clone();
+                self.response(true, issues, None)
             }
-            Err(diagnostics) => {
-                self.diagnostics = diagnostics.clone();
+            Err(issues) => {
+                self.issues = issues.clone();
                 self.plan = None;
-                self.response(false, diagnostics, None)
+                self.response(false, issues, None)
             }
         }
     }
 
     pub fn run_current(&mut self, frames: usize) -> RuntimeSessionResponse {
         if self.loaded_project().is_none() {
-            let diagnostics = vec![RuntimeDiagnostic::error(
-                "no project loaded in runtime session",
-            )];
-            self.diagnostics = diagnostics.clone();
-            return self.response(false, diagnostics, None);
+            let issues = vec![RuntimeIssue::error("no project loaded in runtime session")];
+            self.issues = issues.clone();
+            return self.response(false, issues, None);
         }
 
         if self.plan.is_none() {
@@ -322,7 +315,7 @@ impl RuntimeSession {
             .plan
             .as_ref()
             .map(|plan| run_dummy_execution(plan, frames));
-        self.response(true, self.diagnostics.clone(), report)
+        self.response(true, self.issues.clone(), report)
     }
 
     pub fn apply_mutation(&mut self, mutation: RuntimeMutationRequest) -> RuntimePatchResponse {
@@ -340,12 +333,8 @@ impl RuntimeSession {
         })
     }
 
-    pub fn reject_patch(
-        &self,
-        conflict: bool,
-        diagnostics: Vec<RuntimeDiagnostic>,
-    ) -> RuntimePatchResponse {
-        self.patch_response(false, false, conflict, diagnostics)
+    pub fn reject_patch(&self, conflict: bool, issues: Vec<RuntimeIssue>) -> RuntimePatchResponse {
+        self.patch_response(false, false, conflict, issues)
     }
 
     pub fn clear(&mut self) -> RuntimeSessionResponse {
@@ -358,14 +347,14 @@ impl RuntimeSession {
         self.control_state = ControlState::default();
         self.view_revision = 0;
         self.control_revision = 0;
-        self.diagnostics = Vec::new();
+        self.issues = Vec::new();
         self.clear_history();
         self.revision += 1;
         self.package_registry_revision = None;
         self.package_registry = PackageRegistryListResponseV01 {
             ok: true,
             packages: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         };
         self.refresh_node_catalog_cache();
         self.response(true, Vec::new(), None)
@@ -374,14 +363,14 @@ impl RuntimeSession {
     pub fn response(
         &self,
         ok: bool,
-        diagnostics: Vec<RuntimeDiagnostic>,
+        issues: Vec<RuntimeIssue>,
         report: Option<DummyExecutionReport>,
     ) -> RuntimeSessionResponse {
         let snapshot = self.snapshot();
         RuntimeSessionResponse {
             ok,
             snapshot,
-            diagnostics,
+            issues,
             report,
         }
     }
@@ -438,9 +427,7 @@ impl RuntimeSession {
                     false,
                     false,
                     false,
-                    vec![RuntimeDiagnostic::error(
-                        "no project loaded in runtime session",
-                    )],
+                    vec![RuntimeIssue::error("no project loaded in runtime session")],
                 );
             }
         };
@@ -450,7 +437,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::error(
+                vec![RuntimeIssue::error(
                     "runtime mutation did not include graphPatch or viewPatch",
                 )],
             );
@@ -461,7 +448,7 @@ impl RuntimeSession {
                 false,
                 false,
                 false,
-                vec![RuntimeDiagnostic::structured_error(
+                vec![RuntimeIssue::structured_error(
                     "project.graph-patch-unsupported",
                     "active Runtime sessions use current 0.1 ProjectDocument graph targets; graphPatch mutations are unsupported",
                     serde_json::json!({ "activeSchemaVersion": "0.1.0" }),
@@ -478,7 +465,7 @@ impl RuntimeSession {
                 false,
                 false,
                 true,
-                vec![RuntimeDiagnostic::error(format!(
+                vec![RuntimeIssue::error(format!(
                     "view patch baseViewRevision {} does not match session view revision {}",
                     view_patch.base_view_revision, self.view_revision
                 ))],
@@ -499,8 +486,8 @@ impl RuntimeSession {
         let (patched_view_state, inverse_patch) =
             match apply_view_patch_to_view_state(&next_graph, next_view_state, view_patch) {
                 Ok(result) => result,
-                Err(diagnostics) => {
-                    return self.patch_response(false, false, false, diagnostics);
+                Err(issues) => {
+                    return self.patch_response(false, false, false, issues);
                 }
             };
         next_view_state = patched_view_state;
@@ -515,13 +502,13 @@ impl RuntimeSession {
         let plan =
             match build_session_execution_plan(&next_graph, &registry, "session-mutation-plan") {
                 Ok(plan) => plan,
-                Err(diagnostics) => {
+                Err(issues) => {
                     self.plan = None;
-                    self.diagnostics = diagnostics.clone();
-                    return self.patch_response(false, false, false, diagnostics);
+                    self.issues = issues.clone();
+                    return self.patch_response(false, false, false, issues);
                 }
             };
-        let diagnostics = Vec::new();
+        let issues = Vec::new();
         let control_state = ControlState::from_graph(&next_graph);
         let mut inverse_mutation = RuntimeMutationRequest {
             graph_patch: None,
@@ -568,7 +555,7 @@ impl RuntimeSession {
             self.view_revision += 1;
         }
         self.control_state = control_state;
-        self.diagnostics = diagnostics.clone();
+        self.issues = issues.clone();
         self.revision += 1;
         self.history_entries.push(history_entry);
         if matches!(kind, RuntimeHistoryEntryKind::Apply) {
@@ -576,7 +563,7 @@ impl RuntimeSession {
             self.redo_stack.clear();
         }
 
-        self.patch_response(true, true, false, diagnostics)
+        self.patch_response(true, true, false, issues)
     }
 
     fn apply_project_document_update(
@@ -595,11 +582,11 @@ impl RuntimeSession {
             patch_library: after.patch_library.clone(),
             view_state: Some(after.view_state.clone()),
         };
-        let (plan, mut diagnostics) = match build_execution_plan_request_current(&request) {
+        let (plan, mut issues) = match build_execution_plan_request_current(&request) {
             Ok(result) => result,
-            Err(diagnostics) => return self.patch_response(false, false, false, diagnostics),
+            Err(issues) => return self.patch_response(false, false, false, issues),
         };
-        diagnostics.extend(unresolved_object_diagnostics_current(&after.graph));
+        issues.extend(unresolved_object_issues_current(&after.graph));
         let graph = lower_graph_for_execution(&after.graph);
         let registry = match registry_from_nodes(
             self.nodes_current
@@ -608,7 +595,7 @@ impl RuntimeSession {
                 .collect(),
         ) {
             Ok(registry) => registry,
-            Err(diagnostics) => return self.patch_response(false, false, false, diagnostics),
+            Err(issues) => return self.patch_response(false, false, false, issues),
         };
         let inverse_mutation = RuntimeMutationRequest {
             graph_patch: None,
@@ -651,13 +638,13 @@ impl RuntimeSession {
         self.view_revision = next_view_revision;
         self.control_state = ControlState::from_graph(&graph);
         self.control_revision = 0;
-        self.diagnostics = diagnostics.clone();
+        self.issues = issues.clone();
         self.revision += 1;
         self.history_entries.push(history_entry);
         self.undo_stack.push(history_stack_entry);
         self.redo_stack.clear();
 
-        self.patch_response(true, true, false, diagnostics)
+        self.patch_response(true, true, false, issues)
     }
 
     fn patch_response(
@@ -665,7 +652,7 @@ impl RuntimeSession {
         ok: bool,
         applied: bool,
         conflict: bool,
-        diagnostics: Vec<RuntimeDiagnostic>,
+        issues: Vec<RuntimeIssue>,
     ) -> RuntimePatchResponse {
         let snapshot = self.snapshot();
         RuntimePatchResponse {
@@ -674,7 +661,7 @@ impl RuntimeSession {
             conflict,
             snapshot,
             history: self.history(),
-            diagnostics,
+            issues,
         }
     }
 
@@ -785,13 +772,13 @@ impl RuntimeSession {
             patch_library: project.patch_library.clone(),
             view_state: Some(project.view_state.clone()),
         };
-        let (plan, mut diagnostics) = match build_execution_plan_request_current(&request) {
+        let (plan, mut issues) = match build_execution_plan_request_current(&request) {
             Ok(result) => result,
-            Err(diagnostics) => {
-                return self.patch_response(false, false, false, diagnostics);
+            Err(issues) => {
+                return self.patch_response(false, false, false, issues);
             }
         };
-        diagnostics.extend(unresolved_object_diagnostics_current(&project.graph));
+        issues.extend(unresolved_object_issues_current(&project.graph));
         let graph = lower_graph_for_execution(&project.graph);
         let registry = match registry_from_nodes(
             self.nodes_current
@@ -800,8 +787,8 @@ impl RuntimeSession {
                 .collect(),
         ) {
             Ok(registry) => registry,
-            Err(diagnostics) => {
-                return self.patch_response(false, false, false, diagnostics);
+            Err(issues) => {
+                return self.patch_response(false, false, false, issues);
             }
         };
         let history_entry = self.create_runtime_history_entry(
@@ -825,11 +812,11 @@ impl RuntimeSession {
         self.view_revision = view_revision;
         self.control_state = ControlState::from_graph(&graph);
         self.control_revision = 0;
-        self.diagnostics = diagnostics.clone();
+        self.issues = issues.clone();
         self.revision += 1;
         self.history_entries.push(history_entry);
 
-        self.patch_response(true, true, false, diagnostics)
+        self.patch_response(true, true, false, issues)
     }
 
     fn create_runtime_history_entry(
@@ -921,14 +908,14 @@ fn normalize_mutation_base_revisions(
 fn target_graph_revision_current(
     project: &ProjectDocumentCurrent,
     target: &GraphTargetRef,
-) -> Result<String, Box<RuntimeOperationDiagnostic>> {
+) -> Result<String, Box<RuntimeOperationIssue>> {
     Ok(target_graph_current(project, target)?.revision.clone())
 }
 
 fn target_graph_current<'a>(
     project: &'a ProjectDocumentCurrent,
     target: &GraphTargetRef,
-) -> Result<&'a GraphDocumentCurrent, Box<RuntimeOperationDiagnostic>> {
+) -> Result<&'a GraphDocumentCurrent, Box<RuntimeOperationIssue>> {
     match &target.path {
         PatchPath::Root => Ok(&project.graph),
         PatchPath::HelpWorkingCopy {
@@ -1052,8 +1039,8 @@ fn operation_error(
     actual_revision: Option<String>,
     duplicates: Option<Vec<String>>,
     edges: Option<Vec<String>>,
-) -> RuntimeOperationDiagnostic {
-    RuntimeOperationDiagnostic {
+) -> RuntimeOperationIssue {
+    RuntimeOperationIssue {
         severity: "error".to_owned(),
         code: code.into(),
         message: message.into(),
@@ -1069,29 +1056,25 @@ fn operation_error(
     }
 }
 
-fn operation_diagnostic_to_runtime_diagnostic(
-    diagnostic: RuntimeOperationDiagnostic,
-) -> RuntimeDiagnostic {
+fn operation_issue_to_runtime_issue(issue: RuntimeOperationIssue) -> RuntimeIssue {
     let details = serde_json::json!({
-        "path": diagnostic.path,
-        "target": diagnostic.target,
-        "expectedRevision": diagnostic.expected_revision,
-        "actualRevision": diagnostic.actual_revision,
-        "duplicates": diagnostic.duplicates,
-        "nodes": diagnostic.nodes,
-        "edges": diagnostic.edges,
+        "path": issue.path,
+        "target": issue.target,
+        "expectedRevision": issue.expected_revision,
+        "actualRevision": issue.actual_revision,
+        "duplicates": issue.duplicates,
+        "nodes": issue.nodes,
+        "edges": issue.edges,
     });
-    match diagnostic.severity.as_str() {
-        "warning" => {
-            RuntimeDiagnostic::structured_warning(diagnostic.code, diagnostic.message, details)
-        }
-        "info" => RuntimeDiagnostic {
-            severity: crate::DiagnosticSeverity::Info,
-            message: diagnostic.message,
-            code: Some(diagnostic.code),
+    match issue.severity.as_str() {
+        "warning" => RuntimeIssue::structured_warning(issue.code, issue.message, details),
+        "info" => RuntimeIssue {
+            severity: crate::IssueSeverity::Info,
+            message: issue.message,
+            code: Some(issue.code),
             details: Some(details),
         },
-        _ => RuntimeDiagnostic::structured_error(diagnostic.code, diagnostic.message, details),
+        _ => RuntimeIssue::structured_error(issue.code, issue.message, details),
     }
 }
 

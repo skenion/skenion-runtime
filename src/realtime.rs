@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 #[cfg(test)]
-use crate::{EndpointBindingValueFormat, RuntimeDiagnostic, ValueOccurrenceHeader};
+use crate::{EndpointBindingValueFormat, RuntimeIssue, ValueOccurrenceHeader};
 use crate::{RuntimeSessionRecord, RuntimeSessionSnapshot, runtime_time::created_at_now};
 
 mod graph_command;
@@ -28,9 +28,9 @@ pub use protocol::{
     RUNTIME_REALTIME_REPLAY_LIMIT, RUNTIME_REALTIME_SCHEMA, RUNTIME_REALTIME_SCHEMA_VERSION,
 };
 pub use state::RuntimeRealtimeState;
-use state::{RuntimeRealtimeCachedCommandResult, sync_required_diagnostic};
+use state::{RuntimeRealtimeCachedCommandResult, sync_required_issue};
 use wire::{RuntimeRealtimeConnectionIdentity, RuntimeRealtimeSessionRevisions};
-pub use wire::{RuntimeRealtimeDiagnostic, RuntimeRealtimeEnvelope, RuntimeRealtimeReplay};
+pub use wire::{RuntimeRealtimeEnvelope, RuntimeRealtimeIssue, RuntimeRealtimeReplay};
 
 type RuntimeRealtimeSocketSender = futures_util::stream::SplitSink<WebSocket, Message>;
 
@@ -53,8 +53,8 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                         let frame = match parsed {
                             Ok(frame) => frame,
                             Err(error) => {
-                                let diagnostic = runtime_error(&record.id, None, None, "realtime.frame.invalid-json", format!("invalid realtime JSON frame: {error}"), None);
-                                if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                let issue = runtime_error(&record.id, None, None, "realtime.frame.invalid-json", format!("invalid realtime JSON frame: {error}"), None);
+                                if send_frame(&mut sender, &issue).await.is_err() {
                                     break;
                                 }
                                 continue;
@@ -62,8 +62,8 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                         };
 
                         if frame.session_id != record.id {
-                            let diagnostic = runtime_error(&record.id, None, Some(&frame), "realtime.session.mismatch", "frame sessionId does not match the WebSocket session", Some(json!({"expectedSessionId": record.id, "actualSessionId": frame.session_id})));
-                            if send_frame(&mut sender, &diagnostic).await.is_err() {
+                            let issue = runtime_error(&record.id, None, Some(&frame), "realtime.session.mismatch", "frame sessionId does not match the WebSocket session", Some(json!({"expectedSessionId": record.id, "actualSessionId": frame.session_id})));
+                            if send_frame(&mut sender, &issue).await.is_err() {
                                 break;
                             }
                             continue;
@@ -77,7 +77,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                     Some(resume_token) => {
                                         match record.realtime.consume_resume_token(resume_token) {
                                             Ok(identity) => Some(identity),
-                                            Err(diagnostic) => {
+                                            Err(issue) => {
                                                 let issued_identity =
                                                     record.realtime.issue_connection_identity(None);
                                                 high_water_sequence =
@@ -87,7 +87,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                                     &issued_identity,
                                                     &frame,
                                                     &snapshot,
-                                                    diagnostic,
+                                                    issue,
                                                     hello.node_catalog.as_ref(),
                                                 );
                                                 if send_frame(&mut sender, &sync).await.is_err() {
@@ -117,9 +117,9 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                                     }
                                                 }
                                             }
-                                            Err(diagnostic) => {
+                                            Err(issue) => {
                                                 high_water_sequence = record.realtime.current_sequence();
-                                                let sync = session_sync_required(&record, &issued_identity, &frame, &snapshot, diagnostic, hello.node_catalog.as_ref());
+                                                let sync = session_sync_required(&record, &issued_identity, &frame, &snapshot, issue, hello.node_catalog.as_ref());
                                                 if send_frame(&mut sender, &sync).await.is_err() {
                                                     break;
                                                 }
@@ -155,12 +155,12 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                             record.realtime.publish(event);
                                         }
                                     }
-                                    Err(diagnostic) => {
-                                        if send_realtime_diagnostic(
+                                    Err(issue) => {
+                                        if send_realtime_issue(
                                             &record,
                                             &mut sender,
                                             identity,
-                                            diagnostic,
+                                            issue,
                                         )
                                         .await
                                         .is_err()
@@ -189,12 +189,12 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                             record.realtime.publish(event);
                                         }
                                     }
-                                    Err(diagnostic) => {
-                                        if send_realtime_diagnostic(
+                                    Err(issue) => {
+                                        if send_realtime_issue(
                                             &record,
                                             &mut sender,
                                             identity,
-                                            diagnostic,
+                                            issue,
                                         )
                                         .await
                                         .is_err()
@@ -214,7 +214,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                     }
                                     continue;
                                 };
-                                let diagnostic = runtime_error(
+                                let issue = runtime_error(
                                     &record.id,
                                     Some(identity),
                                     Some(&frame),
@@ -225,7 +225,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                         "replacementKind": GRAPH_KIND_NODE_INPUT,
                                     })),
                                 );
-                                if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                if send_frame(&mut sender, &issue).await.is_err() {
                                     break;
                                 }
                             }
@@ -254,12 +254,12 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                             record.realtime.publish(event);
                                         }
                                     }
-                                    Err(diagnostic) => {
-                                        if send_realtime_diagnostic(
+                                    Err(issue) => {
+                                        if send_realtime_issue(
                                             &record,
                                             &mut sender,
                                             identity,
-                                            diagnostic,
+                                            issue,
                                         )
                                         .await
                                         .is_err()
@@ -285,12 +285,12 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                             break;
                                         }
                                     }
-                                    Err(diagnostic) => {
-                                        if send_realtime_diagnostic(
+                                    Err(issue) => {
+                                        if send_realtime_issue(
                                             &record,
                                             &mut sender,
                                             identity,
-                                            diagnostic,
+                                            issue,
                                         )
                                         .await
                                         .is_err()
@@ -301,8 +301,8 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                 }
                             }
                             _ => {
-                                let diagnostic = runtime_error(&record.id, identity.as_ref(), Some(&frame), "realtime.frame.unsupported-type", "unsupported Runtime realtime frame type", Some(json!({"type": frame.message_type})));
-                                if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                let issue = runtime_error(&record.id, identity.as_ref(), Some(&frame), "realtime.frame.unsupported-type", "unsupported Runtime realtime frame type", Some(json!({"type": frame.message_type})));
+                                if send_frame(&mut sender, &issue).await.is_err() {
                                     break;
                                 }
                             }
@@ -316,8 +316,8 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                     }
                     Message::Pong(_) => {}
                     Message::Binary(_) => {
-                        let diagnostic = runtime_error(&record.id, identity.as_ref(), None, "realtime.frame.binary-unsupported", "Runtime realtime frames must be JSON text", None);
-                        if send_frame(&mut sender, &diagnostic).await.is_err() {
+                        let issue = runtime_error(&record.id, identity.as_ref(), None, "realtime.frame.binary-unsupported", "Runtime realtime frames must be JSON text", None);
+                        if send_frame(&mut sender, &issue).await.is_err() {
                             break;
                         }
                     }
@@ -336,12 +336,12 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                             continue;
                         };
                         let snapshot = current_snapshot(&record);
-                        let diagnostic = sync_required_diagnostic(
+                        let issue = sync_required_issue(
                             "realtime.cursor.stream-lagged",
                             "WebSocket receiver lagged beyond the Runtime realtime event window",
                             Some(json!({ "currentCursor": record.realtime.current_cursor() })),
                         );
-                        let sync = session_sync_required(&record, identity, &empty_correlation_frame(&record.id), &snapshot, diagnostic, None);
+                        let sync = session_sync_required(&record, identity, &empty_correlation_frame(&record.id), &snapshot, issue, None);
                         if send_frame(&mut sender, &sync).await.is_err() {
                             break;
                         }
@@ -519,7 +519,7 @@ fn session_sync_required(
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: &RuntimeRealtimeEnvelope,
     snapshot: &RuntimeSessionSnapshot,
-    diagnostic: RuntimeRealtimeDiagnostic,
+    issue: RuntimeRealtimeIssue,
     node_catalog: Option<&NodeCatalogHelloRequest>,
 ) -> RuntimeRealtimeEnvelope {
     let node_catalog = hello_node_catalog_payload(record, node_catalog);
@@ -547,7 +547,7 @@ fn session_sync_required(
             "snapshot": snapshot,
             "globalCursor": record.realtime.current_cursor(),
             "nodeCatalog": node_catalog,
-            "diagnostic": diagnostic,
+            "issue": issue,
         }),
     }
 }
@@ -560,7 +560,7 @@ fn runtime_error(
     message: impl Into<String>,
     details: Option<Value>,
 ) -> RuntimeRealtimeEnvelope {
-    let diagnostic = RuntimeRealtimeDiagnostic {
+    let issue = RuntimeRealtimeIssue {
         code: code.to_owned(),
         message: message.into(),
         details,
@@ -584,7 +584,7 @@ fn runtime_error(
         sequence: None,
         cursor: None,
         created_at: Some(created_at_now()),
-        payload: json!({ "diagnostic": diagnostic }),
+        payload: json!({ "issue": issue }),
     }
 }
 
@@ -629,9 +629,9 @@ fn current_revisions(snapshot: &RuntimeSessionSnapshot) -> RuntimeRealtimeSessio
 pub(crate) fn validate_value_occurrence_header_for_session_binding<'a>(
     header: &ValueOccurrenceHeader,
     binding_formats: &'a [EndpointBindingValueFormat],
-) -> Result<&'a EndpointBindingValueFormat, RuntimeDiagnostic> {
+) -> Result<&'a EndpointBindingValueFormat, RuntimeIssue> {
     if let Err(report) = skenion_contracts::validate_value_occurrence_header_v01(header) {
-        return Err(RuntimeDiagnostic::structured_error(
+        return Err(RuntimeIssue::structured_error(
             "runtime.value-binding.invalid-header",
             "invalid value occurrence header",
             json!({
@@ -649,7 +649,7 @@ pub(crate) fn validate_value_occurrence_header_for_session_binding<'a>(
         .iter()
         .find(|binding_format| binding_format.binding_id == header.binding_id)
     else {
-        return Err(RuntimeDiagnostic::structured_error(
+        return Err(RuntimeIssue::structured_error(
             "runtime.value-binding.unknown-binding",
             "value occurrence header references an unknown binding",
             json!({
@@ -659,7 +659,7 @@ pub(crate) fn validate_value_occurrence_header_for_session_binding<'a>(
     };
 
     if binding_format.binding_epoch != header.binding_epoch {
-        return Err(RuntimeDiagnostic::structured_error(
+        return Err(RuntimeIssue::structured_error(
             "runtime.value-binding.stale-epoch",
             "value occurrence header binding epoch does not match the current binding",
             json!({
@@ -671,7 +671,7 @@ pub(crate) fn validate_value_occurrence_header_for_session_binding<'a>(
     }
 
     if binding_format.format_revision != header.format_revision {
-        return Err(RuntimeDiagnostic::structured_error(
+        return Err(RuntimeIssue::structured_error(
             "runtime.value-binding.stale-format-revision",
             "value occurrence header format revision does not match the current binding",
             json!({
@@ -690,7 +690,7 @@ async fn send_not_attached(
     sender: &mut RuntimeRealtimeSocketSender,
     frame: &RuntimeRealtimeEnvelope,
 ) -> Result<(), axum::Error> {
-    let diagnostic = runtime_error(
+    let issue = runtime_error(
         &record.id,
         None,
         Some(frame),
@@ -698,24 +698,24 @@ async fn send_not_attached(
         "send session.hello before client actions",
         None,
     );
-    send_frame(sender, &diagnostic).await
+    send_frame(sender, &issue).await
 }
 
-async fn send_realtime_diagnostic(
+async fn send_realtime_issue(
     record: &RuntimeSessionRecord,
     sender: &mut RuntimeRealtimeSocketSender,
     identity: &RuntimeRealtimeConnectionIdentity,
-    diagnostic: RuntimeRealtimeDiagnostic,
+    issue: RuntimeRealtimeIssue,
 ) -> Result<(), axum::Error> {
-    let diagnostic = runtime_error(
+    let issue = runtime_error(
         &record.id,
         Some(identity),
         None,
-        &diagnostic.code,
-        diagnostic.message,
-        diagnostic.details,
+        &issue.code,
+        issue.message,
+        issue.details,
     );
-    send_frame(sender, &diagnostic).await
+    send_frame(sender, &issue).await
 }
 
 async fn send_frame(
