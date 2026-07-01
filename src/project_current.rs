@@ -9,12 +9,11 @@ use crate::object_spec::{
     resolve_object_spec_v01,
 };
 use crate::{
-    CycleValidationCurrent, DataFlow, DataType, EdgeEndpointCurrent, EdgeSpecCurrent,
-    ExecutionGroup, ExecutionModel, ExecutionModelCurrent, FanOutPolicyCurrent,
-    GraphDocumentCurrent, GraphNodeCurrent, GraphValidationResultCurrent, MergePolicyCurrent,
-    NodeDefinitionCurrent, PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode,
-    PortDirectionCurrent, PortRateCurrent, PortSpecCurrent, ProjectDocumentCurrent,
-    RuntimeDiagnostic, StringOrStrings, ViewState, compatible_data_types,
+    CycleValidationCurrent, EdgeEndpointCurrent, EdgeSpecCurrent, ExecutionGroup, ExecutionModel,
+    ExecutionModelCurrent, FanOutPolicyCurrent, GraphDocumentCurrent, GraphNodeCurrent,
+    GraphValidationResultCurrent, MergePolicyCurrent, NodeDefinitionCurrent,
+    PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode, PortDirectionCurrent,
+    PortSpecCurrent, ProjectDocumentCurrent, RuntimeDiagnostic, ViewState, port_connection_policy,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -1477,19 +1476,19 @@ fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<Ru
             ));
         }
 
-        let source_type = data_type_from_port_spec_current(source);
-        let target_type = data_type_from_port_spec_current(target);
-        if !compatible_data_types(&source_type, &target_type) {
+        let connection_policy = port_connection_policy(source, target);
+        if !connection_policy.accepted && connection_policy.reason != "direction-mismatch" {
             diagnostics.push(edge_diagnostic(
                 "graph.edge-incompatible-type",
                 format!(
-                    "incompatible edge {}:{} {} -> {}:{} {}",
+                    "incompatible edge {}:{} {} -> {}:{} {} ({})",
                     edge.source.node_id,
                     edge.source.port_id,
                     source.port_type,
                     edge.target.node_id,
                     edge.target.port_id,
-                    target.port_type
+                    target.port_type,
+                    connection_policy.reason
                 ),
                 edge,
             ));
@@ -1518,49 +1517,6 @@ fn edge_diagnostic(
             },
         }),
     )
-}
-
-fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
-    let (canonical_flow, data_kind) = current_port_type_parts(&port.port_type);
-    let format = match data_kind.as_str() {
-        "value.core.float32" => Some(StringOrStrings::One("f32".to_owned())),
-        "value.core.tensor" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
-        _ => None,
-    };
-    let color_space = (data_kind == "value.core.tensor").then(|| "srgb".to_owned());
-    DataType {
-        flow: canonical_flow.unwrap_or_else(|| match port.rate {
-            Some(PortRateCurrent::Event) => DataFlow::Event,
-            Some(PortRateCurrent::Audio) => DataFlow::Signal,
-            Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
-            Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
-            | None => {
-                if data_kind == "value.core.tensor" {
-                    DataFlow::Resource
-                } else {
-                    DataFlow::Control
-                }
-            }
-        }),
-        data_kind,
-        unit: None,
-        range: None,
-        shape: None,
-        channels: None,
-        sample_rate: None,
-        format,
-        color_space,
-        frame_rate: None,
-        alpha_policy: None,
-        values: None,
-    }
-}
-
-fn current_port_type_parts(port_type: &str) -> (Option<DataFlow>, String) {
-    match port_type {
-        value_type if value_type.starts_with("value.") => (None, value_type.to_owned()),
-        other => (None, other.to_owned()),
-    }
 }
 
 fn node_snapshot_diagnostic(

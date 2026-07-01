@@ -176,6 +176,102 @@ fn output_definition() -> NodeDefinitionCurrent {
     }))
 }
 
+fn float_definition() -> NodeDefinitionCurrent {
+    definition(json!({
+      "schema": "skenion.node.definition",
+      "schemaVersion": "0.1.0",
+      "id": "object.core.float",
+      "version": "0.1.0",
+      "displayName": "Float",
+      "category": "Core",
+      "ports": [
+        {
+          "id": "in",
+          "direction": "input",
+          "type": "value.core.message",
+          "rate": "control",
+          "triggerMode": "trigger",
+          "messageKeys": {
+            "accepted": ["set", "bang"],
+            "store": ["set"],
+            "trigger": ["bang"]
+          }
+        },
+        { "id": "cold", "direction": "input", "type": "value.core.float32", "rate": "control" },
+        { "id": "value", "direction": "output", "type": "value.core.float32", "rate": "control" }
+      ],
+      "execution": { "model": "control" },
+      "state": { "persistent": false },
+      "permissions": [],
+      "capabilities": []
+    }))
+}
+
+fn float_pair_graph() -> GraphDocumentCurrent {
+    graph(json!({
+      "schema": "skenion.graph",
+      "schemaVersion": "0.1.0",
+      "id": "float-message-selector",
+      "revision": "1",
+      "nodes": [
+        {
+          "id": "value_1",
+          "kind": "object.core.float",
+          "kindVersion": "0.1.0",
+          "objectSpec": "float",
+          "params": { "value": 0.5 },
+          "ports": [
+            {
+              "id": "in",
+              "direction": "input",
+              "type": "value.core.message",
+              "rate": "control",
+              "triggerMode": "trigger",
+              "messageKeys": {
+                "accepted": ["set", "bang"],
+                "store": ["set"],
+                "trigger": ["bang"]
+              }
+            },
+            { "id": "cold", "direction": "input", "type": "value.core.float32", "rate": "control" },
+            { "id": "value", "direction": "output", "type": "value.core.float32", "rate": "control" }
+          ]
+        },
+        {
+          "id": "target_1",
+          "kind": "object.core.float",
+          "kindVersion": "0.1.0",
+          "objectSpec": "float",
+          "params": { "value": 0.0 },
+          "ports": [
+            {
+              "id": "in",
+              "direction": "input",
+              "type": "value.core.message",
+              "rate": "control",
+              "triggerMode": "trigger",
+              "messageKeys": {
+                "accepted": ["set", "bang"],
+                "store": ["set"],
+                "trigger": ["bang"]
+              }
+            },
+            { "id": "cold", "direction": "input", "type": "value.core.float32", "rate": "control" },
+            { "id": "value", "direction": "output", "type": "value.core.float32", "rate": "control" }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "id": "edge_value_target",
+          "source": { "nodeId": "value_1", "portId": "value" },
+          "target": { "nodeId": "target_1", "portId": "in" },
+          "resolvedType": "value.core.float32"
+        }
+      ]
+    }))
+}
+
 fn pass_definition() -> NodeDefinitionCurrent {
     definition(json!({
       "schema": "skenion.node.definition",
@@ -1235,6 +1331,14 @@ fn surfaces_selector_and_connection_policy_diagnostics_with_specific_codes() {
                     .contains("message-key-aware input port requires messageKeys")
         }),
         "{selector_result:#?}"
+    );
+
+    let float_graph = float_pair_graph();
+    validate_project_current(&float_graph, &[float_definition()])
+        .expect("float value output should connect to message selector inlet");
+    assert_eq!(
+        float_graph.nodes[1].ports[0].port_type, "value.core.message",
+        "node port snapshot remains the resolved definition interface"
     );
 
     let mut fan_in_graph = render_graph();

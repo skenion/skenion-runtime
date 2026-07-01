@@ -2,7 +2,7 @@ use std::{error::Error, fmt};
 
 use crate::{
     ApplyPatchError, DataType, GraphDocument, GraphPatch, GraphPatchOperation, InvertPatchError,
-    NodeDefinition,
+    NodeDefinition, PortSpecCurrent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +257,17 @@ pub fn invert_graph_patch(
 
 pub fn compatible_data_types(source_type: &DataType, target_type: &DataType) -> bool {
     skenion_contracts::compatible_data_types_v01(source_type, target_type)
+}
+
+pub fn port_type_accepts(source: &PortSpecCurrent, target: &PortSpecCurrent) -> bool {
+    skenion_contracts::port_type_accepts_v01(source, target)
+}
+
+pub fn port_connection_policy(
+    source: &PortSpecCurrent,
+    target: &PortSpecCurrent,
+) -> skenion_contracts::PortConnectionPolicyV01 {
+    skenion_contracts::port_connection_policy_v01(source, target)
 }
 
 pub fn type_label(data_type: &DataType) -> String {

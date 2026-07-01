@@ -227,7 +227,7 @@ pub use telemetry::{
     write_preview_telemetry_heartbeat,
 };
 pub(crate) use validation::{
-    ValidationReport, compatible_data_types, type_label, validate_graph_document,
-    validate_node_definition,
+    ValidationReport, compatible_data_types, port_connection_policy, port_type_accepts, type_label,
+    validate_graph_document, validate_node_definition,
 };
 pub use visual::{PreviewFrameLimit, run_preview_window};

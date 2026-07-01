@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use crate::{
-    EdgeSpecCurrent, GraphDocumentCurrent, GraphTargetRef, PortDirectionCurrent, PortSpecCurrent,
-    RuntimeDiagnostic,
+    EdgeSpecCurrent, GraphDocumentCurrent, GraphTargetRef, PortDirectionCurrent, RuntimeDiagnostic,
+    port_type_accepts,
     session::{RuntimePatchResponse, RuntimeSession},
 };
 
@@ -75,13 +75,5 @@ fn edge_is_valid_current(graph: &GraphDocumentCurrent, edge: &EdgeSpecCurrent) -
 
     source_port.direction == PortDirectionCurrent::Output
         && target_port.direction == PortDirectionCurrent::Input
-        && port_types_compatible_current(source_port, target_port)
-}
-
-fn port_types_compatible_current(source: &PortSpecCurrent, target: &PortSpecCurrent) -> bool {
-    source.port_type == target.port_type
-        || target
-            .accepts
-            .as_ref()
-            .is_some_and(|accepted| accepted.iter().any(|kind| kind == &source.port_type))
+        && port_type_accepts(source_port, target_port)
 }
