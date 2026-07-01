@@ -178,14 +178,19 @@ impl ObjectRegistry {
     }
 
     fn register_core_candidate(&mut self, node: &'static dyn CoreNodeImplementation) {
+        let mut aliases = node
+            .aliases()
+            .iter()
+            .map(|alias| (*alias).to_owned())
+            .collect::<Vec<_>>();
+        if !aliases.iter().any(|alias| alias == node.object_id()) {
+            aliases.push(node.object_id().to_owned());
+        }
+
         self.candidates.push(ObjectRegistryCandidate {
             id: node.kind().to_owned(),
             source: ObjectRegistrySource::FirstPartyCore,
-            aliases: node
-                .aliases()
-                .iter()
-                .map(|alias| (*alias).to_owned())
-                .collect(),
+            aliases,
             implementation: core_implementation(node.object_id()),
             executable_kind: node.kind().to_owned(),
             display_name: node.display_name().to_owned(),
@@ -213,7 +218,6 @@ impl ObjectRegistry {
                         ),
                     },
                     object_id: patch.id.clone(),
-                    version: Some(CURRENT_KIND_VERSION.to_owned()),
                     interface_digest: Some(skenion_contracts::compute_patch_interface_digest_v01(
                         patch,
                     )),
@@ -258,7 +262,6 @@ impl ObjectRegistry {
                             version: Some(package.version.clone()),
                         },
                         object_id: object.object_id.clone(),
-                        version: Some(package.version.clone()),
                         interface_digest: None,
                     },
                     executable_kind: object.object_id.clone(),

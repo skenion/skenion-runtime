@@ -40,10 +40,6 @@ pub(crate) fn object_spec_node_definition_v01(
     resolution: &ObjectSpecResolution,
 ) -> Option<NodeDefinitionCurrent> {
     let implementation = resolution.implementation.as_ref()?;
-    let version = implementation
-        .version
-        .clone()
-        .unwrap_or_else(|| CURRENT_KIND_VERSION.to_owned());
     let ports = resolution
         .instance_ports
         .iter()
@@ -57,7 +53,7 @@ pub(crate) fn object_spec_node_definition_v01(
         schema: "skenion.node.definition".to_owned(),
         schema_version: CURRENT_KIND_VERSION.to_owned(),
         id: implementation_executable_kind(implementation),
-        version,
+        version: CURRENT_KIND_VERSION.to_owned(),
         display_name: object_spec_definition_display_name(&implementation.object_id),
         category: object_spec_definition_category(&implementation.object_id).to_owned(),
         script_api_version: None,

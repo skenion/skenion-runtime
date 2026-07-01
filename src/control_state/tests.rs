@@ -394,7 +394,7 @@ fn control_operator_accepts_integer_inputs_and_reports_invalid_messages() {
     assert!(bool_right.ok);
     assert_eq!(
         state.operator_right.get("bool_add"),
-        Some(&ControlValue::float(0.0))
+        Some(&ControlValue::bool(false))
     );
     assert!(!bad_hot.ok);
     assert!(!bad_right_bang.ok);
@@ -413,6 +413,61 @@ fn control_operator_accepts_integer_inputs_and_reports_invalid_messages() {
         evaluate_operator("object.core.operator.unknown", 2.0, 3.0),
         0.0
     );
+}
+
+#[test]
+fn control_operator_output_type_follows_resolved_literal_not_input_type() {
+    let graph = graph(vec![
+        operator_node_with_output_type("mul_int", OPERATOR_MUL_KIND, json!(3), "value.core.int32"),
+        operator_node_with_output_type(
+            "mul_float",
+            OPERATOR_MUL_KIND,
+            json!(3.0),
+            "value.core.float32",
+        ),
+    ]);
+    let mut state = ControlState::from_graph(&graph);
+
+    let int_operator_float_input = state.apply_event(
+        value_request("mul_int", "in", ControlValue::float(2.5)),
+        &graph,
+    );
+    let float_operator_int_input = state.apply_event(
+        value_request("mul_float", "in", ControlValue::int(2)),
+        &graph,
+    );
+    let int_operator_float_right = state.apply_event(
+        value_request("mul_int", "right", ControlValue::float(4.5)),
+        &graph,
+    );
+    let int_operator_after_float_right =
+        state.apply_event(value_request("mul_int", "in", ControlValue::int(2)), &graph);
+
+    assert!(int_operator_float_input.ok);
+    assert_eq!(
+        emitted_value(&int_operator_float_input.emitted[0]),
+        Some(ControlValue::int(7))
+    );
+    assert!(float_operator_int_input.ok);
+    assert_eq!(
+        emitted_value(&float_operator_int_input.emitted[0]),
+        Some(ControlValue::float(6.0))
+    );
+    assert_eq!(
+        state.value_for_node("mul_float"),
+        Some(&ControlValue::float(6.0))
+    );
+    assert!(int_operator_float_right.ok);
+    assert_eq!(
+        state.operator_right.get("mul_int"),
+        Some(&ControlValue::float(4.5))
+    );
+    assert!(int_operator_after_float_right.ok);
+    assert_eq!(
+        emitted_value(&int_operator_after_float_right.emitted[0]),
+        Some(ControlValue::int(9))
+    );
+    assert_eq!(state.value_for_node("mul_int"), Some(&ControlValue::int(9)));
 }
 
 #[test]
@@ -1854,6 +1909,26 @@ fn operator_node(id: &str, kind: &str, right: Option<f64>) -> GraphNode {
     if let Some(right) = right {
         params.insert("right".to_owned(), json!(right));
     }
+    operator_node_with_params_and_output_type(id, kind, params, "value.core.float32")
+}
+
+fn operator_node_with_output_type(
+    id: &str,
+    kind: &str,
+    right: serde_json::Value,
+    output_type: &str,
+) -> GraphNode {
+    let mut params = Map::new();
+    params.insert("right".to_owned(), right);
+    operator_node_with_params_and_output_type(id, kind, params, output_type)
+}
+
+fn operator_node_with_params_and_output_type(
+    id: &str,
+    kind: &str,
+    params: Map<String, serde_json::Value>,
+    output_type: &str,
+) -> GraphNode {
     let mut ports = vec![port(
         "in",
         PortDirection::Input,
@@ -1866,7 +1941,7 @@ fn operator_node(id: &str, kind: &str, right: Option<f64>) -> GraphNode {
             "right",
             PortDirection::Input,
             DataFlow::Control,
-            "value.core.float32",
+            "value.core.message",
             Some(PortActivation::Latched),
         ));
     }
@@ -1874,7 +1949,7 @@ fn operator_node(id: &str, kind: &str, right: Option<f64>) -> GraphNode {
         "out",
         PortDirection::Output,
         DataFlow::Control,
-        "value.core.float32",
+        output_type,
         None,
     ));
     GraphNode {

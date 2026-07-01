@@ -11,7 +11,7 @@ impl RuntimeSession {
         &mut self,
         request: RuntimeControlEventRequest,
     ) -> RuntimeControlEventResponse {
-        let Some(graph) = self.graph.as_ref() else {
+        let Some(graph) = self.execution_graph() else {
             return RuntimeControlEventResponse {
                 ok: false,
                 changed: false,
@@ -22,7 +22,7 @@ impl RuntimeSession {
         };
 
         let before = self.control_state.clone();
-        let response = self.control_state.apply_event(request, graph);
+        let response = self.control_state.apply_event(request, &graph);
         if response.ok {
             let changed = self.control_state != before;
             if changed {
@@ -37,12 +37,13 @@ impl RuntimeSession {
     }
 
     pub fn control_state_response(&self) -> RuntimeControlStateResponse {
+        let loaded = self.project.is_some();
         RuntimeControlStateResponse {
-            ok: self.graph.is_some(),
+            ok: loaded,
             control_revision: self.control_revision,
             values: self.control_state.values.clone(),
             channels: self.control_state.channels.clone(),
-            issues: if self.graph.is_some() {
+            issues: if loaded {
                 Vec::new()
             } else {
                 vec![RuntimeIssue::error("no project loaded in runtime session")]
@@ -55,7 +56,7 @@ impl RuntimeSession {
     }
 
     pub fn preview_control_state_snapshot(&self) -> Option<PreviewControlStateSnapshot> {
-        self.graph.as_ref()?;
+        self.project.as_ref()?;
         Some(PreviewControlStateSnapshot::new(
             self.revision,
             self.control_revision,
@@ -64,7 +65,7 @@ impl RuntimeSession {
     }
 
     pub fn read_control(&self, request: RuntimeControlReadRequest) -> RuntimeControlReadResponse {
-        let Some(graph) = self.graph.as_ref() else {
+        let Some(graph) = self.execution_graph() else {
             return RuntimeControlReadResponse::error(
                 request,
                 "no project loaded in runtime session",

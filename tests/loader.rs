@@ -83,8 +83,7 @@ fn valid_project_request_current() -> Value {
             "id": "node",
             "implementation": {
               "provider": { "kind": "core" },
-              "objectId": "loader",
-              "version": "0.1.0"
+              "objectId": "loader"
             },
             "objectSpec": "loader",
             "objectResolution": {

@@ -264,7 +264,6 @@ fn object_spec_resolution_with_all_port_variants() -> ObjectSpecResolution {
         implementation: crate::ObjectImplementationRefCurrent {
             provider: crate::ObjectProviderRefCurrent::Core,
             object_id: "audio.sig".to_owned(),
-            version: Some("0.1.0".to_owned()),
             interface_digest: None,
         },
         object_spec: Some("sig~".to_owned()),
@@ -905,7 +904,11 @@ fn object_command_helpers_validate_required_fields_and_targets() {
             "objectSpec": "+ 1"
         })),
     );
-    assert!(replace_empty_object.response.ok);
+    assert!(
+        replace_empty_object.response.ok,
+        "{:#?}",
+        replace_empty_object.response.issues
+    );
     assert!(replace_empty_object.response.applied);
     let project = object_session
         .project_document_current()

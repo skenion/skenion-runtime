@@ -175,6 +175,28 @@ pub(super) fn numeric_message_value_types() -> &'static [&'static str] {
     ]
 }
 
+fn numeric_latched_value_types() -> &'static [&'static str] {
+    &[
+        "value.core.float8",
+        "value.core.float16",
+        "value.core.float32",
+        "value.core.float64",
+        "value.core.ufloat8",
+        "value.core.ufloat16",
+        "value.core.ufloat32",
+        "value.core.ufloat64",
+        "value.core.int8",
+        "value.core.int16",
+        "value.core.int32",
+        "value.core.int64",
+        "value.core.uint8",
+        "value.core.uint16",
+        "value.core.uint32",
+        "value.core.uint64",
+        "value.core.bool",
+    ]
+}
+
 fn control_message_value_types() -> &'static [&'static str] {
     &[
         "value.core.float8",
@@ -199,31 +221,41 @@ fn control_message_value_types() -> &'static [&'static str] {
     ]
 }
 
-pub(super) fn control_operator_ports() -> Vec<ObjectSpecPort> {
+fn numeric_latched_input_policy() -> MessageKeyPolicyV01 {
+    message_key_policy(
+        &["float", "int", "uint", "bool"],
+        &[],
+        &["float", "int", "uint", "bool"],
+        &["float", "int", "uint", "bool"],
+        &[],
+    )
+}
+
+pub(super) fn control_operator_ports(output_type: &str) -> Vec<ObjectSpecPort> {
     vec![
-        input_port(
+        message_input_port(
             "in",
-            "value.core.float32",
-            ObjectSpecPortRate::Control,
             ObjectSpecPortActivation::Trigger,
+            numeric_message_value_types(),
+            numeric_message_input_policy(),
         ),
-        input_port(
+        message_input_port(
             "right",
-            "value.core.float32",
-            ObjectSpecPortRate::Control,
             ObjectSpecPortActivation::Latched,
+            numeric_latched_value_types(),
+            numeric_latched_input_policy(),
         ),
-        output_port("out", "value.core.float32", ObjectSpecPortRate::Control),
+        output_port("out", output_type, ObjectSpecPortRate::Control),
     ]
 }
 
 pub(super) fn control_sqrt_ports() -> Vec<ObjectSpecPort> {
     vec![
-        input_port(
+        message_input_port(
             "in",
-            "value.core.float32",
-            ObjectSpecPortRate::Control,
             ObjectSpecPortActivation::Trigger,
+            numeric_message_value_types(),
+            numeric_message_input_policy(),
         ),
         output_port("out", "value.core.float32", ObjectSpecPortRate::Control),
     ]

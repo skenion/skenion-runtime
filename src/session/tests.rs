@@ -7,20 +7,31 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
-    ControlMessage, ControlValue, Edge, EdgeEndpointCurrent, EdgeSpecCurrent, GraphDocument,
-    GraphDocumentCurrent, GraphPatch, NodeRegistry, PasteGraphFragmentRequest, PortRef,
-    PortSpecCurrent, ProjectRequestCurrent, RuntimeCollaborationChange, RuntimeControlEmission,
-    RuntimeControlEventRequest, RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeIssue,
-    RuntimeOperationEnvelope, RuntimeOperationIssue, ViewState,
+    ControlMessage, ControlValue, EdgeEndpointCurrent, EdgeSpecCurrent, GraphDocumentCurrent,
+    GraphPatch, PasteGraphFragmentRequest, PortSpecCurrent, ProjectRequestCurrent,
+    RuntimeCollaborationChange, RuntimeControlEmission, RuntimeControlEventRequest,
+    RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeIssue, RuntimeOperationEnvelope,
+    RuntimeOperationIssue, ViewState,
 };
 
 fn core_impl(object_id: &str) -> crate::ObjectImplementationRefCurrent {
     crate::ObjectImplementationRefCurrent {
         provider: crate::ObjectProviderRefCurrent::Core,
         object_id: object_id.to_owned(),
-        version: Some("0.1.0".to_owned()),
         interface_digest: None,
     }
+}
+
+fn conflicting_node_definition(
+    definition: &crate::NodeDefinitionCurrent,
+) -> crate::NodeDefinitionCurrent {
+    let mut conflict = definition.clone();
+    let port = conflict
+        .ports
+        .first_mut()
+        .expect("test node definition should include at least one port");
+    port.port_type = "value.core.bool".to_owned();
+    conflict
 }
 
 fn current_core_node_json(
@@ -34,8 +45,7 @@ fn current_core_node_json(
       "id": id,
       "implementation": {
         "provider": { "kind": "core" },
-        "objectId": object_id,
-        "version": "0.1.0"
+        "objectId": object_id
       },
       "objectSpec": object_spec,
       "objectResolution": {
@@ -57,8 +67,7 @@ fn current_provider_node_json(id: &str, object_id: &str, params: Value, ports: V
           "packageId": "test/runtime-fixtures",
           "version": "0.1.0"
         },
-        "objectId": object_id,
-        "version": "0.1.0"
+        "objectId": object_id
       },
       "objectSpec": object_id,
       "objectResolution": {
@@ -269,8 +278,7 @@ fn package_registry_definitions_are_available_during_current_load() {
                 "packageId": "example/package",
                 "version": "0.56.0"
               },
-              "objectId": "example.package.node",
-              "version": "0.56.0"
+              "objectId": "example.package.node"
             },
             "objectSpec": "pkg.node",
             "objectResolution": {
@@ -373,7 +381,7 @@ fn session_snapshot_derives_endpoint_binding_value_formats() {
 
     let response = session.load_project_current(binding_project_current());
 
-    assert!(response.ok);
+    assert!(response.ok, "{:?}", response.issues);
     assert_eq!(response.snapshot.binding_formats.len(), 1);
     let binding = &response.snapshot.binding_formats[0];
     assert_eq!(binding.binding_id, "edge_value_target");
@@ -393,91 +401,10 @@ fn session_snapshot_derives_endpoint_binding_value_formats() {
 }
 
 #[test]
-fn legacy_session_plan_errors_include_surface_and_graph_context() {
-    let graph = sample_internal_graph();
-    let issues =
-        super::build_session_execution_plan(&graph, &NodeRegistry::new(), "session.legacy-plan")
-            .expect_err("empty registry should reject graph nodes without definitions");
-
-    let invalid_project = issues
-        .iter()
-        .find(|issue| issue.code.as_deref() == Some("session.plan.invalid-project"))
-        .expect("invalid project issue should be preserved");
-    assert_eq!(
-        invalid_project
-            .details
-            .as_ref()
-            .and_then(|details| details.get("surface"))
-            .and_then(|surface| surface.as_str()),
-        Some("session.legacy-plan")
-    );
-    assert_eq!(
-        invalid_project
-            .details
-            .as_ref()
-            .and_then(|details| details.get("graphId"))
-            .and_then(|graph_id| graph_id.as_str()),
-        Some("minimal-value")
-    );
-}
-
-#[test]
-fn plan_current_reports_invalid_stored_project() {
-    let mut session = RuntimeSession {
-        graph: Some(sample_internal_graph()),
-        registry: Some(NodeRegistry::new()),
-        plan: None,
-        issues: Vec::new(),
-        revision: 1,
-        ..RuntimeSession::default()
-    };
-
-    let response = session.plan_current();
-
-    assert!(!response.ok);
-    assert!(response.snapshot.plan.is_none());
-    assert!(response.issues[0].message.contains("no project loaded"));
-}
-
-#[test]
-fn validate_current_reports_invalid_stored_project() {
-    let mut session = RuntimeSession {
-        graph: Some(sample_internal_graph()),
-        registry: None,
-        plan: None,
-        issues: Vec::new(),
-        revision: 1,
-        ..RuntimeSession::default()
-    };
-
-    let response = session.validate_current();
-
-    assert!(!response.ok);
-    assert!(response.issues[0].message.contains("no project loaded"));
-}
-
-#[test]
-fn validate_current_reports_registry_validation_errors() {
-    let mut session = RuntimeSession {
-        graph: Some(sample_internal_graph()),
-        registry: Some(NodeRegistry::new()),
-        plan: None,
-        issues: Vec::new(),
-        revision: 1,
-        ..RuntimeSession::default()
-    };
-
-    let response = session.validate_current();
-
-    assert!(!response.ok);
-    assert!(response.issues[0].message.contains("no project loaded"));
-}
-
-#[test]
 fn run_current_rebuilds_missing_plan() {
     let mut session = RuntimeSession::default();
     let loaded = load_sample_project(&mut session);
-    assert!(loaded.ok);
+    assert!(loaded.ok, "{:?}", loaded.issues);
     session.plan = None;
 
     let response = session.run_current(2);
@@ -485,24 +412,6 @@ fn run_current_rebuilds_missing_plan() {
     assert!(response.ok);
     assert!(response.snapshot.plan.is_some());
     assert_eq!(response.report.unwrap().frame_count, 2);
-}
-
-#[test]
-fn run_current_returns_plan_failure_when_rebuild_fails() {
-    let mut session = RuntimeSession {
-        graph: Some(sample_internal_graph()),
-        registry: Some(NodeRegistry::new()),
-        plan: None,
-        issues: Vec::new(),
-        revision: 1,
-        ..RuntimeSession::default()
-    };
-
-    let response = session.run_current(2);
-
-    assert!(!response.ok);
-    assert!(response.report.is_none());
-    assert!(response.issues[0].message.contains("no project loaded"));
 }
 
 #[test]
@@ -761,15 +670,29 @@ fn invalid_control_event_does_not_mutate_state_or_revision() {
 fn failed_control_propagation_does_not_mutate_state_or_revision() {
     let mut session = RuntimeSession::default();
     assert!(load_sample_project(&mut session).ok);
-    session.graph.as_mut().unwrap().edges = vec![Edge {
-        from: PortRef {
-            node: "value_1".to_owned(),
-            port: "value".to_owned(),
+    session
+        .project
+        .as_mut()
+        .expect("project should remain loaded")
+        .graph
+        .edges = vec![EdgeSpecCurrent {
+        id: "invalid_edge".to_owned(),
+        source: EdgeEndpointCurrent {
+            node_id: "value_1".to_owned(),
+            port_id: "value".to_owned(),
         },
-        to: PortRef {
-            node: "target_1".to_owned(),
-            port: "missing".to_owned(),
+        target: EdgeEndpointCurrent {
+            node_id: "target_1".to_owned(),
+            port_id: "missing".to_owned(),
         },
+        resolved_type: None,
+        order: None,
+        enabled: None,
+        adapter: None,
+        feedback: None,
+        style_override: None,
+        label: None,
+        description: None,
     }];
     let before = session.snapshot();
 
@@ -1388,8 +1311,11 @@ fn view_mutation_on_invalid_stored_graph_returns_issues_without_panic() {
     let mut moved = start.clone();
     moved.x += 24.0;
 
-    let mut invalid_graph = session.graph().expect("loaded graph");
-    let target_node = invalid_graph
+    let target_node = session
+        .project
+        .as_mut()
+        .expect("project should remain loaded")
+        .graph
         .nodes
         .iter_mut()
         .find(|node| node.id == "target_1")
@@ -1399,8 +1325,7 @@ fn view_mutation_on_invalid_stored_graph_returns_issues_without_panic() {
         .iter_mut()
         .find(|port| port.id == "cold")
         .expect("sample target should include cold inlet");
-    cold_port.data_type.data_kind = "value.core.bool".to_owned();
-    session.graph = Some(invalid_graph);
+    cold_port.port_type = "value.core.bool".to_owned();
 
     let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         session.apply_mutation(RuntimeMutationRequest {
@@ -1434,17 +1359,19 @@ fn view_mutation_on_invalid_stored_graph_returns_issues_without_panic() {
     assert!(response.snapshot.plan.is_none());
     assert!(
         response.issues.iter().any(|issue| {
-            issue.code.as_deref() == Some("session.plan.invalid-project")
+            issue.code.as_deref() == Some("node.port-snapshot.type-mismatch")
                 && issue.message.contains(
-                    "incompatible edge value_1:value value.core.float32 -> target_1:cold value.core.bool",
+                    "port snapshot mismatch: target_1.cold type value.core.bool != definition type value.core.float32",
                 )
         })
     );
-    assert!(response.snapshot.issues.iter().any(|issue| {
-        issue.message.contains(
-            "incompatible edge value_1:value value.core.float32 -> target_1:cold value.core.bool",
-        )
-    }));
+    assert!(
+        response
+            .snapshot
+            .issues
+            .iter()
+            .any(|issue| { issue.code.as_deref() == Some("node.port-snapshot.type-mismatch") })
+    );
     assert_eq!(response.history.entries.len(), 0);
 }
 
@@ -2386,9 +2313,9 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
 #[test]
 fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     let mut duplicate_request = sample_project_current();
-    duplicate_request
-        .nodes
-        .push(duplicate_request.nodes[0].clone());
+    let mut conflicting_definition = duplicate_request.nodes[0].clone();
+    conflicting_definition.ports[0].port_type = "value.core.bool".to_owned();
+    duplicate_request.nodes.push(conflicting_definition);
     let mut duplicate_session = RuntimeSession::default();
     let duplicate_load = duplicate_session.load_project_current(duplicate_request);
     assert!(!duplicate_load.ok);
@@ -2421,11 +2348,8 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     );
 
     let mut update_session = RuntimeSession::default();
-    assert!(
-        update_session
-            .load_project_current(sample_project_current())
-            .ok
-    );
+    let loaded = update_session.load_project_current(sample_project_current());
+    assert!(loaded.ok, "{:?}", loaded.issues);
     let before = update_session
         .project_document_current()
         .expect("project should load");
@@ -2434,7 +2358,9 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     after.revision = "2".to_owned();
     update_session
         .nodes_current
-        .push(update_session.nodes_current[0].clone());
+        .push(conflicting_node_definition(
+            &update_session.nodes_current[0],
+        ));
     let update = update_session.apply_project_document_update(
         before,
         after,
@@ -2450,11 +2376,8 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     );
 
     let mut restore_plan_session = RuntimeSession::default();
-    assert!(
-        restore_plan_session
-            .load_project_current(sample_project_current())
-            .ok
-    );
+    let loaded = restore_plan_session.load_project_current(sample_project_current());
+    assert!(loaded.ok, "{:?}", loaded.issues);
     let mut invalid_restore = restore_plan_session
         .project_document_current()
         .expect("project should load");
@@ -2474,17 +2397,16 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     );
 
     let mut restore_registry_session = RuntimeSession::default();
-    assert!(
-        restore_registry_session
-            .load_project_current(sample_project_current())
-            .ok
-    );
+    let loaded = restore_registry_session.load_project_current(sample_project_current());
+    assert!(loaded.ok, "{:?}", loaded.issues);
     let restore_project = restore_registry_session
         .project_document_current()
         .expect("project should load");
     restore_registry_session
         .nodes_current
-        .push(restore_registry_session.nodes_current[0].clone());
+        .push(conflicting_node_definition(
+            &restore_registry_session.nodes_current[0],
+        ));
     let restored = restore_registry_session.restore_project_document_state(
         restore_project,
         1,
@@ -2747,86 +2669,6 @@ fn history_delta_helpers_merge_non_top_project_patch_and_view_edits() {
         &after.view_state,
         super::HistoryDirection::Redo,
     );
-}
-
-#[test]
-fn active_lowering_helpers_cover_surface_ports_models_and_id_sanitizing() {
-    let definition: crate::NodeDefinitionCurrent = serde_json::from_value(json!({
-      "schema": "skenion.node.definition",
-      "schemaVersion": "0.1.0",
-      "id": "core.matrix",
-      "version": "0.1.0",
-      "displayName": "Matrix",
-      "category": "Test",
-      "surface": { "palette": "cyan" },
-      "ports": [
-        { "id": "signal", "direction": "input", "type": "value.core.float32", "rate": "audio" },
-        { "id": "resource", "direction": "input", "type": "resource.buffer", "rate": "resource" },
-        { "id": "stream", "direction": "output", "type": "io.midi", "rate": "io" }
-      ],
-      "execution": { "model": "audio_block" },
-      "state": { "persistent": true },
-      "permissions": [],
-      "capabilities": []
-    }))
-    .expect("current 0.1 definition should parse");
-
-    let lowered = super::lower_node_definition_for_execution(&definition);
-    assert_eq!(
-        lowered
-            .surface
-            .as_ref()
-            .and_then(|surface| surface.palette.as_deref()),
-        Some("cyan")
-    );
-    assert_eq!(lowered.ports[0].data_type.flow, crate::DataFlow::Signal);
-    assert_eq!(lowered.ports[1].data_type.flow, crate::DataFlow::Resource);
-    assert_eq!(lowered.ports[2].data_type.flow, crate::DataFlow::Resource);
-
-    let cases = [
-        (
-            crate::ExecutionModel::Event,
-            skenion_contracts::ExecutionModelV01::Event,
-        ),
-        (
-            crate::ExecutionModel::Control,
-            skenion_contracts::ExecutionModelV01::Control,
-        ),
-        (
-            crate::ExecutionModel::Frame,
-            skenion_contracts::ExecutionModelV01::Frame,
-        ),
-        (
-            crate::ExecutionModel::AudioBlock,
-            skenion_contracts::ExecutionModelV01::AudioBlock,
-        ),
-        (
-            crate::ExecutionModel::VideoFrame,
-            skenion_contracts::ExecutionModelV01::VideoFrame,
-        ),
-        (
-            crate::ExecutionModel::GpuPass,
-            skenion_contracts::ExecutionModelV01::GpuPass,
-        ),
-        (
-            crate::ExecutionModel::AsyncResource,
-            skenion_contracts::ExecutionModelV01::AsyncResource,
-        ),
-        (
-            crate::ExecutionModel::ScriptControl,
-            skenion_contracts::ExecutionModelV01::ScriptControl,
-        ),
-        (
-            crate::ExecutionModel::NativePlugin,
-            skenion_contracts::ExecutionModelV01::NativePlugin,
-        ),
-    ];
-    for (internal, active) in cases {
-        assert_eq!(
-            super::lower_execution_model_for_execution(&active),
-            internal
-        );
-    }
 }
 
 #[test]
@@ -3837,10 +3679,6 @@ fn load_sample_project(session: &mut RuntimeSession) -> super::RuntimeSessionRes
     session.load_project_current(sample_project_current())
 }
 
-fn sample_internal_graph() -> GraphDocument {
-    super::lower_graph_for_execution(&sample_project_current().graph)
-}
-
 fn sample_project_current() -> ProjectRequestCurrent {
     current_fixture(
         json!({
@@ -3918,14 +3756,14 @@ fn binding_project_current() -> ProjectRequestCurrent {
                 "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": value_binding_ports_current_json()
+                "ports": value_f32_ports_current_json()
               },
               {
                 "id": "target_1",
                 "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
-                "ports": value_binding_ports_current_json()
+                "ports": value_f32_ports_current_json()
               }
             ],
             "edges": [
@@ -3945,7 +3783,7 @@ fn binding_project_current() -> ProjectRequestCurrent {
               "version": "0.1.0",
               "displayName": "Float",
               "category": "Typed Controls",
-              "ports": value_binding_ports_current_json(),
+              "ports": value_f32_ports_current_json(),
               "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
@@ -4040,27 +3878,6 @@ fn value_f32_ports_current_json() -> Value {
           "emit": ["bang", "float", "int", "uint", "bool"]
         }
       },
-      {
-        "id": "cold",
-        "direction": "input",
-        "label": "Cold",
-        "type": "value.core.float32",
-        "rate": "control",
-        "required": false,
-        "triggerMode": "passive"
-      },
-      {
-        "id": "value",
-        "direction": "output",
-        "label": "Value",
-        "type": "value.core.float32",
-        "rate": "control"
-      }
-    ])
-}
-
-fn value_binding_ports_current_json() -> Value {
-    json!([
       {
         "id": "cold",
         "direction": "input",

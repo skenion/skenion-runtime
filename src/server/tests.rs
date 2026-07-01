@@ -52,8 +52,7 @@ fn current_core_node_json(id: &str, object_id: &str, params: Value, ports: Value
       "id": id,
       "implementation": {
         "provider": { "kind": "core" },
-        "objectId": object_id,
-        "version": "0.1.0"
+        "objectId": object_id
       },
       "objectSpec": object_id,
       "objectResolution": {
@@ -1328,6 +1327,70 @@ async fn session_load_stores_valid_project() {
 }
 
 #[tokio::test]
+async fn session_load_drops_obsolete_object_implementation_version_fields() {
+    let app = runtime_router();
+    let mut project = sample_subpatch_project_document_current();
+    project["graph"]["nodes"][0]["implementation"]["version"] = json!("0.1.0");
+    project["graph"]["nodes"][1]["implementation"]["version"] = json!("0.1.0");
+    project["patchLibrary"][0]["graph"]["nodes"][1]["implementation"]["version"] = json!("0.1.0");
+
+    let response = post_json_with(
+        app.clone(),
+        "/v0/sessions/default/load",
+        session_load_request(project),
+    )
+    .await;
+
+    assert_eq!(response["ok"], true);
+    let obsolete_paths = response["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|issue| issue["code"] == "project.load.obsolete-field-dropped")
+        .map(|issue| issue["details"]["path"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        obsolete_paths,
+        vec![
+            "$.graph.nodes[0].implementation.version",
+            "$.graph.nodes[1].implementation.version",
+            "$.patchLibrary[0].graph.nodes[1].implementation.version",
+        ]
+    );
+    assert_eq!(
+        response["snapshot"]["project"]["graph"]["nodes"][0]["implementation"]["version"],
+        Value::Null
+    );
+    assert_eq!(
+        response["snapshot"]["project"]["graph"]["nodes"][1]["implementation"]["version"],
+        Value::Null
+    );
+    assert_eq!(
+        response["snapshot"]["project"]["patchLibrary"][0]["graph"]["nodes"][1]["implementation"]["version"],
+        Value::Null
+    );
+
+    let snapshot = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
+    assert_eq!(
+        snapshot["snapshot"]["project"]["graph"]["nodes"][0]["implementation"]["version"],
+        Value::Null
+    );
+    assert_eq!(
+        snapshot["snapshot"]["project"]["patchLibrary"][0]["graph"]["nodes"][1]["implementation"]["version"],
+        Value::Null
+    );
+
+    let logs = get_json_with(app, "/v0/runtime/logs").await;
+    assert_eq!(logs["events"].as_array().unwrap().len(), 1);
+    assert_eq!(logs["events"][0]["code"], "project.load.repaired");
+    assert_eq!(logs["events"][0]["level"], "warning");
+    assert_eq!(
+        logs["events"][0]["details"]["obsoleteImplementationVersionPaths"],
+        json!(obsolete_paths)
+    );
+}
+
+#[tokio::test]
 async fn session_load_if_empty_rejects_loaded_session() {
     let app = runtime_router();
     let first = post_json_with(
@@ -1690,18 +1753,6 @@ async fn session_validate_plan_and_run_use_loaded_project_document_patch_library
         run["report"]["frames"][0]["executedNodes"][0]["status"],
         "simulated"
     );
-}
-
-#[test]
-fn registry_from_nodes_reports_duplicate_definitions() {
-    let nodes: Vec<NodeDefinition> = serde_json::from_value(sample_project()["nodes"].clone())
-        .expect("sample project nodes should parse");
-    let duplicate_nodes = vec![nodes[0].clone(), nodes[0].clone()];
-
-    let issues =
-        registry_from_nodes(duplicate_nodes).expect_err("duplicate definitions should fail");
-
-    assert!(issues[0].message.contains("duplicate node definition"));
 }
 
 #[tokio::test]

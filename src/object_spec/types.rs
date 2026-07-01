@@ -143,7 +143,6 @@ pub(super) fn core_implementation(object_id: impl Into<String>) -> ObjectImpleme
     ObjectImplementationRefCurrent {
         provider: ObjectProviderRefCurrent::Core,
         object_id: object_id.into(),
-        version: Some(super::CURRENT_KIND_VERSION.to_owned()),
         interface_digest: None,
     }
 }

@@ -9,17 +9,16 @@ use skenion_contracts::{InterfaceIncidentEdgePolicyV01, NodeCatalogSnapshotV01};
 use crate::{
     CanvasNodeView, ControlState, DummyExecutionReport, EdgeSpecCurrent, ExecutionPlan,
     GraphDocument, GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent, GraphTargetRef,
-    IdConflictPolicy, IdRemapResult, NodeDefinitionCurrent, NodeRegistry,
-    PackageRegistryListResponseV01, PasteGraphFragmentRequest, PasteGraphFragmentResponse,
-    PastePlacement, PatchPath, PreviewContext, ProjectDocumentCurrent, ProjectRequestCurrent,
-    RuntimeCollaborationChange, RuntimeIssue, RuntimeOperationEnvelope, RuntimeOperationIssue,
-    ViewState, build_execution_plan_request_current,
+    IdConflictPolicy, IdRemapResult, NodeDefinitionCurrent, PackageRegistryListResponseV01,
+    PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
+    PreviewContext, ProjectDocumentCurrent, ProjectRequestCurrent, RuntimeCollaborationChange,
+    RuntimeIssue, RuntimeOperationEnvelope, RuntimeOperationIssue, ViewState,
+    build_execution_plan_request_current,
     project_current::{
         is_payload_identity_node_kind_current, next_graph_revision_current,
         repair_project_load_edges_current,
     },
     project_document_validation_issues_current, run_dummy_execution,
-    server::registry_from_nodes,
     validate_project_request_current,
 };
 
@@ -62,14 +61,11 @@ use paste::{
     paste_graph_fragment_into_project_current, remap_edge_current,
     runtime_issue_to_operation_issue,
 };
-use planning::{build_session_execution_plan, unresolved_object_issues_current};
+use planning::unresolved_object_issues_current;
 pub(crate) use projection::{lower_edge_for_execution, lower_graph_node_for_execution};
+use projection::{lower_graph_for_execution, normalized_node_definitions_current};
 #[cfg(test)]
-use projection::{lower_execution_model_for_execution, lower_port_for_execution, remap_edge};
-use projection::{
-    lower_graph_for_execution, lower_node_definition_for_execution,
-    normalized_node_definitions_current,
-};
+use projection::{lower_port_for_execution, remap_edge};
 pub use types::{
     RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
     RuntimePatchResponse, RuntimeSessionResponse, RuntimeSessionSnapshot, RuntimeViewPatch,
@@ -78,17 +74,14 @@ pub use types::{
 #[cfg(test)]
 use view_state::apply_view_patch_to_view_state;
 use view_state::{
-    apply_view_patch_to_view_state_current, reconcile_view_state_with_execution_graph,
-    reconcile_view_state_with_graph_current, runtime_owned_view_state, target_supports_view_state,
-    unsupported_patch_view_change_issue,
+    apply_view_patch_to_view_state_current, reconcile_view_state_with_graph_current,
+    runtime_owned_view_state, target_supports_view_state, unsupported_patch_view_change_issue,
 };
 
 #[derive(Debug)]
 pub struct RuntimeSession {
     project: Option<ProjectDocumentCurrent>,
     nodes_current: Vec<NodeDefinitionCurrent>,
-    graph: Option<GraphDocument>,
-    registry: Option<NodeRegistry>,
     plan: Option<ExecutionPlan>,
     view_state: Option<ViewState>,
     control_state: ControlState,
@@ -110,8 +103,6 @@ impl Default for RuntimeSession {
         Self {
             project: None,
             nodes_current: Vec::new(),
-            graph: None,
-            registry: None,
             plan: None,
             view_state: None,
             control_state: ControlState::default(),
@@ -153,7 +144,7 @@ impl RuntimeSession {
     }
 
     pub(crate) fn preview_context(&self) -> Result<PreviewContext, Vec<RuntimeIssue>> {
-        let Some(graph) = &self.graph else {
+        let Some(graph) = self.execution_graph() else {
             return Err(vec![RuntimeIssue::error(
                 "no project loaded in runtime session",
             )]);
@@ -169,10 +160,16 @@ impl RuntimeSession {
             graph_revision: graph.revision.clone(),
             session_revision: self.revision,
             control_revision: self.control_revision,
-            graph: graph.clone(),
+            graph,
             plan: plan.clone(),
             control_state: self.control_state.clone(),
         })
+    }
+
+    fn execution_graph(&self) -> Option<GraphDocument> {
+        self.project
+            .as_ref()
+            .map(|project| lower_graph_for_execution(&project.graph))
     }
 
     pub fn load_project_current(
@@ -233,20 +230,9 @@ impl RuntimeSession {
         issues.extend(unresolved_object_issues_current(&document.graph));
 
         let graph = lower_graph_for_execution(&document.graph);
-        let lowered_nodes = request
-            .nodes
-            .iter()
-            .map(lower_node_definition_for_execution)
-            .collect::<Vec<_>>();
-        let registry = match registry_from_nodes(lowered_nodes) {
-            Ok(registry) => registry,
-            Err(issues) => return self.response(false, issues, None),
-        };
         let control_state = ControlState::from_graph(&graph);
         self.project = Some(document);
         self.nodes_current = nodes_current;
-        self.graph = Some(graph);
-        self.registry = Some(registry);
         self.plan = Some(plan);
         self.view_state = Some(view_state);
         self.control_state = control_state;
@@ -314,7 +300,7 @@ impl RuntimeSession {
     }
 
     pub fn run_current(&mut self, frames: usize) -> RuntimeSessionResponse {
-        if self.loaded_project().is_none() {
+        if self.project.is_none() {
             let issues = vec![RuntimeIssue::error("no project loaded in runtime session")];
             self.issues = issues.clone();
             return self.response(false, issues, None);
@@ -356,8 +342,6 @@ impl RuntimeSession {
     pub fn clear(&mut self) -> RuntimeSessionResponse {
         self.project = None;
         self.nodes_current = Vec::new();
-        self.graph = None;
-        self.registry = None;
         self.plan = None;
         self.view_state = None;
         self.control_state = ControlState::default();
@@ -393,7 +377,9 @@ impl RuntimeSession {
 
     #[cfg(test)]
     pub(crate) fn graph(&self) -> Option<GraphDocument> {
-        self.graph.clone()
+        self.project
+            .as_ref()
+            .map(|project| lower_graph_for_execution(&project.graph))
     }
 
     pub fn project_document_current(&self) -> Option<ProjectDocumentCurrent> {
@@ -436,20 +422,13 @@ impl RuntimeSession {
         kind: RuntimeHistoryEntryKind,
         subject_event_id: Option<String>,
     ) -> RuntimePatchResponse {
-        let (graph, registry, current_graph) = match (
-            self.graph.clone(),
-            self.registry.clone(),
-            self.project.as_ref().map(|project| project.graph.clone()),
-        ) {
-            (Some(graph), Some(registry), Some(current_graph)) => (graph, registry, current_graph),
-            _ => {
-                return self.patch_response(
-                    false,
-                    false,
-                    false,
-                    vec![RuntimeIssue::error("no project loaded in runtime session")],
-                );
-            }
+        let Some(current_graph) = self.project.as_ref().map(|project| project.graph.clone()) else {
+            return self.patch_response(
+                false,
+                false,
+                false,
+                vec![RuntimeIssue::error("no project loaded in runtime session")],
+            );
         };
 
         if mutation.graph_patch.is_none() && mutation.view_patch.is_none() {
@@ -476,7 +455,6 @@ impl RuntimeSession {
             );
         }
 
-        let next_graph = graph.clone();
         let next_current_graph = current_graph.clone();
 
         if let Some(view_patch) = &mutation.view_patch
@@ -523,17 +501,27 @@ impl RuntimeSession {
             return self.patch_response(true, false, false, Vec::new());
         }
 
-        let plan =
-            match build_session_execution_plan(&next_graph, &registry, "session-mutation-plan") {
-                Ok(plan) => plan,
-                Err(issues) => {
-                    self.plan = None;
-                    self.issues = issues.clone();
-                    return self.patch_response(false, false, false, issues);
-                }
-            };
-        let issues = Vec::new();
-        let control_state = ControlState::from_graph(&next_graph);
+        let request = ProjectRequestCurrent {
+            document: self.project.clone(),
+            graph: next_current_graph.clone(),
+            nodes: self.nodes_current.clone(),
+            patch_library: self
+                .project
+                .as_ref()
+                .map(|project| project.patch_library.clone())
+                .unwrap_or_default(),
+            view_state: Some(next_view_state.clone()),
+        };
+        let (plan, issues) = match build_execution_plan_request_current(&request) {
+            Ok(result) => result,
+            Err(issues) => {
+                self.plan = None;
+                self.issues = issues.clone();
+                return self.patch_response(false, false, false, issues);
+            }
+        };
+        let control_state =
+            ControlState::from_graph(&lower_graph_for_execution(&next_current_graph));
         let mut inverse_mutation = RuntimeMutationRequest {
             graph_patch: None,
             view_patch: inverse_view_patch,
@@ -546,12 +534,12 @@ impl RuntimeSession {
         };
         normalize_mutation_base_revisions(
             &mut mutation,
-            graph.revision.clone(),
+            current_graph.revision.clone(),
             self.view_revision,
         );
         normalize_mutation_base_revisions(
             &mut inverse_mutation,
-            next_graph.revision.clone(),
+            next_current_graph.revision.clone(),
             self.view_revision + 1,
         );
         let history_entry = self.create_runtime_history_entry(
@@ -567,8 +555,6 @@ impl RuntimeSession {
             inverse_mutation,
         };
 
-        self.graph = Some(next_graph.clone());
-        self.registry = Some(registry);
         self.plan = Some(plan);
         self.view_state = Some(next_view_state);
         if let (Some(project), Some(view_state)) = (self.project.as_mut(), self.view_state.as_ref())
@@ -612,15 +598,6 @@ impl RuntimeSession {
         };
         issues.extend(unresolved_object_issues_current(&after.graph));
         let graph = lower_graph_for_execution(&after.graph);
-        let registry = match registry_from_nodes(
-            self.nodes_current
-                .iter()
-                .map(lower_node_definition_for_execution)
-                .collect(),
-        ) {
-            Ok(registry) => registry,
-            Err(issues) => return self.patch_response(false, false, false, issues),
-        };
         let inverse_mutation = RuntimeMutationRequest {
             graph_patch: None,
             view_patch: None,
@@ -648,17 +625,11 @@ impl RuntimeSession {
             inverse_mutation,
         };
 
+        let next_view_state = after.view_state.clone();
         self.project = Some(after);
         self.refresh_node_catalog_cache();
-        self.graph = Some(graph.clone());
-        self.registry = Some(registry);
         self.plan = Some(plan);
-        self.view_state = Some(
-            self.project
-                .as_ref()
-                .map(|project| project.view_state.clone())
-                .unwrap_or_else(|| reconcile_view_state_with_execution_graph(&graph, None)),
-        );
+        self.view_state = Some(next_view_state);
         self.view_revision = next_view_revision;
         self.control_state = ControlState::from_graph(&graph);
         self.control_revision = 0;
@@ -687,10 +658,6 @@ impl RuntimeSession {
             history: self.history(),
             issues,
         }
-    }
-
-    fn loaded_project(&self) -> Option<(&GraphDocument, &NodeRegistry)> {
-        Some((self.graph.as_ref()?, self.registry.as_ref()?))
     }
 
     fn apply_history_entry(
@@ -804,17 +771,6 @@ impl RuntimeSession {
         };
         issues.extend(unresolved_object_issues_current(&project.graph));
         let graph = lower_graph_for_execution(&project.graph);
-        let registry = match registry_from_nodes(
-            self.nodes_current
-                .iter()
-                .map(lower_node_definition_for_execution)
-                .collect(),
-        ) {
-            Ok(registry) => registry,
-            Err(issues) => {
-                return self.patch_response(false, false, false, issues);
-            }
-        };
         let history_entry = self.create_runtime_history_entry(
             mutation,
             mutation_to_record,
@@ -822,17 +778,11 @@ impl RuntimeSession {
             subject_event_id,
         );
 
+        let next_view_state = project.view_state.clone();
         self.project = Some(project);
         self.refresh_node_catalog_cache();
-        self.graph = Some(graph.clone());
-        self.registry = Some(registry);
         self.plan = Some(plan);
-        self.view_state = Some(
-            self.project
-                .as_ref()
-                .map(|project| project.view_state.clone())
-                .unwrap_or_else(|| reconcile_view_state_with_execution_graph(&graph, None)),
-        );
+        self.view_state = Some(next_view_state);
         self.view_revision = view_revision;
         self.control_state = ControlState::from_graph(&graph);
         self.control_revision = 0;
@@ -867,10 +817,10 @@ impl RuntimeSession {
     }
 
     fn rebase_mutation_to_current_revisions(&self, mutation: &mut RuntimeMutationRequest) {
-        if let (Some(graph), Some(graph_patch)) =
-            (self.graph.as_ref(), mutation.graph_patch.as_mut())
+        if let (Some(project), Some(graph_patch)) =
+            (self.project.as_ref(), mutation.graph_patch.as_mut())
         {
-            graph_patch.base_revision = graph.revision.clone();
+            graph_patch.base_revision = project.graph.revision.clone();
         }
         if let Some(view_patch) = mutation.view_patch.as_mut() {
             view_patch.base_view_revision = self.view_revision;

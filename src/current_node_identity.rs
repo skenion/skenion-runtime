@@ -1,17 +1,9 @@
 use crate::{GraphNodeCurrent, ObjectImplementationRefCurrent, ObjectProviderRefCurrent};
 
-pub(crate) const CURRENT_OBJECT_VERSION: &str = "0.1.0";
-
 pub(crate) fn graph_node_executable_kind(node: &GraphNodeCurrent) -> Option<String> {
     node.implementation
         .as_ref()
         .map(implementation_executable_kind)
-}
-
-pub(crate) fn graph_node_executable_kind_version(node: &GraphNodeCurrent) -> Option<String> {
-    node.implementation
-        .as_ref()
-        .map(implementation_executable_kind_version)
 }
 
 pub(crate) fn graph_node_object_id(node: &GraphNodeCurrent) -> Option<&str> {
@@ -32,15 +24,6 @@ pub(crate) fn implementation_executable_kind(
         }
         ObjectProviderRefCurrent::Package { .. } => implementation.object_id.clone(),
     }
-}
-
-pub(crate) fn implementation_executable_kind_version(
-    implementation: &ObjectImplementationRefCurrent,
-) -> String {
-    implementation
-        .version
-        .clone()
-        .unwrap_or_else(|| CURRENT_OBJECT_VERSION.to_owned())
 }
 
 pub(crate) fn core_object_id_to_executable_kind(object_id: &str) -> String {

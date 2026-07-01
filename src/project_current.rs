@@ -1,12 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::current_node_identity::{
-    CURRENT_OBJECT_VERSION, graph_node_executable_kind, graph_node_executable_kind_version,
-    graph_node_object_id,
-};
+use crate::current_node_identity::{graph_node_executable_kind, graph_node_object_id};
 use crate::object_spec::{
     ObjectRegistry, PROJECT_PATCH_OBJECT_KIND_PREFIX, is_payload_identity_kind,
-    resolve_object_spec_v01,
+    object_spec_node_definition_v01, resolve_object_spec_v01,
 };
 use crate::{
     CycleValidationCurrent, EdgeEndpointCurrent, EdgeSpecCurrent, ExecutionGroup, ExecutionModel,
@@ -215,20 +212,36 @@ fn normalized_node_definitions_current(
     patch_library: &[PatchDefinitionCurrent],
 ) -> Vec<NodeDefinitionCurrent> {
     let mut nodes = explicit_nodes.to_vec();
+    let explicit_ids = explicit_nodes
+        .iter()
+        .map(|definition| definition.id.clone())
+        .collect::<HashSet<_>>();
     let mut seen = nodes
         .iter()
-        .map(|definition| (definition.id.clone(), definition.version.clone()))
+        .map(node_definition_shape_key_current)
         .collect::<HashSet<_>>();
 
     for definition in ObjectRegistry::for_patch_library(patch_library).node_definition_projection()
     {
-        let key = (definition.id.clone(), definition.version.clone());
+        if explicit_ids.contains(&definition.id) {
+            continue;
+        }
+        let key = node_definition_shape_key_current(&definition);
         if seen.insert(key) {
             nodes.push(definition);
         }
     }
 
     nodes
+}
+
+fn node_definition_shape_key_current(definition: &NodeDefinitionCurrent) -> String {
+    serde_json::to_string(&json!({
+        "id": definition.id,
+        "ports": definition.ports,
+        "execution": definition.execution,
+    }))
+    .expect("node definition shape key should serialize")
 }
 
 fn validate_patch_library_current(
@@ -854,7 +867,8 @@ pub fn validate_project_current(
     nodes: &[NodeDefinitionCurrent],
 ) -> CurrentValidation {
     let mut issues = Vec::new();
-    let mut registry: HashMap<(&str, &str), &NodeDefinitionCurrent> = HashMap::new();
+    issues.extend(conflicting_node_definition_issues_current(nodes));
+    let explicit_definitions = explicit_definitions_by_implementation_current(nodes);
 
     for definition in nodes {
         if is_payload_identity_node_kind_current(&definition.id) {
@@ -871,10 +885,6 @@ pub fn validate_project_current(
                 )
             }));
         }
-        registry.insert(
-            (definition.id.as_str(), definition.version.as_str()),
-            definition,
-        );
     }
 
     let graph_analysis = skenion_contracts::analyze_graph_document_v01(graph);
@@ -916,27 +926,21 @@ pub fn validate_project_current(
         if node_has_non_resolved_object_resolution(node) {
             continue;
         }
-        let kind = graph_node_executable_kind(node);
-        let kind_version = graph_node_executable_kind_version(node);
-        match kind
-            .as_deref()
-            .zip(kind_version.as_deref())
-            .and_then(|key| registry.get(&key))
-        {
-            Some(definition) => validate_node_snapshot_current(node, definition, &mut issues),
+        match node_definition_for_validation_current(node, &explicit_definitions) {
+            Some(definition) => validate_node_snapshot_current(node, &definition, &mut issues),
             None => issues.push(RuntimeIssue::structured_error(
                 "node-definition.missing",
                 format!(
-                    "missing node definition: {}@{}",
-                    kind.as_deref().unwrap_or("<missing-implementation>"),
-                    kind_version.as_deref().unwrap_or(CURRENT_OBJECT_VERSION)
+                    "missing node definition: {}",
+                    graph_node_executable_kind(node)
+                        .unwrap_or_else(|| "<missing-implementation>".to_owned())
                 ),
                 json!({
                     "surface": "node-definition",
                     "nodeId": node.id,
                     "implementation": node.implementation,
-                    "kind": kind,
-                    "kindVersion": kind_version,
+                    "kind": graph_node_executable_kind(node),
+                    "objectSpec": node.object_spec,
                 }),
             )),
         }
@@ -1132,7 +1136,7 @@ fn object_spec_issues_current(
     if issues.is_empty()
         && let Some(resolved_implementation) = resolution.implementation.as_ref()
         && let Some(node_implementation) = node.implementation.as_ref()
-        && resolved_implementation != node_implementation
+        && !same_object_implementation_current(resolved_implementation, node_implementation)
         && !is_subpatch_node(node)
     {
         issues.push(RuntimeIssue::structured_error(
@@ -1157,6 +1161,88 @@ fn object_spec_issues_current(
     }
 
     issues
+}
+
+fn same_object_implementation_current(
+    left: &crate::ObjectImplementationRefCurrent,
+    right: &crate::ObjectImplementationRefCurrent,
+) -> bool {
+    left.provider == right.provider && left.object_id == right.object_id
+}
+
+fn conflicting_node_definition_issues_current(
+    nodes: &[NodeDefinitionCurrent],
+) -> Vec<RuntimeIssue> {
+    let mut seen_shapes = HashMap::<&str, String>::new();
+    let mut reported = HashSet::<&str>::new();
+    let mut issues = Vec::new();
+
+    for definition in nodes {
+        let shape = node_definition_shape_key_current(definition);
+        match seen_shapes.get(definition.id.as_str()) {
+            Some(seen) if seen != &shape && reported.insert(definition.id.as_str()) => {
+                issues.push(RuntimeIssue::structured_error(
+                    "node-definition.duplicate",
+                    format!(
+                        "duplicate node definition with conflicting shape: {}",
+                        definition.id
+                    ),
+                    json!({
+                        "surface": "node-definition",
+                        "nodeDefinitionId": definition.id,
+                    }),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                seen_shapes.insert(definition.id.as_str(), shape);
+            }
+        }
+    }
+
+    issues
+}
+
+fn explicit_definitions_by_implementation_current(
+    nodes: &[NodeDefinitionCurrent],
+) -> HashMap<String, Option<&NodeDefinitionCurrent>> {
+    let mut definitions = HashMap::new();
+    for definition in nodes {
+        definitions
+            .entry(definition.id.clone())
+            .and_modify(|existing: &mut Option<&NodeDefinitionCurrent>| {
+                let is_ambiguous = existing
+                    .as_ref()
+                    .is_some_and(|current| current.ports != definition.ports);
+                if is_ambiguous {
+                    *existing = None;
+                }
+            })
+            .or_insert(Some(definition));
+    }
+    definitions
+}
+
+fn node_definition_for_validation_current(
+    node: &GraphNodeCurrent,
+    explicit_definitions: &HashMap<String, Option<&NodeDefinitionCurrent>>,
+) -> Option<NodeDefinitionCurrent> {
+    if let Some(definition) = object_spec_node_definition_for_current_node(node) {
+        return Some(definition);
+    }
+    let kind = graph_node_executable_kind(node)?;
+    explicit_definitions.get(&kind).copied().flatten().cloned()
+}
+
+fn object_spec_node_definition_for_current_node(
+    node: &GraphNodeCurrent,
+) -> Option<NodeDefinitionCurrent> {
+    let object_spec = node_object_spec(node)?;
+    let resolution = resolve_object_spec_v01(&object_spec);
+    if !resolution.ok() {
+        return None;
+    }
+    object_spec_node_definition_v01(&resolution)
 }
 
 fn payload_identity_node_kind_issue_current(
@@ -1381,15 +1467,7 @@ pub fn build_execution_plan_current(
     nodes: &[NodeDefinitionCurrent],
 ) -> Result<(crate::ExecutionPlan, Vec<RuntimeIssue>), Vec<RuntimeIssue>> {
     let (issues, analysis) = validate_project_current(graph, nodes)?;
-    let registry = nodes
-        .iter()
-        .map(|definition| {
-            (
-                (definition.id.as_str(), definition.version.as_str()),
-                definition,
-            )
-        })
-        .collect::<HashMap<_, _>>();
+    let explicit_definitions = explicit_definitions_by_implementation_current(nodes);
     let ordered_node_ids = topological_order_current(graph);
     let graph_nodes = graph
         .nodes
@@ -1406,19 +1484,15 @@ pub fn build_execution_plan_current(
         if node_has_non_resolved_object_resolution(node) {
             continue;
         }
-        let Some(kind) = graph_node_executable_kind(node) else {
+        let Some(definition) = node_definition_for_validation_current(node, &explicit_definitions)
+        else {
             continue;
         };
-        let kind_version = graph_node_executable_kind_version(node)
-            .unwrap_or_else(|| CURRENT_OBJECT_VERSION.to_owned());
-        let definition = registry
-            .get(&(kind.as_str(), kind_version.as_str()))
-            .expect("current 0.1 validation should resolve definitions");
         let execution_model = map_execution_model_current(&definition.execution.model);
         plan_nodes.push(PlanNode {
             node_id: node.id.clone(),
-            kind,
-            kind_version,
+            kind: definition.id.clone(),
+            kind_version: definition.version.clone(),
             execution_model: execution_model.clone(),
             order,
         });
@@ -1662,7 +1736,6 @@ fn node_snapshot_issue(
             "nodeId": node.id,
             "implementation": node.implementation,
             "kind": graph_node_executable_kind(node),
-            "kindVersion": graph_node_executable_kind_version(node),
             "portId": port_id,
         }),
     )

@@ -2171,7 +2171,7 @@ async fn realtime_graph_node_resolve_uses_runtime_registry_candidates() {
 
     for (index, (object_spec, expected_provider, expected_object_id, expected_param)) in [
         ("* .3", "core", "operator.mul", Some(json!(0.3))),
-        ("* 3", "core", "operator.mul", Some(json!(3.0))),
+        ("* 3", "core", "operator.mul", Some(json!(3))),
         ("+", "core", "operator.add", Some(json!(0.0))),
         ("*", "core", "operator.mul", Some(json!(0.0))),
         ("osc~", "core", "audio.osc", Some(json!(440.0))),
@@ -3391,8 +3391,7 @@ fn core_node_current_json(
         "id": node_id,
         "implementation": {
             "provider": { "kind": "core" },
-            "objectId": object_id,
-            "version": "0.1.0"
+            "objectId": object_id
         },
         "objectSpec": object_spec,
         "objectResolution": {

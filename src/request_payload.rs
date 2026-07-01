@@ -161,8 +161,14 @@ pub(crate) fn decode_run_project_payload(
 }
 
 fn decode_runtime_session_load_request_current(
-    value: Value,
+    mut value: Value,
 ) -> Result<(RuntimeSessionLoadRequestCurrent, Vec<RuntimeIssue>), Vec<RuntimeIssue>> {
+    let mut repair_issues = if let Some(project) = value.get_mut("project") {
+        drop_obsolete_object_implementation_versions_current(project)
+    } else {
+        Vec::new()
+    };
+
     if let Some(project) = value.get("project") {
         reject_top_level_nodes_current(project)?;
         let schema_issues = project_document_payload_schema_issues(project);
@@ -172,13 +178,97 @@ fn decode_runtime_session_load_request_current(
     }
     let mut request = serde_json::from_value::<RuntimeSessionLoadRequestCurrent>(value)
         .map_err(invalid_runtime_session_load_payload)?;
-    let repair_issues = repair_project_load_edges_current(&mut request.project);
+    repair_issues.extend(repair_project_load_edges_current(&mut request.project));
     if let Err(report) = skenion_contracts::validate_runtime_session_load_request_v01(&request) {
         return Err(runtime_session_load_validation_issues_current(
             &request, &report,
         ));
     }
     Ok((request, repair_issues))
+}
+
+fn drop_obsolete_object_implementation_versions_current(value: &mut Value) -> Vec<RuntimeIssue> {
+    let mut dropped = Vec::new();
+    drop_obsolete_object_implementation_versions_at_current(value, "$", &mut dropped);
+    dropped
+        .into_iter()
+        .map(|drop| {
+            RuntimeIssue::structured_warning(
+                "project.load.obsolete-field-dropped",
+                format!(
+                    "Runtime dropped obsolete object implementation version at {}.",
+                    drop.path
+                ),
+                json!({
+                    "surface": "project-load",
+                    "field": "implementation.version",
+                    "path": drop.path,
+                    "objectId": drop.object_id,
+                }),
+            )
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct ObsoleteImplementationVersionDrop {
+    path: String,
+    object_id: Option<String>,
+}
+
+fn drop_obsolete_object_implementation_versions_at_current(
+    value: &mut Value,
+    path: &str,
+    dropped: &mut Vec<ObsoleteImplementationVersionDrop>,
+) {
+    match value {
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                drop_obsolete_object_implementation_versions_at_current(
+                    item,
+                    &format!("{path}[{index}]"),
+                    dropped,
+                );
+            }
+        }
+        Value::Object(object) => {
+            if is_object_implementation_ref_value_current(object)
+                && object.remove("version").is_some()
+            {
+                dropped.push(ObsoleteImplementationVersionDrop {
+                    path: format!("{path}.version"),
+                    object_id: object
+                        .get("objectId")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                });
+            }
+
+            for (key, child) in object.iter_mut() {
+                drop_obsolete_object_implementation_versions_at_current(
+                    child,
+                    &format!("{path}.{}", load_payload_path_member_current(key)),
+                    dropped,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_object_implementation_ref_value_current(object: &serde_json::Map<String, Value>) -> bool {
+    object.get("provider").is_some() && object.get("objectId").and_then(Value::as_str).is_some()
+}
+
+fn load_payload_path_member_current(member: &str) -> String {
+    if member
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        member.to_owned()
+    } else {
+        serde_json::to_string(member).expect("member name should serialize")
+    }
 }
 
 fn runtime_session_load_request_schema_version(value: &Value) -> Option<String> {

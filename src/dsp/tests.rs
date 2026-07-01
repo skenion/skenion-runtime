@@ -1454,8 +1454,7 @@ fn current_core_node_json(
       "id": id,
       "implementation": {
         "provider": { "kind": "core" },
-        "objectId": object_id,
-        "version": "0.1.0"
+        "objectId": object_id
       },
       "objectSpec": object_id,
       "objectResolution": {

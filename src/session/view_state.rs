@@ -1,6 +1,8 @@
+#[cfg(test)]
+use crate::GraphDocument;
 use crate::{
-    CanvasNodeView, CanvasViewState, GraphDocument, GraphDocumentCurrent, GraphTargetRef,
-    PatchPath, RuntimeIssue, RuntimeViewPatch, RuntimeViewPatchOperation, ViewState,
+    CanvasNodeView, CanvasViewState, GraphDocumentCurrent, GraphTargetRef, PatchPath, RuntimeIssue,
+    RuntimeViewPatch, RuntimeViewPatchOperation, ViewState,
 };
 
 pub(super) fn reconcile_view_state_with_graph_current(
@@ -24,43 +26,7 @@ pub(super) fn reconcile_view_state_with_graph_current(
     reconciled
 }
 
-pub(super) fn reconcile_view_state_with_execution_graph(
-    graph: &GraphDocument,
-    view_state: Option<ViewState>,
-) -> ViewState {
-    let mut reconciled = default_view_state_for_execution_graph(graph);
-    let Some(view_state) = view_state else {
-        return reconciled;
-    };
-
-    for node in &graph.nodes {
-        if let Some(node_view) = view_state.canvas.nodes.get(&node.id) {
-            reconciled
-                .canvas
-                .nodes
-                .insert(node.id.clone(), node_view.clone());
-        }
-    }
-
-    reconciled
-}
-
 fn default_view_state_for_graph_current(graph: &GraphDocumentCurrent) -> ViewState {
-    ViewState {
-        schema: "skenion.view-state".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        canvas: CanvasViewState {
-            nodes: graph
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(index, node)| (node.id.clone(), default_canvas_node_view_for_index(index)))
-                .collect(),
-        },
-    }
-}
-
-fn default_view_state_for_execution_graph(graph: &GraphDocument) -> ViewState {
     ViewState {
         schema: "skenion.view-state".to_owned(),
         schema_version: "0.1.0".to_owned(),

@@ -15,11 +15,10 @@ use axum::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    GeneratedShaderResponse, IssueSeverity, NodeDefinition, NodeRegistry,
-    PackageRegistryListResponseV01, PreviewDocument, ProjectRequestCurrent,
-    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
-    RuntimeExtensionListResponse, RuntimeIoDeviceListResponse, RuntimeIssue,
-    RuntimePreviewStartRequest, RuntimeSessionEventKind, RuntimeSessionInfoResponse,
+    GeneratedShaderResponse, IssueSeverity, PackageRegistryListResponseV01, PreviewDocument,
+    ProjectRequestCurrent, RuntimeControlReadRequest, RuntimeControlReadResponse,
+    RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeIoDeviceListResponse,
+    RuntimeIssue, RuntimePreviewStartRequest, RuntimeSessionEventKind, RuntimeSessionInfoResponse,
     RuntimeSessionResponse, SessionRunRequest, ShaderIssue, ShaderIssuePhase, ShaderIssueSource,
     asset_store::{
         RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse, store_asset,
@@ -515,21 +514,48 @@ fn record_session_load_repair_log(
                 .map(ToOwned::to_owned)
         })
         .collect::<Vec<_>>();
-    if dropped_edge_ids.is_empty() {
+    let obsolete_implementation_version_paths = response
+        .issues
+        .iter()
+        .filter(|issue| issue.code.as_deref() == Some("project.load.obsolete-field-dropped"))
+        .filter_map(|issue| {
+            issue
+                .details
+                .as_ref()
+                .and_then(|details| details.get("path"))
+                .and_then(|path| path.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Vec<_>>();
+    if dropped_edge_ids.is_empty() && obsolete_implementation_version_paths.is_empty() {
         return;
     }
 
+    let message = match (
+        dropped_edge_ids.len(),
+        obsolete_implementation_version_paths.len(),
+    ) {
+        (edge_count, 0) => format!(
+            "Runtime loaded session {} after dropping {edge_count} incompatible edge(s).",
+            record.id
+        ),
+        (0, field_count) => format!(
+            "Runtime loaded session {} after dropping {field_count} obsolete object implementation version field(s).",
+            record.id
+        ),
+        (edge_count, field_count) => format!(
+            "Runtime loaded session {} after dropping {edge_count} incompatible edge(s) and {field_count} obsolete object implementation version field(s).",
+            record.id
+        ),
+    };
     state.logs.record_event(
         IssueSeverity::Warning,
         Some("project.load.repaired".to_owned()),
-        format!(
-            "Runtime loaded session {} after dropping {} incompatible edge(s).",
-            record.id,
-            dropped_edge_ids.len()
-        ),
+        message,
         Some(serde_json::json!({
             "sessionId": record.id,
             "droppedEdgeIds": dropped_edge_ids,
+            "obsoleteImplementationVersionPaths": obsolete_implementation_version_paths,
             "graphId": response.snapshot.graph_id(),
             "graphRevision": response.snapshot.graph_revision(),
             "sessionRevision": response.snapshot.session_revision,
@@ -943,25 +969,6 @@ async fn get_asset(
         },
     };
     asset_get_json(&state, response)
-}
-
-pub(crate) fn registry_from_nodes(
-    nodes: Vec<NodeDefinition>,
-) -> Result<NodeRegistry, Vec<RuntimeIssue>> {
-    let mut registry = NodeRegistry::new();
-    let mut issues = Vec::new();
-
-    for definition in nodes {
-        if let Err(error) = registry.insert(definition) {
-            issues.push(RuntimeIssue::error(error.to_string()));
-        }
-    }
-
-    if issues.is_empty() {
-        Ok(registry)
-    } else {
-        Err(issues)
-    }
 }
 
 fn preview_start_request(body: &[u8]) -> Result<RuntimePreviewStartRequest, RuntimeIssue> {

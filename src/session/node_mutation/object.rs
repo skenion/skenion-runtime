@@ -68,8 +68,14 @@ impl RuntimeSession {
         if self
             .nodes_current
             .iter()
-            .any(|existing| existing.id == definition.id && existing.version == definition.version)
+            .any(|existing| existing.id == definition.id)
         {
+            return;
+        }
+        if self.nodes_current.iter().any(|existing| {
+            node_definition_shape_key_current(existing)
+                == node_definition_shape_key_current(&definition)
+        }) {
             return;
         }
         self.nodes_current.push(definition);
@@ -390,4 +396,13 @@ impl RuntimeSession {
         }
         (response, invalid_incident_edge_ids)
     }
+}
+
+fn node_definition_shape_key_current(definition: &NodeDefinitionCurrent) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "id": definition.id,
+        "ports": definition.ports,
+        "execution": definition.execution,
+    }))
+    .expect("node definition shape key should serialize")
 }

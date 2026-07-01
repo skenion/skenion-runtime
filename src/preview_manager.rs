@@ -1334,8 +1334,7 @@ fn fs_main() -> @location(0) vec4<f32> {
                     "id": node.id.clone(),
                     "implementation": {
                         "provider": { "kind": "core" },
-                        "objectId": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str()),
-                        "version": node.kind_version.clone()
+                        "objectId": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str())
                     },
                     "objectSpec": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str()),
                     "objectResolution": {

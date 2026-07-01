@@ -16,13 +16,6 @@ fn assert_kind(resolution: &ObjectSpecResolution, kind: &str) {
             .as_deref(),
         Some(kind)
     );
-    assert_eq!(
-        resolution
-            .implementation
-            .as_ref()
-            .and_then(|implementation| implementation.version.as_deref()),
-        Some("0.1.0")
-    );
 }
 
 fn assert_issue(resolution: &ObjectSpecResolution, code: &str) {
@@ -38,7 +31,6 @@ fn test_implementation(object_id: &str) -> ObjectImplementationRefV01 {
             version: Some(CURRENT_KIND_VERSION.to_owned()),
         },
         object_id: object_id.to_owned(),
-        version: Some(CURRENT_KIND_VERSION.to_owned()),
         interface_digest: None,
     }
 }
@@ -151,8 +143,7 @@ fn patch_definition(id: &str) -> PatchDefinitionCurrent {
                     "id": "patch_in",
                     "implementation": {
                         "provider": { "kind": "core" },
-                        "objectId": "inlet",
-                        "version": "0.1.0"
+                        "objectId": "inlet"
                     },
                     "params": { "portId": "value", "label": "Value" },
                     "ports": [
@@ -168,8 +159,7 @@ fn patch_definition(id: &str) -> PatchDefinitionCurrent {
                     "id": "patch_out",
                     "implementation": {
                         "provider": { "kind": "core" },
-                        "objectId": "outlet",
-                        "version": "0.1.0"
+                        "objectId": "outlet"
                     },
                     "params": { "portId": "result", "label": "Result" },
                     "ports": [
@@ -205,22 +195,40 @@ fn resolves_runtime_control_aliases_and_validates_args() {
     assert_eq!(invalid.issues[0].code, "object-spec.invalid-arg-type");
 
     for (input, kind, param, value) in [
-        ("- -2", "object.core.operator.sub", "right", json!(-2.0)),
-        ("/ 4", "object.core.operator.div", "right", json!(4.0)),
-        ("* 3", "object.core.operator.mul", "right", json!(3.0)),
-        ("pow 2", "object.core.operator.pow", "right", json!(2.0)),
-        ("max 8", "object.core.operator.max", "right", json!(8.0)),
-        ("min 1", "object.core.operator.min", "right", json!(1.0)),
+        ("- -2", "object.core.operator.sub", "right", json!(-2)),
+        ("/ 4", "object.core.operator.div", "right", json!(4)),
+        ("* 3", "object.core.operator.mul", "right", json!(3)),
+        ("pow 2", "object.core.operator.pow", "right", json!(2)),
+        ("max 8", "object.core.operator.max", "right", json!(8)),
+        ("min 1", "object.core.operator.min", "right", json!(1)),
     ] {
         let resolution = resolve_object_spec_v01(input);
         assert_kind(&resolution, kind);
         assert_eq!(resolution.params[param], value);
         assert_eq!(resolution.instance_ports.len(), 3);
+        assert_eq!(resolution.instance_ports[0].port_type, "value.core.message");
+        let accepts = resolution.instance_ports[0]
+            .accepts
+            .as_ref()
+            .expect("operator hot inlet should publish numeric accepts");
+        assert!(accepts.contains(&"value.core.float32".to_owned()));
+        assert!(accepts.contains(&"value.core.int32".to_owned()));
+        assert_eq!(resolution.instance_ports[2].port_type, "value.core.int32");
     }
+
+    let float_mul = resolve_object_spec_v01("* 3.");
+    assert_kind(&float_mul, "object.core.operator.mul");
+    assert_eq!(float_mul.display_text, "* 3.0");
+    assert_eq!(float_mul.params["right"], json!(3.0));
+    assert_eq!(float_mul.instance_ports[0].port_type, "value.core.message");
+    assert_eq!(float_mul.instance_ports[1].port_type, "value.core.message");
+    assert_eq!(float_mul.instance_ports[2].port_type, "value.core.float32");
 
     let sqrt = resolve_object_spec_v01("sqrt");
     assert_kind(&sqrt, "object.core.operator.sqrt");
     assert_eq!(sqrt.instance_ports.len(), 2);
+    assert_eq!(sqrt.instance_ports[0].port_type, "value.core.message");
+    assert_eq!(sqrt.instance_ports[1].port_type, "value.core.float32");
 
     let default_add = resolve_object_spec_v01("object.core.operator.add");
     assert_kind(&default_add, "object.core.operator.add");
@@ -580,7 +588,6 @@ fn project_patch_registry_projects_catalog_and_resolution_edges() {
                     )),
                 },
                 object_id: "my-patcher".to_owned(),
-                version: Some(CURRENT_KIND_VERSION.to_owned()),
                 interface_digest: Some(skenion_contracts::compute_patch_interface_digest_v01(
                     &patch,
                 )),
@@ -758,14 +765,19 @@ fn package_objects_project_to_catalog_and_resolve_from_installed_registry() {
     let resolved = registry.resolve("thing");
     assert!(resolved.ok(), "{resolved:?}");
     assert_eq!(
-        resolved.implementation.as_ref().map(|implementation| {
-            (
-                implementation.object_id.as_str(),
-                implementation.version.as_deref(),
-            )
-        }),
-        Some(("example.package.thing", Some("0.56.0")))
+        resolved
+            .implementation
+            .as_ref()
+            .map(|implementation| implementation.object_id.as_str()),
+        Some("example.package.thing")
     );
+    assert!(matches!(
+        resolved
+            .implementation
+            .as_ref()
+            .map(|implementation| &implementation.provider),
+        Some(ObjectProviderRefV01::Package { version, .. }) if version.as_deref() == Some("0.56.0")
+    ));
     assert_eq!(
         resolved.object_resolution.status,
         ObjectResolutionStatusV01::Resolved

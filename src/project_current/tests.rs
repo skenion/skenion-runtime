@@ -10,7 +10,6 @@ fn core_impl(object_id: &str) -> crate::ObjectImplementationRefCurrent {
     crate::ObjectImplementationRefCurrent {
         provider: crate::ObjectProviderRefCurrent::Core,
         object_id: object_id.to_owned(),
-        version: Some(CURRENT_SCHEMA_VERSION.to_owned()),
         interface_digest: None,
     }
 }
@@ -20,8 +19,7 @@ fn current_core_node_json(id: &str, object_id: &str, params: Value, ports: Value
       "id": id,
       "implementation": {
         "provider": { "kind": "core" },
-        "objectId": object_id,
-        "version": CURRENT_SCHEMA_VERSION
+        "objectId": object_id
       },
       "objectSpec": object_id,
       "objectResolution": {
@@ -43,8 +41,7 @@ fn current_provider_node_json(id: &str, object_id: &str, params: Value, ports: V
           "packageId": "test/current-fixtures",
           "version": CURRENT_SCHEMA_VERSION
         },
-        "objectId": object_id,
-        "version": CURRENT_SCHEMA_VERSION
+        "objectId": object_id
       },
       "objectSpec": object_id,
       "objectResolution": {
@@ -305,6 +302,18 @@ fn behavior_definition(id: &str) -> NodeDefinitionCurrent {
       "permissions": [],
       "capabilities": []
     }))
+}
+
+fn object_spec_ports_json(object_spec: &str) -> Value {
+    let resolution = crate::object_spec::resolve_object_spec_v01(object_spec);
+    assert!(
+        resolution.ok(),
+        "{object_spec} should resolve without issues: {:?}",
+        resolution.issues
+    );
+    let definition = crate::object_spec::object_spec_node_definition_v01(&resolution)
+        .expect("resolved object spec should project to a node definition");
+    serde_json::to_value(definition.ports).expect("object spec ports should serialize")
 }
 
 fn render_graph() -> GraphDocumentCurrent {
@@ -1192,13 +1201,17 @@ fn accepts_behavior_object_identities_that_still_exist() {
       "nodes": behavior_ids
         .iter()
         .enumerate()
-        .map(|(index, kind)| json!({
-          "id": format!("node_{index}"),
-          "kind": kind,
-          "kindVersion": "0.1.0",
-          "params": {},
-          "ports": []
-        }))
+        .map(|(index, kind)| {
+            let object_spec = kind.strip_prefix("object.core.").unwrap_or(kind);
+            json!({
+              "id": format!("node_{index}"),
+              "kind": kind,
+              "kindVersion": "0.1.0",
+              "objectSpec": object_spec,
+              "params": {},
+              "ports": object_spec_ports_json(object_spec)
+            })
+        })
         .collect::<Vec<_>>(),
       "edges": []
     }));
@@ -1241,7 +1254,7 @@ fn validates_runtime_owned_object_spec_resolution() {
           "kindVersion": "0.1.0",
           "objectSpec": "+ 2",
           "params": {},
-          "ports": []
+          "ports": object_spec_ports_json("+ 2")
         }
       ],
       "edges": []
@@ -1296,10 +1309,10 @@ fn validates_runtime_owned_object_spec_resolution() {
             version: Some(CURRENT_SCHEMA_VERSION.to_owned()),
         },
         object_id: "user.manipulator".to_owned(),
-        version: Some(CURRENT_SCHEMA_VERSION.to_owned()),
         interface_digest: None,
     });
     package_deferred.nodes[0].object_spec = Some("user.manipulator 1".to_owned());
+    package_deferred.nodes[0].ports.clear();
     validate_project_current(
         &package_deferred,
         &[behavior_definition("user.manipulator")],

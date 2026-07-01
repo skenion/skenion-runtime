@@ -2,12 +2,9 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::{
     DataFlow, DataType, Edge, EdgeSpecCurrent, GraphDocument, GraphDocumentCurrent, GraphNode,
-    GraphNodeCurrent, NodeDefinition, NodeDefinitionCurrent, PackageRegistryListResponseV01, Port,
-    PortActivation, PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef, PortSpecCurrent,
-    ProjectDocumentCurrent, StringOrStrings,
-    current_node_identity::{
-        CURRENT_OBJECT_VERSION, graph_node_executable_kind, graph_node_executable_kind_version,
-    },
+    GraphNodeCurrent, NodeDefinitionCurrent, PackageRegistryListResponseV01, Port, PortActivation,
+    PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef, PortSpecCurrent,
+    ProjectDocumentCurrent, StringOrStrings, current_node_identity::graph_node_executable_kind,
     object_spec::ObjectRegistry,
 };
 
@@ -17,21 +14,37 @@ pub(super) fn normalized_node_definitions_current(
     packages: Option<&PackageRegistryListResponseV01>,
 ) -> Vec<NodeDefinitionCurrent> {
     let mut nodes = explicit_nodes;
+    let explicit_ids = nodes
+        .iter()
+        .map(|definition| definition.id.clone())
+        .collect::<HashSet<_>>();
     let mut seen = nodes
         .iter()
-        .map(|definition| (definition.id.clone(), definition.version.clone()))
+        .map(node_definition_shape_key_current)
         .collect::<HashSet<_>>();
 
     for definition in ObjectRegistry::for_project_with_packages(Some(document), packages)
         .node_definition_projection()
     {
-        let key = (definition.id.clone(), definition.version.clone());
+        if explicit_ids.contains(&definition.id) {
+            continue;
+        }
+        let key = node_definition_shape_key_current(&definition);
         if seen.insert(key) {
             nodes.push(definition);
         }
     }
 
     nodes
+}
+
+fn node_definition_shape_key_current(definition: &NodeDefinitionCurrent) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "id": definition.id,
+        "ports": definition.ports,
+        "execution": definition.execution,
+    }))
+    .expect("node definition shape key should serialize")
 }
 
 pub(super) fn lower_graph_for_execution(graph: &GraphDocumentCurrent) -> GraphDocument {
@@ -62,57 +75,6 @@ pub(super) fn lower_graph_for_execution(graph: &GraphDocumentCurrent) -> GraphDo
     }
 }
 
-pub(super) fn lower_node_definition_for_execution(
-    definition: &NodeDefinitionCurrent,
-) -> NodeDefinition {
-    NodeDefinition {
-        schema: "skenion.node.definition".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        id: definition.id.clone(),
-        version: definition.version.clone(),
-        display_name: definition.display_name.clone(),
-        category: definition.category.clone(),
-        script_api_version: definition.script_api_version.clone(),
-        bundle_hash: definition.bundle_hash.clone(),
-        surface: definition
-            .surface
-            .as_ref()
-            .map(|surface| skenion_contracts::NodeSurfaceV01 {
-                palette: surface.palette.clone(),
-            }),
-        ports: definition
-            .ports
-            .iter()
-            .map(lower_port_for_execution)
-            .collect(),
-        execution: skenion_contracts::NodeExecutionV01 {
-            model: lower_execution_model_for_execution(&definition.execution.model),
-            clock: definition.execution.clock.clone(),
-        },
-        state: skenion_contracts::NodeStateV01 {
-            persistent: definition.state.persistent,
-        },
-        permissions: definition.permissions.clone(),
-        capabilities: definition.capabilities.clone(),
-    }
-}
-
-pub(super) fn lower_execution_model_for_execution(
-    model: &skenion_contracts::ExecutionModelV01,
-) -> crate::ExecutionModel {
-    match model {
-        skenion_contracts::ExecutionModelV01::Event => crate::ExecutionModel::Event,
-        skenion_contracts::ExecutionModelV01::Control => crate::ExecutionModel::Control,
-        skenion_contracts::ExecutionModelV01::Frame => crate::ExecutionModel::Frame,
-        skenion_contracts::ExecutionModelV01::AudioBlock => crate::ExecutionModel::AudioBlock,
-        skenion_contracts::ExecutionModelV01::VideoFrame => crate::ExecutionModel::VideoFrame,
-        skenion_contracts::ExecutionModelV01::GpuPass => crate::ExecutionModel::GpuPass,
-        skenion_contracts::ExecutionModelV01::AsyncResource => crate::ExecutionModel::AsyncResource,
-        skenion_contracts::ExecutionModelV01::ScriptControl => crate::ExecutionModel::ScriptControl,
-        skenion_contracts::ExecutionModelV01::NativePlugin => crate::ExecutionModel::NativePlugin,
-    }
-}
-
 pub(crate) fn lower_graph_node_for_execution(
     node: &GraphNodeCurrent,
     pasted_id: &str,
@@ -120,8 +82,7 @@ pub(crate) fn lower_graph_node_for_execution(
     Some(GraphNode {
         id: pasted_id.to_owned(),
         kind: graph_node_executable_kind(node)?,
-        kind_version: graph_node_executable_kind_version(node)
-            .unwrap_or_else(|| CURRENT_OBJECT_VERSION.to_owned()),
+        kind_version: "0.1.0".to_owned(),
         params: node.params.clone(),
         ports: node.ports.iter().map(lower_port_for_execution).collect(),
     })

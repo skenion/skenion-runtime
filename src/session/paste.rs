@@ -147,9 +147,9 @@ impl RuntimeSession {
         id_remap: IdRemapResult,
     ) -> PasteGraphFragmentResponse {
         let revision_before = self
-            .graph
+            .project
             .as_ref()
-            .map(|graph| graph.revision.clone())
+            .map(|project| project.graph.revision.clone())
             .unwrap_or_else(|| target.base_revision.clone());
         PasteGraphFragmentResponse {
             schema: "skenion.runtime.paste-graph-fragment.response".to_owned(),

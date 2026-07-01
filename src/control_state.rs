@@ -11,7 +11,7 @@ use crate::{
         OPERATOR_POW_KIND, OPERATOR_SQRT_KIND, OPERATOR_SUB_KIND, PANEL_KIND,
         value_type_id_for_float_representation, value_type_id_for_int_representation,
     },
-    convert_control_value_to_stored,
+    convert_control_value_to_data_kind, convert_control_value_to_stored,
 };
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -437,7 +437,8 @@ impl ControlState {
                             .and_then(|value| control_value_as_f64(&value))
                             .unwrap_or(0.0)
                     });
-                let result = ControlValue::float(evaluate_operator(&node.kind, input, right));
+                let result =
+                    operator_result_value(node, evaluate_operator(&node.kind, input, right));
                 self.values.insert(node.id.clone(), result.clone());
                 if silent {
                     RuntimeControlEventResponse::ok(Vec::new())
@@ -462,14 +463,17 @@ impl ControlState {
                         node.id
                     ));
                 }
-                let Some(right) = numeric_message_value(&message) else {
+                let Some(right) = message
+                    .first_atom()
+                    .filter(|value| control_value_as_f64(value).is_some())
+                    .cloned()
+                else {
                     return RuntimeControlEventResponse::error(format!(
                         "control operator {}.right expects a numeric message",
                         node.id
                     ));
                 };
-                self.operator_right
-                    .insert(node.id.clone(), ControlValue::float(right));
+                self.operator_right.insert(node.id.clone(), right);
                 RuntimeControlEventResponse::ok(Vec::new())
             }
             port => RuntimeControlEventResponse::error(format!(
@@ -810,12 +814,22 @@ fn operator_right_default(node: &GraphNode) -> Option<ControlValue> {
     if !is_control_operator_kind(&node.kind) || node.kind == OPERATOR_SQRT_KIND {
         return None;
     }
-    Some(ControlValue::float(
-        node.params
-            .get("right")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
-    ))
+    Some(control_value_from_operator_param(node.params.get("right")))
+}
+
+fn control_value_from_operator_param(value: Option<&Value>) -> ControlValue {
+    let Some(value) = value else {
+        return ControlValue::float(0.0);
+    };
+    if let Some(value) = value.as_i64() {
+        return ControlValue::int(value);
+    }
+    if let Some(value) = value.as_u64()
+        && value <= i64::MAX as u64
+    {
+        return ControlValue::int(value as i64);
+    }
+    ControlValue::float(value.as_f64().unwrap_or(0.0))
 }
 
 fn numeric_message_value(message: &ControlMessage) -> Option<f64> {
@@ -861,6 +875,25 @@ fn evaluate_operator(kind: &str, input: f64, right: f64) -> f64 {
 
 fn sanitize_operator_number(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }
+}
+
+fn operator_result_value(node: &GraphNode, value: f64) -> ControlValue {
+    let data_kind = operator_result_data_kind(node);
+    convert_control_value_to_data_kind(&ControlValue::float(value), data_kind, None)
+        .unwrap_or_else(|| ControlValue::float(sanitize_operator_number(value)))
+}
+
+fn operator_result_data_kind(node: &GraphNode) -> &str {
+    node.ports
+        .iter()
+        .find(|port| port.id == "out" && port.direction == PortDirection::Output)
+        .map(|port| port.data_type.data_kind.as_str())
+        .unwrap_or_else(
+            || match control_value_from_operator_param(node.params.get("right")) {
+                ControlValue::Int { .. } => "value.core.int32",
+                _ => "value.core.float32",
+            },
+        )
 }
 
 #[cfg(test)]

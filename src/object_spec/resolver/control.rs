@@ -53,24 +53,23 @@ pub(super) fn resolve_control_operator(
         );
     }
 
-    let right = match creation_args.first() {
-        Some(arg) => match numeric_value(arg) {
-            Some(value) => value,
-            None => {
-                return failure(
-                    input,
-                    display_text,
-                    class_symbol,
-                    creation_args,
-                    "object-spec.invalid-arg-type",
-                    format!("{class_symbol} creation argument must be numeric"),
-                );
-            }
-        },
-        None => 0.0,
+    let right = match operator_right_arg(class_symbol, creation_args.first()) {
+        Ok(right) => right,
+        Err(message) => {
+            return failure(
+                input,
+                display_text,
+                class_symbol,
+                creation_args,
+                "object-spec.invalid-arg-type",
+                message,
+            );
+        }
     };
     let mut params = Map::new();
-    insert_number(&mut params, "right", right);
+    right.insert_param(&mut params);
+    let output_type = right.output_type();
+    let display_text = normalize_trailing_decimal_display_text(display_text, &creation_args);
     success(
         input,
         display_text,
@@ -78,8 +77,75 @@ pub(super) fn resolve_control_operator(
         creation_args,
         candidate,
         params,
-        control_operator_ports(),
+        control_operator_ports(output_type),
     )
+}
+
+#[derive(Clone, Copy)]
+enum OperatorRight {
+    Float(f64),
+    Int(i64),
+}
+
+impl OperatorRight {
+    fn insert_param(self, params: &mut Map<String, Value>) {
+        match self {
+            Self::Float(value) => insert_number(params, "right", value),
+            Self::Int(value) => {
+                params.insert("right".to_owned(), json!(value));
+            }
+        }
+    }
+
+    fn output_type(self) -> &'static str {
+        match self {
+            Self::Float(_) => "value.core.float32",
+            Self::Int(_) => "value.core.int32",
+        }
+    }
+}
+
+fn operator_right_arg(
+    class_symbol: &str,
+    arg: Option<&ObjectSpecAtom>,
+) -> Result<OperatorRight, String> {
+    match arg {
+        Some(ObjectSpecAtom::Float(value)) => Ok(OperatorRight::Float(*value)),
+        Some(ObjectSpecAtom::Int(value)) => Ok(OperatorRight::Int(*value)),
+        Some(ObjectSpecAtom::Bool(_) | ObjectSpecAtom::Symbol(_)) => {
+            Err(format!("{class_symbol} creation argument must be numeric"))
+        }
+        None => Ok(OperatorRight::Float(0.0)),
+    }
+}
+
+fn normalize_trailing_decimal_display_text(
+    display_text: String,
+    creation_args: &[ObjectSpecAtom],
+) -> String {
+    let [ObjectSpecAtom::Float(value)] = creation_args else {
+        return display_text;
+    };
+    let mut tokens = display_text
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let Some(last) = tokens.last_mut() else {
+        return display_text;
+    };
+    let unsigned = last.strip_prefix(['+', '-']).unwrap_or(last);
+    let Some(unsigned_digits) = unsigned.strip_suffix('.') else {
+        return display_text;
+    };
+    if unsigned_digits.is_empty()
+        || !unsigned_digits
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return display_text;
+    }
+    *last = format!("{value:.1}");
+    tokens.join(" ")
 }
 
 pub(super) fn resolve_control_value(
