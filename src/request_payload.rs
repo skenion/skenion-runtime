@@ -1029,4 +1029,129 @@ mod tests {
             true
         );
     }
+
+    #[test]
+    fn schema_version_preflight_preserves_structured_project_load_issues() {
+        let missing_project = validate_project_load_schema_versions_current(&json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0"
+          }
+        }))
+        .expect_err("missing project schemaVersion should fail");
+        assert_eq!(
+            missing_project[0].code.as_deref(),
+            Some("project.missing-schema-version")
+        );
+        assert_eq!(
+            missing_project[0].details.as_ref().unwrap()["surface"],
+            "project"
+        );
+
+        let unsupported_graph = validate_project_load_schema_versions_current(&json!({
+          "schema": "skenion.project",
+          "schemaVersion": "0.1.0",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "9.9.9"
+          }
+        }))
+        .expect_err("unsupported graph schemaVersion should fail");
+        assert_eq!(
+            unsupported_graph[0].code.as_deref(),
+            Some("project.unsupported-schema-version")
+        );
+        assert_eq!(
+            unsupported_graph[0].details.as_ref().unwrap()["surface"],
+            "graph"
+        );
+
+        let unsupported_view = validate_project_load_schema_versions_current(&json!({
+          "schema": "skenion.project",
+          "schemaVersion": "0.1.0",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0"
+          },
+          "viewState": {
+            "schema": "skenion.view-state",
+            "schemaVersion": "9.9.9"
+          }
+        }))
+        .expect_err("unsupported viewState schemaVersion should fail");
+        assert_eq!(
+            unsupported_view[0].code.as_deref(),
+            Some("project.unsupported-schema-version")
+        );
+        assert_eq!(
+            unsupported_view[0].details.as_ref().unwrap()["surface"],
+            "view-state"
+        );
+    }
+
+    #[test]
+    fn runtime_session_load_issue_helpers_are_structured() {
+        let invalid_schema = runtime_session_load_schema_version_issue(
+            &json!({
+              "schema": "skenion.project",
+              "schemaVersion": "0.1.0"
+            }),
+            Some("0.1.0"),
+        );
+        assert_eq!(
+            invalid_schema.code.as_deref(),
+            Some("runtime.session-load.invalid-schema")
+        );
+
+        let parse_error = serde_json::from_value::<RuntimeSessionLoadRequestCurrent>(json!({
+          "schema": RUNTIME_SESSION_LOAD_REQUEST_SCHEMA,
+          "schemaVersion": "0.1.0",
+          "mode": "loadIfEmpty"
+        }))
+        .expect_err("missing project should not parse");
+        let invalid_payload = invalid_runtime_session_load_payload(parse_error);
+        assert_eq!(
+            invalid_payload[0].code.as_deref(),
+            Some("runtime.session-load.invalid-payload")
+        );
+
+        let request = serde_json::from_value::<RuntimeSessionLoadRequestCurrent>(json!({
+          "schema": RUNTIME_SESSION_LOAD_REQUEST_SCHEMA,
+          "schemaVersion": "0.1.0",
+          "mode": "loadIfEmpty",
+          "project": {
+            "schema": "skenion.project",
+            "schemaVersion": "0.1.0",
+            "id": "",
+            "documentId": "not-a-uuid",
+            "revision": "1",
+            "graph": {
+              "schema": "skenion.graph",
+              "schemaVersion": "0.1.0",
+              "id": "graph",
+              "revision": "1",
+              "nodes": [],
+              "edges": []
+            },
+            "viewState": {
+              "schema": "skenion.view-state",
+              "schemaVersion": "0.1.0",
+              "canvas": { "nodes": {} }
+            },
+            "patchLibrary": []
+          }
+        }))
+        .expect("contract-shaped invalid request should parse");
+        let report = skenion_contracts::validate_runtime_session_load_request_v01(&request)
+            .expect_err("invalid request should fail contract validation");
+        let validation_issues = runtime_session_load_validation_issues_current(&request, &report);
+        assert_eq!(
+            validation_issues[0].code.as_deref(),
+            Some("runtime.session-load.invalid-0.1")
+        );
+        assert_eq!(
+            validation_issues[0].details.as_ref().unwrap()["projectId"],
+            ""
+        );
+    }
 }
