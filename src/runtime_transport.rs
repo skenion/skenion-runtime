@@ -838,7 +838,6 @@ pub struct RuntimeSessionCapabilitySet {
     pub session_addressing: bool,
     pub event_replay: bool,
     pub multi_window: bool,
-    pub profiles: Vec<RuntimeConnectionProfileMode>,
     pub auth_policy: String,
 }
 
@@ -2136,7 +2135,6 @@ mod tests {
                 session_addressing: true,
                 event_replay: true,
                 multi_window: true,
-                profiles: vec![RuntimeConnectionProfileMode::LocalManaged],
                 auth_policy: "required".to_owned(),
             },
             event_replay: RuntimeEventReplayWindow {

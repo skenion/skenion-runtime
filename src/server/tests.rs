@@ -119,7 +119,7 @@ async fn runtime_info_response() {
         "runtime.extensions",
         "session.addressing",
         "session.info",
-        "runtime.profile.localManaged",
+        "runtime.sidecar.local",
         "runtime.sidecar.startup",
         "runtime.sidecar.health",
         "runtime.sidecar.shutdown",
@@ -147,6 +147,12 @@ async fn runtime_info_response() {
         "session.undo",
         "session.redo",
         "session.control.event",
+        "session.validate",
+        "session.plan",
+        "session.run",
+        "runtime.profile.localManaged",
+        "runtime.profile.localShared",
+        "runtime.profile.remote",
     ] {
         assert!(
             !capabilities
@@ -255,6 +261,10 @@ async fn sidecar_startup_health_and_shutdown_are_machine_readable() {
     assert_eq!(startup["endpoint"]["protocol"], "http");
     assert_eq!(startup["profile"]["mode"], "local-managed");
     assert_eq!(startup["profile"]["ownership"], "owned-child");
+    assert_eq!(
+        startup["profile"]["displayName"],
+        "skenion runtime local sidecar"
+    );
     assert_eq!(startup["defaultSessionId"], DEFAULT_SESSION_ID);
     assert_eq!(startup["token"]["required"], false);
     assert_eq!(startup["token"]["header"], "Authorization");
@@ -279,6 +289,10 @@ async fn sidecar_startup_health_and_shutdown_are_machine_readable() {
     );
     assert_eq!(health["endpoint"]["protocol"], "http");
     assert_eq!(health["profile"]["mode"], "local-managed");
+    assert_eq!(
+        health["profile"]["displayName"],
+        "skenion runtime local sidecar"
+    );
     assert!(health.get("token").is_none());
     assert!(health.get("shutdown").is_none());
     assert!(health.get("defaultSessionUrl").is_none());

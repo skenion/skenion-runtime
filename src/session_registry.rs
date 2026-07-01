@@ -16,11 +16,11 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use crate::RuntimeEventReplayGapReason;
 use crate::{
     COLLABORATION_EVENT_REPLAY_LIMIT, PreviewManager, RUNTIME_REALTIME_REPLAY_LIMIT,
-    RuntimeCollaborationLog, RuntimeConnectionProfile, RuntimeConnectionProfileMode,
-    RuntimeDiagnostic, RuntimeEventReplayGap, RuntimeEventReplayMetadata, RuntimeEventReplayWindow,
-    RuntimeRealtimeState, RuntimeSession, RuntimeSessionCapabilitySet, RuntimeSessionEvent,
-    RuntimeSessionEventKind, RuntimeSessionInfoResponse, RuntimeSessionLifecycleState,
-    RuntimeSessionSnapshot, RuntimeTransportHistory as ContractRuntimeHistory,
+    RuntimeCollaborationLog, RuntimeConnectionProfile, RuntimeDiagnostic, RuntimeEventReplayGap,
+    RuntimeEventReplayMetadata, RuntimeEventReplayWindow, RuntimeRealtimeState, RuntimeSession,
+    RuntimeSessionCapabilitySet, RuntimeSessionEvent, RuntimeSessionEventKind,
+    RuntimeSessionInfoResponse, RuntimeSessionLifecycleState, RuntimeSessionSnapshot,
+    RuntimeTransportHistory as ContractRuntimeHistory,
     RuntimeTransportHistoryEntry as ContractRuntimeHistoryEntry, RuntimeTransportSessionSnapshot,
     runtime_time::created_at_now, validate_runtime_session_event,
 };
@@ -529,11 +529,6 @@ fn runtime_session_capabilities() -> RuntimeSessionCapabilitySet {
         session_addressing: true,
         event_replay: true,
         multi_window: true,
-        profiles: vec![
-            RuntimeConnectionProfileMode::LocalManaged,
-            RuntimeConnectionProfileMode::LocalShared,
-            RuntimeConnectionProfileMode::Remote,
-        ],
         auth_policy: "deferred".to_owned(),
     }
 }

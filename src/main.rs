@@ -96,7 +96,7 @@ enum Command {
         /// Port to bind.
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
-        /// Print machine-readable local-managed sidecar startup JSON after binding.
+        /// Print machine-readable local sidecar startup JSON after binding.
         #[arg(long)]
         startup_json: bool,
     },
