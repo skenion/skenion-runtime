@@ -7,8 +7,18 @@
     "nodes": [
       {
         "id": "clear_color",
-        "kind": "object.core.render.clear-color",
-        "kindVersion": "0.1.0",
+        "implementation": {
+          "provider": {
+            "kind": "core"
+          },
+          "objectId": "render.clear-color"
+        },
+        "objectSpec": "render.clear-color",
+        "objectResolution": {
+          "status": "resolved",
+          "candidates": [],
+          "issues": []
+        },
         "params": {
           "color": [0.12, 0.2, 0.34, 1]
         },
@@ -23,8 +33,18 @@
       },
       {
         "id": "output",
-        "kind": "object.core.render.output",
-        "kindVersion": "0.1.0",
+        "implementation": {
+          "provider": {
+            "kind": "core"
+          },
+          "objectId": "render.output"
+        },
+        "objectSpec": "render.output",
+        "objectResolution": {
+          "status": "resolved",
+          "candidates": [],
+          "issues": []
+        },
         "params": {},
         "ports": [
           {

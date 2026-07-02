@@ -7,8 +7,18 @@
     "nodes": [
       {
         "id": "float_1",
-        "kind": "object.core.float",
-        "kindVersion": "0.1.0",
+        "implementation": {
+          "provider": {
+            "kind": "core"
+          },
+          "objectId": "float"
+        },
+        "objectSpec": "float",
+        "objectResolution": {
+          "status": "resolved",
+          "candidates": [],
+          "issues": []
+        },
         "params": {
           "value": 0.5
         },

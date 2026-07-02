@@ -1,21 +1,24 @@
+#[cfg(test)]
+use std::convert::Infallible;
 use std::{
     collections::{BTreeMap, VecDeque},
-    convert::Infallible,
     sync::{Arc, Mutex, RwLock},
 };
 
+#[cfg(test)]
 use axum::{http::HeaderMap, response::sse::Event};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+#[cfg(test)]
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+#[cfg(test)]
+use crate::RuntimeEventReplayGapReason;
 use crate::{
     COLLABORATION_EVENT_REPLAY_LIMIT, PreviewManager, RUNTIME_REALTIME_REPLAY_LIMIT,
-    RuntimeCollaborationLog, RuntimeConnectionProfile, RuntimeConnectionProfileMode,
-    RuntimeDiagnostic, RuntimeEventReplayGap, RuntimeEventReplayGapReason,
-    RuntimeEventReplayMetadata, RuntimeEventReplayWindow, RuntimeRealtimeState, RuntimeSession,
-    RuntimeSessionCapabilitySet, RuntimeSessionEvent, RuntimeSessionEventKind,
+    RuntimeCollaborationLog, RuntimeConnectionProfile, RuntimeEventReplayGap,
+    RuntimeEventReplayMetadata, RuntimeEventReplayWindow, RuntimeIssue, RuntimeRealtimeState,
+    RuntimeSession, RuntimeSessionCapabilitySet, RuntimeSessionEvent, RuntimeSessionEventKind,
     RuntimeSessionInfoResponse, RuntimeSessionLifecycleState, RuntimeSessionSnapshot,
     RuntimeTransportHistory as ContractRuntimeHistory,
     RuntimeTransportHistoryEntry as ContractRuntimeHistoryEntry, RuntimeTransportSessionSnapshot,
@@ -24,12 +27,6 @@ use crate::{
 
 pub const DEFAULT_SESSION_ID: &str = "default";
 const SESSION_EVENT_REPLAY_LIMIT: usize = 256;
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionEventsQuery {
-    pub after: Option<u64>,
-}
 
 #[derive(Clone)]
 pub struct RuntimeSessionRegistry {
@@ -122,6 +119,7 @@ pub struct RuntimeSessionRecord {
     replay_limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct RuntimeSessionReplay {
     pub events: Vec<RuntimeSessionEvent>,
@@ -186,7 +184,7 @@ impl RuntimeSessionRecord {
             "profile": profile,
             "capabilities": runtime_session_capabilities(),
             "eventReplay": self.event_replay_window(),
-            "diagnostics": contract_diagnostics(&snapshot.diagnostics),
+            "issues": contract_issues(&snapshot.issues),
         }))
         .expect("runtime session info response should match contract shape")
     }
@@ -196,7 +194,7 @@ pub fn publish_session_event(
     record: &RuntimeSessionRecord,
     kind: RuntimeSessionEventKind,
     session: &RuntimeSession,
-    diagnostics: Vec<RuntimeDiagnostic>,
+    issues: Vec<RuntimeIssue>,
 ) {
     let sequence = next_session_event_sequence(record);
     let event = session_event_from_session(
@@ -204,7 +202,7 @@ pub fn publish_session_event(
         kind,
         session,
         event_replay_fields(session_event_id(&record.id, sequence), sequence),
-        diagnostics,
+        issues,
     );
     store_session_event(record, event.clone());
     let _ = record.events.send(event);
@@ -215,7 +213,7 @@ fn session_event_from_session(
     kind: RuntimeSessionEventKind,
     session: &RuntimeSession,
     replay: SessionEventReplayFields,
-    diagnostics: Vec<RuntimeDiagnostic>,
+    issues: Vec<RuntimeIssue>,
 ) -> RuntimeSessionEvent {
     let snapshot = session.snapshot();
     let history = session.history();
@@ -237,7 +235,7 @@ fn session_event_from_session(
             gap: replay.gap,
             overflow: replay.overflow,
         },
-        "diagnostics": contract_diagnostics(&diagnostics),
+        "issues": contract_issues(&issues),
         "createdAt": created_at_now(),
     }))
     .expect("runtime session event should match contract shape");
@@ -245,6 +243,7 @@ fn session_event_from_session(
     event
 }
 
+#[cfg(test)]
 pub fn session_snapshot_event(
     record: &RuntimeSessionRecord,
     session: &RuntimeSession,
@@ -335,6 +334,7 @@ fn store_session_event(record: &RuntimeSessionRecord, event: RuntimeSessionEvent
     }
 }
 
+#[cfg(test)]
 pub fn capture_session_replay(
     record: &RuntimeSessionRecord,
     after: Option<u64>,
@@ -378,6 +378,7 @@ pub fn capture_session_replay(
     }
 }
 
+#[cfg(test)]
 fn replay_gap_event(
     mut snapshot: RuntimeSessionEvent,
     session_id: &str,
@@ -407,6 +408,7 @@ fn replay_gap_event(
     snapshot
 }
 
+#[cfg(test)]
 pub fn event_cursor_from_headers(headers: &HeaderMap) -> Option<u64> {
     match headers.get("last-event-id") {
         Some(value) => value.to_str().ok().and_then(|cursor| cursor.parse().ok()),
@@ -414,6 +416,7 @@ pub fn event_cursor_from_headers(headers: &HeaderMap) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 pub fn session_broadcast_event_after_high_water(
     result: Result<RuntimeSessionEvent, BroadcastStreamRecvError>,
     record: RuntimeSessionRecord,
@@ -428,6 +431,7 @@ pub fn session_broadcast_event_after_high_water(
     }
 }
 
+#[cfg(test)]
 pub fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
     Ok(Event::default()
         .event("session")
@@ -436,6 +440,7 @@ pub fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
         .expect("runtime session event should serialize"))
 }
 
+#[cfg(test)]
 pub fn session_lag_gap_event(record: &RuntimeSessionRecord, skipped: u64) -> RuntimeSessionEvent {
     let actual_sequence = oldest_retained_session_event_sequence(record)
         .unwrap_or_else(|| current_session_event_sequence(record))
@@ -470,6 +475,7 @@ pub fn session_lag_gap_event(record: &RuntimeSessionRecord, skipped: u64) -> Run
     )
 }
 
+#[cfg(test)]
 fn oldest_retained_session_event_sequence(record: &RuntimeSessionRecord) -> Option<u64> {
     record
         .event_store
@@ -479,6 +485,7 @@ fn oldest_retained_session_event_sequence(record: &RuntimeSessionRecord) -> Opti
         .map(|event| event.sequence)
 }
 
+#[cfg(test)]
 fn latest_stored_session_event_sequence(record: &RuntimeSessionRecord) -> Option<u64> {
     record
         .event_store
@@ -507,12 +514,10 @@ fn contract_history_entry(entry: &crate::RuntimeHistoryEntry) -> ContractRuntime
     .expect("runtime history entry should match contract shape")
 }
 
-fn contract_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> Vec<Value> {
+fn contract_issues(issues: &[RuntimeIssue]) -> Vec<Value> {
     let mut values = Vec::new();
-    for diagnostic in diagnostics {
-        values.push(
-            serde_json::to_value(diagnostic).expect("runtime diagnostic should serialize to JSON"),
-        );
+    for issue in issues {
+        values.push(serde_json::to_value(issue).expect("runtime issue should serialize to JSON"));
     }
     values
 }
@@ -522,11 +527,6 @@ fn runtime_session_capabilities() -> RuntimeSessionCapabilitySet {
         session_addressing: true,
         event_replay: true,
         multi_window: true,
-        profiles: vec![
-            RuntimeConnectionProfileMode::LocalManaged,
-            RuntimeConnectionProfileMode::LocalShared,
-            RuntimeConnectionProfileMode::Remote,
-        ],
         auth_policy: "deferred".to_owned(),
     }
 }
@@ -534,10 +534,11 @@ fn runtime_session_capabilities() -> RuntimeSessionCapabilitySet {
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
+    use serde_json::json;
     use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
     use super::*;
-    use crate::sidecar::RuntimeEndpointConfig;
+    use crate::{ProjectRequestCurrent, sidecar::RuntimeEndpointConfig};
 
     #[test]
     fn registry_creates_explicit_default_and_named_records() {
@@ -641,7 +642,7 @@ mod tests {
             &record,
             RuntimeSessionEventKind::Snapshot,
             &session,
-            vec![RuntimeDiagnostic::warning("covered diagnostic")],
+            vec![RuntimeIssue::warning("covered issue")],
         );
         let stored = record
             .event_store
@@ -653,8 +654,8 @@ mod tests {
         assert_eq!(stored.sequence, 1);
         assert_eq!(stored.replay.cursor, "1");
         assert_eq!(
-            serde_json::to_value(&stored.diagnostics[0]).unwrap()["message"],
-            "covered diagnostic"
+            serde_json::to_value(&stored.issues[0]).unwrap()["message"],
+            "covered issue"
         );
         assert_eq!(current_session_event_sequence(&record), 1);
     }
@@ -825,22 +826,53 @@ mod tests {
     }
 
     #[test]
-    fn session_info_preserves_snapshot_diagnostics() {
+    fn session_info_preserves_snapshot_issues() {
         let endpoint = RuntimeEndpointConfig::new("127.0.0.1".to_owned(), 3761);
         let profile = crate::sidecar::runtime_connection_profile(&endpoint, "unix-ms:1");
         let record = RuntimeSessionRegistry::dry_preview().default_record();
-        record
+        let load = record
             .session
             .write()
             .expect("runtime session lock should not be poisoned")
-            .validate_current();
+            .load_project_current(unresolved_project_request());
+        assert!(load.ok);
+        assert_eq!(load.issues.len(), 1);
 
         let response = record.info_response(profile);
 
-        assert_eq!(response.diagnostics.len(), 1);
-        assert_eq!(
-            serde_json::to_value(&response.diagnostics[0]).unwrap()["message"],
-            "no project loaded in runtime session"
-        );
+        assert_eq!(response.issues.len(), 1);
+        assert!(response.issues[0].message.contains("user.manipulator"));
+    }
+
+    fn unresolved_project_request() -> ProjectRequestCurrent {
+        serde_json::from_value(json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "unresolved-info",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "unresolved_1",
+                "objectSpec": "user.manipulator",
+                "objectResolution": {
+                  "status": "unresolved",
+                  "candidates": [],
+                  "issues": [
+                    {
+                      "code": "resolution-unresolved",
+                      "severity": "error",
+                      "message": "user.manipulator is not available in the local runtime registry."
+                    }
+                  ]
+                },
+                "params": {},
+                "ports": []
+              }
+            ],
+            "edges": []
+          }
+        }))
+        .expect("unresolved project request should parse")
     }
 }

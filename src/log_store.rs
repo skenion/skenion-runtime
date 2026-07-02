@@ -6,11 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::{
-    DiagnosticSeverity, RuntimeClockDiagnostic, RuntimeClockDiagnosticSeverity, RuntimeDiagnostic,
-    RuntimeIoDiagnostic, RuntimeIoDiagnosticSeverity, ShaderDiagnostic, ShaderDiagnosticSeverity,
-    unix_ms_timestamp,
-};
+use crate::{IssueSeverity, unix_ms_timestamp};
 
 pub const RUNTIME_LOG_SCHEMA: &str = "skenion.runtime.logs";
 pub const RUNTIME_LOG_SCHEMA_VERSION: &str = "0.1.0";
@@ -29,7 +25,7 @@ pub struct RuntimeLogEvent {
     pub id: u64,
     pub timestamp: String,
     pub source: RuntimeLogSource,
-    pub level: DiagnosticSeverity,
+    pub level: IssueSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     pub message: String,
@@ -41,7 +37,7 @@ pub struct RuntimeLogEvent {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeLogRetention {
     pub replay_limit: usize,
-    pub replay_levels: Vec<DiagnosticSeverity>,
+    pub replay_levels: Vec<IssueSeverity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -52,7 +48,6 @@ pub struct RuntimeLogSnapshotResponse {
     pub ok: bool,
     pub events: Vec<RuntimeLogEvent>,
     pub retention: RuntimeLogRetention,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
 }
 
 pub struct RuntimeLogStore {
@@ -92,9 +87,8 @@ impl RuntimeLogStore {
             events: inner.warning_error_backlog.iter().cloned().collect(),
             retention: RuntimeLogRetention {
                 replay_limit: inner.backlog_limit,
-                replay_levels: vec![DiagnosticSeverity::Warning, DiagnosticSeverity::Error],
+                replay_levels: vec![IssueSeverity::Warning, IssueSeverity::Error],
             },
-            diagnostics: Vec::new(),
         }
     }
 
@@ -102,53 +96,9 @@ impl RuntimeLogStore {
         self.sender.subscribe()
     }
 
-    pub fn record_runtime_diagnostics(&self, diagnostics: &[RuntimeDiagnostic]) {
-        for diagnostic in diagnostics {
-            self.push(
-                diagnostic.severity.clone(),
-                diagnostic.code.clone(),
-                diagnostic.message.clone(),
-                diagnostic.details.clone(),
-            );
-        }
-    }
-
-    pub fn record_shader_diagnostics(&self, diagnostics: &[ShaderDiagnostic]) {
-        for diagnostic in diagnostics {
-            self.push(
-                shader_diagnostic_severity(&diagnostic.severity),
-                Some(diagnostic.code.clone()),
-                diagnostic.message.clone(),
-                None,
-            );
-        }
-    }
-
-    pub fn record_clock_diagnostics(&self, diagnostics: &[RuntimeClockDiagnostic]) {
-        for diagnostic in diagnostics {
-            self.push(
-                clock_diagnostic_severity(&diagnostic.severity),
-                Some(diagnostic.code.clone()),
-                diagnostic.message.clone(),
-                None,
-            );
-        }
-    }
-
-    pub fn record_io_diagnostics(&self, diagnostics: &[RuntimeIoDiagnostic]) {
-        for diagnostic in diagnostics {
-            self.push(
-                io_diagnostic_severity(&diagnostic.severity),
-                Some(diagnostic.code.clone()),
-                diagnostic.message.clone(),
-                None,
-            );
-        }
-    }
-
-    fn push(
+    pub fn record_event(
         &self,
-        level: DiagnosticSeverity,
+        level: IssueSeverity,
         code: Option<String>,
         message: String,
         details: Option<serde_json::Value>,
@@ -168,10 +118,7 @@ impl RuntimeLogStore {
                 details,
             };
             inner.next_id = inner.next_id.saturating_add(1);
-            if matches!(
-                level,
-                DiagnosticSeverity::Warning | DiagnosticSeverity::Error
-            ) {
+            if matches!(level, IssueSeverity::Warning | IssueSeverity::Error) {
                 if inner.warning_error_backlog.len() == inner.backlog_limit {
                     inner.warning_error_backlog.pop_front();
                 }
@@ -190,50 +137,28 @@ impl Default for RuntimeLogStore {
     }
 }
 
-fn clock_diagnostic_severity(severity: &RuntimeClockDiagnosticSeverity) -> DiagnosticSeverity {
-    match severity {
-        RuntimeClockDiagnosticSeverity::Error => DiagnosticSeverity::Error,
-        RuntimeClockDiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
-    }
-}
-
-fn io_diagnostic_severity(severity: &RuntimeIoDiagnosticSeverity) -> DiagnosticSeverity {
-    match severity {
-        RuntimeIoDiagnosticSeverity::Error => DiagnosticSeverity::Error,
-        RuntimeIoDiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
-    }
-}
-
-fn shader_diagnostic_severity(severity: &ShaderDiagnosticSeverity) -> DiagnosticSeverity {
-    match severity {
-        ShaderDiagnosticSeverity::Error => DiagnosticSeverity::Error,
-        ShaderDiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
-        ShaderDiagnosticSeverity::Info => DiagnosticSeverity::Info,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{
-        RuntimeClockDiagnostic, RuntimeClockDiagnosticSeverity, RuntimeIoDiagnostic,
-        RuntimeIoDiagnosticSeverity,
-    };
-
     use super::*;
     use serde_json::json;
 
     #[test]
     fn runtime_log_store_replays_only_warning_and_error_backlog() {
         let store = RuntimeLogStore::new(2);
-        store.record_runtime_diagnostics(&[RuntimeDiagnostic {
-            severity: DiagnosticSeverity::Info,
-            message: "connected".to_owned(),
-            code: None,
-            details: None,
-        }]);
-        store.record_runtime_diagnostics(&[RuntimeDiagnostic::warning("first warning")]);
-        store.record_runtime_diagnostics(&[RuntimeDiagnostic::error("first error")]);
-        store.record_runtime_diagnostics(&[RuntimeDiagnostic::warning("second warning")]);
+        store.record_event(IssueSeverity::Info, None, "connected".to_owned(), None);
+        store.record_event(
+            IssueSeverity::Warning,
+            None,
+            "first warning".to_owned(),
+            None,
+        );
+        store.record_event(IssueSeverity::Error, None, "first error".to_owned(), None);
+        store.record_event(
+            IssueSeverity::Warning,
+            None,
+            "second warning".to_owned(),
+            None,
+        );
 
         let snapshot = store.snapshot();
 
@@ -242,89 +167,49 @@ mod tests {
         assert_eq!(snapshot.events[1].message, "second warning");
         assert_eq!(
             snapshot.retention.replay_levels,
-            vec![DiagnosticSeverity::Warning, DiagnosticSeverity::Error]
+            vec![IssueSeverity::Warning, IssueSeverity::Error]
         );
     }
 
     #[test]
-    fn runtime_log_store_records_clock_io_and_shader_diagnostics() {
+    fn runtime_log_store_streams_explicit_events() {
         let store = RuntimeLogStore::new(8);
         let mut receiver = store.subscribe();
 
-        store.record_clock_diagnostics(&[
-            RuntimeClockDiagnostic {
-                severity: RuntimeClockDiagnosticSeverity::Warning,
-                code: "clock-drift".to_owned(),
-                message: "clock drifted".to_owned(),
-            },
-            RuntimeClockDiagnostic {
-                severity: RuntimeClockDiagnosticSeverity::Error,
-                code: "clock-lost".to_owned(),
-                message: "clock lost".to_owned(),
-            },
-        ]);
-        store.record_io_diagnostics(&[
-            RuntimeIoDiagnostic {
-                severity: RuntimeIoDiagnosticSeverity::Warning,
-                code: "io-name".to_owned(),
-                message: "device name unavailable".to_owned(),
-            },
-            RuntimeIoDiagnostic {
-                severity: RuntimeIoDiagnosticSeverity::Error,
-                code: "io-host".to_owned(),
-                message: "device host unavailable".to_owned(),
-            },
-        ]);
-        store.record_shader_diagnostics(&[
-            ShaderDiagnostic {
-                severity: ShaderDiagnosticSeverity::Warning,
-                phase: crate::ShaderDiagnosticPhase::InterfaceAnalysis,
-                code: "shader-warning".to_owned(),
-                message: "shader warning".to_owned(),
-                line: None,
-                column: None,
-                end_line: None,
-                end_column: None,
-                uniform_id: None,
-                source: crate::ShaderDiagnosticSource::User,
-            },
-            ShaderDiagnostic {
-                severity: ShaderDiagnosticSeverity::Info,
-                phase: crate::ShaderDiagnosticPhase::InterfaceAnalysis,
-                code: "shader-info".to_owned(),
-                message: "shader note".to_owned(),
-                line: None,
-                column: None,
-                end_line: None,
-                end_column: None,
-                uniform_id: None,
-                source: crate::ShaderDiagnosticSource::User,
-            },
-        ]);
+        store.record_event(
+            IssueSeverity::Warning,
+            Some("runtime.warning".to_owned()),
+            "first warning".to_owned(),
+            None,
+        );
+        store.record_event(
+            IssueSeverity::Info,
+            Some("runtime.info".to_owned()),
+            "info note".to_owned(),
+            None,
+        );
 
         let snapshot = store.snapshot();
 
-        assert_eq!(snapshot.events.len(), 5);
-        assert_eq!(snapshot.events[0].level, DiagnosticSeverity::Warning);
-        assert_eq!(snapshot.events[1].level, DiagnosticSeverity::Error);
-        assert_eq!(snapshot.events[2].code.as_deref(), Some("io-name"));
-        assert_eq!(snapshot.events[3].code.as_deref(), Some("io-host"));
-        assert_eq!(snapshot.events[4].code.as_deref(), Some("shader-warning"));
-        assert_eq!(receiver.try_recv().unwrap().message, "clock drifted");
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(snapshot.events[0].level, IssueSeverity::Warning);
+        assert_eq!(snapshot.events[0].code.as_deref(), Some("runtime.warning"));
+        assert_eq!(receiver.try_recv().unwrap().message, "first warning");
     }
 
     #[test]
-    fn runtime_log_store_preserves_structured_runtime_diagnostic_context() {
+    fn runtime_log_store_preserves_structured_event_context() {
         let store = RuntimeLogStore::new(8);
 
-        store.record_runtime_diagnostics(&[RuntimeDiagnostic::structured_warning(
-            "extension.manifest.missing",
-            "extension package is missing a manifest",
-            json!({
+        store.record_event(
+            IssueSeverity::Warning,
+            Some("extension.manifest.missing".to_owned()),
+            "extension package is missing a manifest".to_owned(),
+            Some(json!({
                 "packagePath": "/tmp/skenion-extension",
                 "action": "scan",
-            }),
-        )]);
+            })),
+        );
 
         let snapshot = store.snapshot();
 

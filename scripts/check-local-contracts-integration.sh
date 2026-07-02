@@ -117,9 +117,6 @@ try:
 except ModuleNotFoundError:
     tomllib = None
 
-SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
-
-
 def fail(message: str) -> None:
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(1)
@@ -199,16 +196,6 @@ def read_toml(path: Path, label: str) -> dict:
     return read_minimal_manifest(path)
 
 
-def parse_v0_line(version: str, label: str) -> str:
-    match = SEMVER.fullmatch(version)
-    if not match:
-        fail(f"{label} must be exact SemVer x.y.z; got {version!r}.")
-    major, minor, _patch = (int(part) for part in version.split("."))
-    if major != 0:
-        fail(f"{label} must stay on the v0 Contracts line; got {version!r}.")
-    return f"0.{minor}"
-
-
 def runtime_contracts_dependency(manifest: dict) -> str:
     dependency = manifest.get("dependencies", {}).get("skenion-contracts")
     if dependency is None:
@@ -246,8 +233,7 @@ contracts_path = resolve_existing(contracts_path, "local skenion-contracts Rust 
 output_path = Path(sys.argv[3])
 
 runtime = read_toml(runtime_manifest, "Runtime Cargo.toml")
-expected_version = runtime_contracts_dependency(runtime)
-expected_line = parse_v0_line(expected_version, "Runtime skenion-contracts dependency")
+dependency_requirement = runtime_contracts_dependency(runtime)
 
 contracts_manifest = read_toml(contracts_path / "Cargo.toml", "Contracts Cargo.toml")
 package = contracts_manifest.get("package", {})
@@ -258,18 +244,8 @@ if package.get("name") != "skenion-contracts":
     )
 
 actual_version = str(package.get("version", "")).strip()
-actual_line = parse_v0_line(actual_version, "local skenion-contracts package version")
-if actual_version != expected_version:
-    fail(
-        "local skenion-contracts version mismatch: Runtime requires "
-        f"{expected_version} (line {expected_line}), but {contracts_path} "
-        f"declares {actual_version} (line {actual_line})."
-    )
-if actual_line != expected_line:
-    fail(
-        "local skenion-contracts line mismatch: Runtime requires "
-        f"{expected_line}, but {contracts_path} declares {actual_line}."
-    )
+if not actual_version:
+    fail("local skenion-contracts package must declare a version.")
 
 commit = subprocess.run(
     ["git", "-C", str(contracts_path), "rev-parse", "--verify", "HEAD"],
@@ -297,21 +273,19 @@ git_evidence = {
 validation = {
     "runtime_manifest": str(runtime_manifest),
     "contracts_path": str(contracts_path),
-    "expected_version": expected_version,
-    "expected_line": expected_line,
-    "expected_range": f">={expected_line}.0 <0.{int(expected_line.split('.')[1]) + 1}.0",
+    "dependency_requirement": dependency_requirement,
+    "local_contracts_version": actual_version,
     "git_evidence": git_evidence,
 }
 output_path.write_text(json.dumps(validation, indent=2) + "\n", encoding="utf-8")
 
 print(
-    "Runtime requires skenion-contracts "
-    f"{expected_version} on Contracts line {expected_line}.",
+    f"Runtime declares skenion-contracts requirement {dependency_requirement}.",
     file=sys.stderr,
 )
 print(
-    "Local skenion-contracts crate matches at "
-    f"{contracts_path}.",
+    "Local skenion-contracts crate declares version "
+    f"{actual_version} at {contracts_path}.",
     file=sys.stderr,
 )
 if git_evidence:
@@ -349,19 +323,19 @@ from pathlib import Path
 validation = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 metadata = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 
-expected_version = validation["expected_version"]
+dependency_requirement = validation["dependency_requirement"]
 expected_manifest = (Path(validation["contracts_path"]) / "Cargo.toml").resolve()
 matches = [
     package
     for package in metadata.get("packages", [])
     if package.get("name") == "skenion-contracts"
-    and package.get("version") == expected_version
+    and Path(package.get("manifest_path", "")).resolve() == expected_manifest
 ]
 
 if len(matches) != 1:
     print(
-        "error: Cargo metadata did not resolve exactly one "
-        f"skenion-contracts {expected_version}; found {len(matches)}.",
+        "error: Cargo metadata did not resolve the local skenion-contracts patch "
+        f"for declared requirement {dependency_requirement!r}; found {len(matches)} local match(es).",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -376,7 +350,8 @@ if actual_manifest != expected_manifest:
     raise SystemExit(1)
 
 print(
-    f"Cargo resolved skenion-contracts {expected_version} from {expected_manifest.parent}.",
+    "Cargo resolved skenion-contracts "
+    f"{matches[0].get('version')} from {expected_manifest.parent}.",
     file=sys.stderr,
 )
 PY

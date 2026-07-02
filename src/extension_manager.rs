@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::{DiagnosticSeverity, RuntimeDiagnostic};
+use crate::{IssueSeverity, RuntimeIssue};
 use skenion_contracts::{
     ExtensionKindV01 as ExtensionKind, ExtensionManifestV01 as ExtensionManifest,
     ExtensionNativeBindingV01, validate_extension_manifest_v01, validate_node_definition_v01,
@@ -28,7 +28,7 @@ const EXTENSION_REGISTRY_EVENT: &str = "extension-package-load";
 pub struct RuntimeExtensionListResponse {
     pub ok: bool,
     pub extensions: Vec<RuntimeExtensionDescriptor>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,7 +46,7 @@ pub struct RuntimeExtensionDescriptor {
     pub provided_transports: Vec<String>,
     pub provided_help: Vec<String>,
     pub test_ids: Vec<String>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -75,16 +75,11 @@ impl RuntimeExtensionRegistrySnapshot {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeExtensionRegistryScan {
     snapshot: RuntimeExtensionRegistrySnapshot,
-    log_diagnostics: Vec<RuntimeDiagnostic>,
 }
 
 impl RuntimeExtensionRegistryScan {
     pub(crate) fn response(&self) -> RuntimeExtensionListResponse {
         self.snapshot.response()
-    }
-
-    pub(crate) fn log_diagnostics(&self) -> &[RuntimeDiagnostic] {
-        &self.log_diagnostics
     }
 
     pub(crate) fn into_snapshot(self) -> RuntimeExtensionRegistrySnapshot {
@@ -118,20 +113,20 @@ impl RuntimeExtensionManager {
     }
 
     pub(crate) fn scan_registry(&self) -> RuntimeExtensionRegistryScan {
-        let mut diagnostics = Vec::new();
+        let mut issues = Vec::new();
         let extensions = self
             .package_dirs
             .iter()
             .filter_map(|package_dir| {
                 let manifest_path = package_dir.join(RUNTIME_EXTENSION_MANIFEST_FILE);
                 if !manifest_path.exists() {
-                    diagnostics.push(RuntimeDiagnostic::structured_warning(
+                    issues.push(RuntimeIssue::structured_warning(
                         "extension.manifest.missing",
                         format!(
                             "extension package {} does not contain {RUNTIME_EXTENSION_MANIFEST_FILE}",
                             package_dir.display()
                         ),
-                        registry_diagnostic_details(
+                        registry_issue_details(
                             "extension-manifest",
                             package_dir,
                             Some(&manifest_path),
@@ -148,25 +143,22 @@ impl RuntimeExtensionManager {
             })
             .collect::<Vec<_>>();
 
-        let ok = diagnostics
+        let ok = issues
             .iter()
             .chain(
                 extensions
                     .iter()
-                    .flat_map(|extension| extension.diagnostics.iter()),
+                    .flat_map(|extension| extension.issues.iter()),
             )
-            .all(|diagnostic| diagnostic.severity != DiagnosticSeverity::Error);
+            .all(|issue| issue.severity != IssueSeverity::Error);
 
         let response = RuntimeExtensionListResponse {
             ok,
             extensions,
-            diagnostics,
+            issues,
         };
-        let log_diagnostics = registry_log_diagnostics(&response);
-
         RuntimeExtensionRegistryScan {
             snapshot: RuntimeExtensionRegistrySnapshot::from_response(response),
-            log_diagnostics,
         }
     }
 
@@ -180,7 +172,7 @@ impl Default for RuntimeExtensionListResponse {
         Self {
             ok: true,
             extensions: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }
     }
 }
@@ -208,10 +200,10 @@ fn read_extension_package(package_dir: &Path, manifest_path: &Path) -> RuntimeEx
                 provided_transports: Vec::new(),
                 provided_help: Vec::new(),
                 test_ids: Vec::new(),
-                diagnostics: vec![RuntimeDiagnostic::structured_error(
+                issues: vec![RuntimeIssue::structured_error(
                     "extension.manifest.read-failed",
                     format!("failed to read extension manifest: {error}"),
-                    registry_diagnostic_details(
+                    registry_issue_details(
                         "extension-manifest",
                         package_dir,
                         Some(&absolute_manifest_path),
@@ -233,10 +225,10 @@ fn read_extension_package(package_dir: &Path, manifest_path: &Path) -> RuntimeEx
                 package_dir,
                 &absolute_manifest_path,
                 None,
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "extension.manifest.parse-failed",
                     format!("failed to parse extension manifest: {error}"),
-                    registry_diagnostic_details(
+                    registry_issue_details(
                         "extension-manifest",
                         package_dir,
                         Some(&absolute_manifest_path),
@@ -259,10 +251,10 @@ fn read_extension_package(package_dir: &Path, manifest_path: &Path) -> RuntimeEx
                 package_dir,
                 &absolute_manifest_path,
                 header.as_ref(),
-                RuntimeDiagnostic::structured_error(
+                RuntimeIssue::structured_error(
                     "extension.manifest.parse-failed",
                     format!("failed to parse extension manifest: {error}"),
-                    header_diagnostic_details(
+                    header_issue_details(
                         package_dir,
                         &absolute_manifest_path,
                         header.as_ref(),
@@ -284,10 +276,10 @@ fn descriptor_from_manifest(
     manifest_path: PathBuf,
     manifest: ExtensionManifest,
 ) -> RuntimeExtensionDescriptor {
-    let mut diagnostics = validate_manifest(package_dir, &manifest_path, &manifest);
-    let status = if diagnostics
+    let mut issues = validate_manifest(package_dir, &manifest_path, &manifest);
+    let status = if issues
         .iter()
-        .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+        .any(|issue| issue.severity == IssueSeverity::Error)
     {
         RuntimeExtensionStatus::Failed
     } else {
@@ -344,9 +336,9 @@ fn descriptor_from_manifest(
         provided_transports,
         provided_help,
         test_ids,
-        diagnostics: {
-            diagnostics.sort_by(|a, b| a.message.cmp(&b.message));
-            diagnostics
+        issues: {
+            issues.sort_by(|a, b| a.message.cmp(&b.message));
+            issues
         },
     }
 }
@@ -355,18 +347,18 @@ fn validate_manifest(
     package_dir: &Path,
     manifest_path: &Path,
     manifest: &ExtensionManifest,
-) -> Vec<RuntimeDiagnostic> {
-    let mut diagnostics = Vec::new();
+) -> Vec<RuntimeIssue> {
+    let mut issues = Vec::new();
 
     if let Err(report) = validate_extension_manifest_v01(manifest) {
-        diagnostics.extend(report.errors().iter().map(|error| {
-            RuntimeDiagnostic::structured_error(
+        issues.extend(report.errors().iter().map(|error| {
+            RuntimeIssue::structured_error(
                 "extension.manifest.contract-invalid",
                 format!(
                     "extension manifest failed contract validation: {}",
                     error.message
                 ),
-                manifest_diagnostic_details(
+                manifest_issue_details(
                     package_dir,
                     manifest_path,
                     manifest,
@@ -380,13 +372,13 @@ fn validate_manifest(
     }
 
     if manifest.schema != EXTENSION_MANIFEST_SCHEMA {
-        diagnostics.push(RuntimeDiagnostic::structured_error(
+        issues.push(RuntimeIssue::structured_error(
             "extension.manifest.invalid-schema",
             format!(
                 "extension manifest schema must be skenion.extension.manifest, got {}",
                 manifest.schema
             ),
-            manifest_diagnostic_details(
+            manifest_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -399,13 +391,13 @@ fn validate_manifest(
         ));
     }
     if manifest.schema_version != EXTENSION_MANIFEST_SCHEMA_VERSION {
-        diagnostics.push(RuntimeDiagnostic::structured_error(
+        issues.push(RuntimeIssue::structured_error(
             "extension.manifest.unsupported-schema-version",
             format!(
                 "extension manifest schemaVersion must be 0.1.0, got {}",
                 manifest.schema_version
             ),
-            manifest_diagnostic_details(
+            manifest_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -418,13 +410,13 @@ fn validate_manifest(
         ));
     }
     if manifest.runtime_abi_version != RUNTIME_EXTENSION_ABI_VERSION {
-        diagnostics.push(RuntimeDiagnostic::structured_error(
+        issues.push(RuntimeIssue::structured_error(
             "extension.runtime-abi.unsupported-version",
             format!(
                 "extension {} requires runtimeAbiVersion {}, but runtime supports {RUNTIME_EXTENSION_ABI_VERSION}",
                 manifest.id, manifest.runtime_abi_version
             ),
-            manifest_diagnostic_details(
+            manifest_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -440,13 +432,13 @@ fn validate_manifest(
     for node in &manifest.provides.nodes {
         if let Err(report) = validate_node_definition_v01(node) {
             for error in report.errors() {
-                diagnostics.push(RuntimeDiagnostic::structured_error(
+                issues.push(RuntimeIssue::structured_error(
                     "extension.node.contract-invalid",
                     format!(
                         "node {} failed contract validation: {}",
                         node.id, error.message
                     ),
-                    manifest_diagnostic_details(
+                    manifest_issue_details(
                         package_dir,
                         manifest_path,
                         manifest,
@@ -468,7 +460,7 @@ fn validate_manifest(
             manifest_path,
             manifest,
             help.markdown_path.as_deref(),
-            &mut diagnostics,
+            &mut issues,
             HELP_MARKDOWN_FILE,
             json!({
                 "nodeId": help.node_id,
@@ -479,7 +471,7 @@ fn validate_manifest(
             manifest_path,
             manifest,
             help.graph_path.as_deref(),
-            &mut diagnostics,
+            &mut issues,
             HELP_GRAPH_FILE,
             json!({
                 "nodeId": help.node_id,
@@ -493,7 +485,7 @@ fn validate_manifest(
             manifest_path,
             manifest,
             test.fixture_path.as_deref(),
-            &mut diagnostics,
+            &mut issues,
             TEST_FIXTURE_FILE,
             json!({
                 "testId": test.id,
@@ -505,7 +497,7 @@ fn validate_manifest(
             manifest_path,
             manifest,
             test.expected_path.as_deref(),
-            &mut diagnostics,
+            &mut issues,
             TEST_EXPECTED_FILE,
             json!({
                 "testId": test.id,
@@ -516,17 +508,13 @@ fn validate_manifest(
 
     match manifest.kind {
         ExtensionKind::NativeRuntime => match &manifest.native {
-            Some(native) => validate_native_binding(
-                package_dir,
-                manifest_path,
-                manifest,
-                native,
-                &mut diagnostics,
-            ),
-            None => diagnostics.push(RuntimeDiagnostic::structured_error(
+            Some(native) => {
+                validate_native_binding(package_dir, manifest_path, manifest, native, &mut issues)
+            }
+            None => issues.push(RuntimeIssue::structured_error(
                 "extension.native.missing-binding",
                 "native-runtime extension must declare native binding",
-                manifest_diagnostic_details(
+                manifest_issue_details(
                     package_dir,
                     manifest_path,
                     manifest,
@@ -537,18 +525,12 @@ fn validate_manifest(
         },
         ExtensionKind::CorePackage | ExtensionKind::Codec | ExtensionKind::NodePack => {
             if let Some(native) = &manifest.native {
-                validate_native_binding(
-                    package_dir,
-                    manifest_path,
-                    manifest,
-                    native,
-                    &mut diagnostics,
-                );
+                validate_native_binding(package_dir, manifest_path, manifest, native, &mut issues);
             }
         }
     }
 
-    diagnostics
+    issues
 }
 
 fn validate_native_binding(
@@ -556,16 +538,16 @@ fn validate_native_binding(
     manifest_path: &Path,
     manifest: &ExtensionManifest,
     native: &ExtensionNativeBindingV01,
-    diagnostics: &mut Vec<RuntimeDiagnostic>,
+    issues: &mut Vec<RuntimeIssue>,
 ) {
     if native.entrypoint != "skenion_extension_init" {
-        diagnostics.push(RuntimeDiagnostic::structured_error(
+        issues.push(RuntimeIssue::structured_error(
             "extension.native.invalid-entrypoint",
             format!(
                 "native entrypoint must be skenion_extension_init, got {}",
                 native.entrypoint
             ),
-            manifest_diagnostic_details(
+            manifest_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -583,14 +565,14 @@ fn validate_native_binding(
         .iter()
         .find(|artifact| artifact.os == env::consts::OS && artifact.arch == env::consts::ARCH)
     else {
-        diagnostics.push(RuntimeDiagnostic::structured_error(
+        issues.push(RuntimeIssue::structured_error(
             "extension.native.missing-platform-artifact",
             format!(
                 "native extension has no artifact for {}-{}",
                 env::consts::OS,
                 env::consts::ARCH
             ),
-            manifest_diagnostic_details(
+            manifest_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -606,10 +588,10 @@ fn validate_native_binding(
 
     match relative_package_path(package_dir, &artifact.path) {
         Ok(path) if path.is_file() => {}
-        Ok(path) => diagnostics.push(RuntimeDiagnostic::structured_error(
+        Ok(path) => issues.push(RuntimeIssue::structured_error(
             "extension.native.missing-artifact",
             format!("native artifact does not exist: {}", path.display()),
-            package_file_diagnostic_details(
+            package_file_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -623,10 +605,10 @@ fn validate_native_binding(
                 }),
             ),
         )),
-        Err(message) => diagnostics.push(RuntimeDiagnostic::structured_error(
+        Err(message) => issues.push(RuntimeIssue::structured_error(
             "extension.package.invalid-path",
             message,
-            package_file_diagnostic_details(
+            package_file_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -648,8 +630,8 @@ fn validate_optional_relative_file(
     manifest_path: &Path,
     manifest: &ExtensionManifest,
     relative_path: Option<&str>,
-    diagnostics: &mut Vec<RuntimeDiagnostic>,
-    context: PackageFileDiagnosticContext,
+    issues: &mut Vec<RuntimeIssue>,
+    context: PackageFileIssueContext,
     extra_details: Value,
 ) {
     let Some(relative_path) = relative_path else {
@@ -658,10 +640,10 @@ fn validate_optional_relative_file(
 
     match relative_package_path(package_dir, relative_path) {
         Ok(path) if path.is_file() => {}
-        Ok(path) => diagnostics.push(RuntimeDiagnostic::structured_error(
+        Ok(path) => issues.push(RuntimeIssue::structured_error(
             context.missing_code,
             format!("package file does not exist: {}", path.display()),
-            package_file_diagnostic_details(
+            package_file_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -671,10 +653,10 @@ fn validate_optional_relative_file(
                 extra_details,
             ),
         )),
-        Err(message) => diagnostics.push(RuntimeDiagnostic::structured_error(
+        Err(message) => issues.push(RuntimeIssue::structured_error(
             "extension.package.invalid-path",
             message,
-            package_file_diagnostic_details(
+            package_file_issue_details(
                 package_dir,
                 manifest_path,
                 manifest,
@@ -714,76 +696,56 @@ struct ManifestHeader {
 }
 
 #[derive(Clone, Copy)]
-struct PackageFileDiagnosticContext {
+struct PackageFileIssueContext {
     surface: &'static str,
     missing_code: &'static str,
     file_kind: &'static str,
     path_detail_key: &'static str,
 }
 
-const HELP_MARKDOWN_FILE: PackageFileDiagnosticContext = PackageFileDiagnosticContext {
+const HELP_MARKDOWN_FILE: PackageFileIssueContext = PackageFileIssueContext {
     surface: "extension-help-file",
     missing_code: "extension.help.missing-file",
     file_kind: "help-markdown",
     path_detail_key: "filePath",
 };
 
-const HELP_GRAPH_FILE: PackageFileDiagnosticContext = PackageFileDiagnosticContext {
+const HELP_GRAPH_FILE: PackageFileIssueContext = PackageFileIssueContext {
     surface: "extension-help-file",
     missing_code: "extension.help.missing-file",
     file_kind: "help-graph",
     path_detail_key: "filePath",
 };
 
-const TEST_FIXTURE_FILE: PackageFileDiagnosticContext = PackageFileDiagnosticContext {
+const TEST_FIXTURE_FILE: PackageFileIssueContext = PackageFileIssueContext {
     surface: "extension-test-file",
     missing_code: "extension.test.missing-file",
     file_kind: "test-fixture",
     path_detail_key: "filePath",
 };
 
-const TEST_EXPECTED_FILE: PackageFileDiagnosticContext = PackageFileDiagnosticContext {
+const TEST_EXPECTED_FILE: PackageFileIssueContext = PackageFileIssueContext {
     surface: "extension-test-file",
     missing_code: "extension.test.missing-file",
     file_kind: "test-expected",
     path_detail_key: "filePath",
 };
 
-const NATIVE_ARTIFACT_FILE: PackageFileDiagnosticContext = PackageFileDiagnosticContext {
+const NATIVE_ARTIFACT_FILE: PackageFileIssueContext = PackageFileIssueContext {
     surface: "extension-native-artifact",
     missing_code: "extension.native.missing-artifact",
     file_kind: "native-artifact",
     path_detail_key: "artifactPath",
 };
 
-fn registry_log_diagnostics(response: &RuntimeExtensionListResponse) -> Vec<RuntimeDiagnostic> {
-    response
-        .diagnostics
-        .iter()
-        .chain(
-            response
-                .extensions
-                .iter()
-                .flat_map(|extension| extension.diagnostics.iter()),
-        )
-        .filter(|diagnostic| {
-            matches!(
-                diagnostic.severity,
-                DiagnosticSeverity::Warning | DiagnosticSeverity::Error
-            )
-        })
-        .cloned()
-        .collect()
-}
-
-fn manifest_diagnostic_details(
+fn manifest_issue_details(
     package_dir: &Path,
     manifest_path: &Path,
     manifest: &ExtensionManifest,
     surface: &str,
     extra_details: Value,
 ) -> Value {
-    registry_diagnostic_details(
+    registry_issue_details(
         surface,
         package_dir,
         Some(manifest_path),
@@ -793,14 +755,14 @@ fn manifest_diagnostic_details(
     )
 }
 
-fn header_diagnostic_details(
+fn header_issue_details(
     package_dir: &Path,
     manifest_path: &Path,
     header: Option<&ManifestHeader>,
     surface: &str,
     extra_details: Value,
 ) -> Value {
-    registry_diagnostic_details(
+    registry_issue_details(
         surface,
         package_dir,
         Some(manifest_path),
@@ -810,13 +772,13 @@ fn header_diagnostic_details(
     )
 }
 
-fn package_file_diagnostic_details(
+fn package_file_issue_details(
     package_dir: &Path,
     manifest_path: &Path,
     manifest: &ExtensionManifest,
     relative_path: &str,
     resolved_path: Option<&Path>,
-    context: PackageFileDiagnosticContext,
+    context: PackageFileIssueContext,
     extra_details: Value,
 ) -> Value {
     let mut details = object_details(extra_details);
@@ -829,7 +791,7 @@ fn package_file_diagnostic_details(
             json!(resolved_path.display().to_string()),
         );
     }
-    manifest_diagnostic_details(
+    manifest_issue_details(
         package_dir,
         manifest_path,
         manifest,
@@ -838,7 +800,7 @@ fn package_file_diagnostic_details(
     )
 }
 
-fn registry_diagnostic_details(
+fn registry_issue_details(
     surface: &str,
     package_dir: &Path,
     manifest_path: Option<&Path>,
@@ -909,7 +871,7 @@ fn failed_descriptor_from_manifest_value(
     package_dir: &Path,
     manifest_path: &Path,
     header: Option<&ManifestHeader>,
-    diagnostic: RuntimeDiagnostic,
+    issue: RuntimeIssue,
 ) -> RuntimeExtensionDescriptor {
     RuntimeExtensionDescriptor {
         id: header
@@ -938,7 +900,7 @@ fn failed_descriptor_from_manifest_value(
         provided_transports: Vec::new(),
         provided_help: Vec::new(),
         test_ids: Vec::new(),
-        diagnostics: vec![diagnostic],
+        issues: vec![issue],
     }
 }
 
@@ -969,14 +931,11 @@ mod tests {
         )
     }
 
-    fn diagnostic_by_code<'a>(
-        diagnostics: &'a [RuntimeDiagnostic],
-        code: &str,
-    ) -> &'a RuntimeDiagnostic {
-        diagnostics
+    fn issue_by_code<'a>(issues: &'a [RuntimeIssue], code: &str) -> &'a RuntimeIssue {
+        issues
             .iter()
-            .find(|diagnostic| diagnostic.code.as_deref() == Some(code))
-            .unwrap_or_else(|| panic!("missing {code} diagnostic: {diagnostics:#?}"))
+            .find(|issue| issue.code.as_deref() == Some(code))
+            .unwrap_or_else(|| panic!("missing {code} issue: {issues:#?}"))
     }
 
     #[test]
@@ -1003,7 +962,7 @@ mod tests {
 
         assert!(response.ok);
         assert!(response.extensions.is_empty());
-        assert!(response.diagnostics.is_empty());
+        assert!(response.issues.is_empty());
     }
 
     #[test]
@@ -1015,15 +974,12 @@ mod tests {
 
         assert!(response.ok);
         assert!(response.extensions.is_empty());
+        assert_eq!(response.issues[0].severity, IssueSeverity::Warning);
         assert_eq!(
-            response.diagnostics[0].severity,
-            DiagnosticSeverity::Warning
-        );
-        assert_eq!(
-            response.diagnostics[0].code.as_deref(),
+            response.issues[0].code.as_deref(),
             Some("extension.manifest.missing")
         );
-        let details = response.diagnostics[0].details.as_ref().unwrap();
+        let details = response.issues[0].details.as_ref().unwrap();
         assert_eq!(details["surface"], "extension-manifest");
         assert_eq!(details["action"], "scan");
         assert_eq!(details["registryEvent"], "extension-package-load");
@@ -1045,7 +1001,7 @@ mod tests {
             RuntimeExtensionStatus::Failed
         );
         assert!(
-            response.extensions[0].diagnostics[0]
+            response.extensions[0].issues[0]
                 .message
                 .contains("failed to parse extension manifest")
         );
@@ -1075,9 +1031,8 @@ mod tests {
         assert_eq!(descriptor.runtime_abi_version, "9.9.9");
         assert_eq!(descriptor.kind, ExtensionKind::Codec);
         assert_eq!(descriptor.status, RuntimeExtensionStatus::Failed);
-        let diagnostic =
-            diagnostic_by_code(&descriptor.diagnostics, "extension.manifest.parse-failed");
-        let details = diagnostic.details.as_ref().unwrap();
+        let issue = issue_by_code(&descriptor.issues, "extension.manifest.parse-failed");
+        let details = issue.details.as_ref().unwrap();
         assert_eq!(details["packageId"], "example/header-invalid");
         assert_eq!(details["manifestId"], "example/header-invalid");
         assert_eq!(details["packageVersion"], "1.2.3");
@@ -1096,7 +1051,7 @@ mod tests {
             manifest_path.display().to_string()
         );
         assert!(
-            descriptor.diagnostics[0]
+            descriptor.issues[0]
                 .message
                 .contains("failed to read extension manifest")
         );
@@ -1127,12 +1082,12 @@ mod tests {
             response.extensions[0].status,
             RuntimeExtensionStatus::Failed
         );
-        let diagnostic = diagnostic_by_code(
-            &response.extensions[0].diagnostics,
+        let issue = issue_by_code(
+            &response.extensions[0].issues,
             "extension.manifest.unsupported-schema-version",
         );
         assert_eq!(
-            diagnostic.details.as_ref().unwrap()["receivedSchemaVersion"],
+            issue.details.as_ref().unwrap()["receivedSchemaVersion"],
             "9.9.9"
         );
     }
@@ -1170,13 +1125,14 @@ mod tests {
             response.extensions[0].status,
             RuntimeExtensionStatus::Failed
         );
-        assert!(response.extensions[0].diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("must stay inside package directory")
-        }));
-        let missing_help = diagnostic_by_code(
-            &response.extensions[0].diagnostics,
+        assert!(
+            response.extensions[0]
+                .issues
+                .iter()
+                .any(|issue| { issue.message.contains("must stay inside package directory") })
+        );
+        let missing_help = issue_by_code(
+            &response.extensions[0].issues,
             "extension.help.missing-file",
         );
         assert_eq!(
@@ -1187,8 +1143,8 @@ mod tests {
             missing_help.details.as_ref().unwrap()["filePath"],
             "help/missing.md"
         );
-        let invalid_package_path = diagnostic_by_code(
-            &response.extensions[0].diagnostics,
+        let invalid_package_path = issue_by_code(
+            &response.extensions[0].issues,
             "extension.package.invalid-path",
         );
         assert_eq!(
@@ -1198,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_abi_and_native_contract_errors_are_package_diagnostics() {
+    fn schema_abi_and_native_contract_errors_are_package_issues() {
         let package_dir = temp_dir("invalid-package-contract");
         write_manifest(
             &package_dir,
@@ -1216,10 +1172,10 @@ mod tests {
         let manager = RuntimeExtensionManager::with_package_dirs(vec![package_dir.clone()]);
 
         let response = manager.list_extensions();
-        let diagnostics = &response.extensions[0].diagnostics;
-        let messages = diagnostics
+        let issues = &response.extensions[0].issues;
+        let messages = issues
             .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
+            .map(|issue| issue.message.as_str())
             .collect::<Vec<_>>();
 
         assert!(!response.ok);
@@ -1244,9 +1200,8 @@ mod tests {
                 .any(|message| message.contains("must declare native binding"))
         );
 
-        let schema_diagnostic =
-            diagnostic_by_code(diagnostics, "extension.manifest.invalid-schema");
-        let schema_details = schema_diagnostic.details.as_ref().unwrap();
+        let schema_issue = issue_by_code(issues, "extension.manifest.invalid-schema");
+        let schema_details = schema_issue.details.as_ref().unwrap();
         assert_eq!(schema_details["surface"], "extension-manifest");
         assert_eq!(schema_details["packageId"], "example/native-missing");
         assert_eq!(schema_details["manifestId"], "example/native-missing");
@@ -1264,9 +1219,9 @@ mod tests {
         );
         assert_eq!(schema_details["receivedSchema"], "other.manifest");
 
-        let schema_version_diagnostic =
-            diagnostic_by_code(diagnostics, "extension.manifest.unsupported-schema-version");
-        let schema_version_details = schema_version_diagnostic.details.as_ref().unwrap();
+        let schema_version_issue =
+            issue_by_code(issues, "extension.manifest.unsupported-schema-version");
+        let schema_version_details = schema_version_issue.details.as_ref().unwrap();
         assert_eq!(schema_version_details["surface"], "extension-manifest");
         assert_eq!(
             schema_version_details["packageId"],
@@ -1287,9 +1242,8 @@ mod tests {
         assert_eq!(schema_version_details["expectedSchemaVersion"], "0.1.0");
         assert_eq!(schema_version_details["receivedSchemaVersion"], "9.9.9");
 
-        let abi_diagnostic =
-            diagnostic_by_code(diagnostics, "extension.runtime-abi.unsupported-version");
-        let abi_details = abi_diagnostic.details.as_ref().unwrap();
+        let abi_issue = issue_by_code(issues, "extension.runtime-abi.unsupported-version");
+        let abi_details = abi_issue.details.as_ref().unwrap();
         assert_eq!(abi_details["surface"], "extension-runtime-abi");
         assert_eq!(abi_details["packageId"], "example/native-missing");
         assert_eq!(abi_details["manifestId"], "example/native-missing");
@@ -1307,8 +1261,7 @@ mod tests {
         );
         assert_eq!(abi_details["receivedRuntimeAbiVersion"], "9.9.9");
 
-        let missing_native_binding =
-            diagnostic_by_code(diagnostics, "extension.native.missing-binding");
+        let missing_native_binding = issue_by_code(issues, "extension.native.missing-binding");
         assert_eq!(
             missing_native_binding.details.as_ref().unwrap()["surface"],
             "extension-native-binding"
@@ -1356,8 +1309,8 @@ mod tests {
             response.extensions[0].status,
             RuntimeExtensionStatus::Failed
         );
-        assert!(response.extensions[0].diagnostics.iter().any(|diagnostic| {
-            diagnostic
+        assert!(response.extensions[0].issues.iter().any(|issue| {
+            issue
                 .message
                 .contains("node example.bad failed contract validation")
         }));
@@ -1440,8 +1393,8 @@ mod tests {
         let messages = response
             .extensions
             .iter()
-            .flat_map(|extension| extension.diagnostics.iter())
-            .map(|diagnostic| diagnostic.message.as_str())
+            .flat_map(|extension| extension.issues.iter())
+            .map(|issue| issue.message.as_str())
             .collect::<Vec<_>>();
 
         assert!(!response.ok);
@@ -1465,11 +1418,9 @@ mod tests {
         let missing_artifact = response
             .extensions
             .iter()
-            .flat_map(|extension| extension.diagnostics.iter())
-            .find(|diagnostic| {
-                diagnostic.code.as_deref() == Some("extension.native.missing-artifact")
-            })
-            .expect("missing native artifact diagnostic should exist");
+            .flat_map(|extension| extension.issues.iter())
+            .find(|issue| issue.code.as_deref() == Some("extension.native.missing-artifact"))
+            .expect("missing native artifact issue should exist");
         assert_eq!(
             missing_artifact.details.as_ref().unwrap()["targetOs"],
             env::consts::OS
@@ -1486,11 +1437,11 @@ mod tests {
         let unsupported_artifact = response
             .extensions
             .iter()
-            .flat_map(|extension| extension.diagnostics.iter())
-            .find(|diagnostic| {
-                diagnostic.code.as_deref() == Some("extension.native.missing-platform-artifact")
+            .flat_map(|extension| extension.issues.iter())
+            .find(|issue| {
+                issue.code.as_deref() == Some("extension.native.missing-platform-artifact")
             })
-            .expect("missing platform artifact diagnostic should exist");
+            .expect("missing platform artifact issue should exist");
         assert_eq!(
             unsupported_artifact.details.as_ref().unwrap()["targetOs"],
             env::consts::OS
@@ -1503,11 +1454,9 @@ mod tests {
         let invalid_entrypoint = response
             .extensions
             .iter()
-            .flat_map(|extension| extension.diagnostics.iter())
-            .find(|diagnostic| {
-                diagnostic.code.as_deref() == Some("extension.native.invalid-entrypoint")
-            })
-            .expect("invalid entrypoint diagnostic should exist");
+            .flat_map(|extension| extension.issues.iter())
+            .find(|issue| issue.code.as_deref() == Some("extension.native.invalid-entrypoint"))
+            .expect("invalid entrypoint issue should exist");
         assert_eq!(
             invalid_entrypoint.details.as_ref().unwrap()["receivedEntrypoint"],
             "bad_init"
@@ -1751,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_scan_log_diagnostics_include_only_warning_and_error_package_events() {
+    fn registry_scan_reports_missing_manifest_issue_without_log_projection() {
         let valid_dir = temp_dir("scan-valid-package");
         write_manifest(
             &valid_dir,
@@ -1775,17 +1724,16 @@ mod tests {
 
         assert!(response.ok);
         assert_eq!(response.extensions.len(), 1);
-        assert_eq!(scan.log_diagnostics().len(), 1);
         assert_eq!(
-            scan.log_diagnostics()[0].code.as_deref(),
+            response.issues[0].code.as_deref(),
             Some("extension.manifest.missing")
         );
-        assert!(scan.log_diagnostics()[0].details.is_some());
+        assert!(response.issues[0].details.is_some());
     }
 
     #[test]
-    fn package_file_diagnostic_details_include_relative_and_resolved_paths() {
-        let package_dir = temp_dir("file-diagnostic-details");
+    fn package_file_issue_details_include_relative_and_resolved_paths() {
+        let package_dir = temp_dir("file-issue-details");
         let manifest_path = package_dir.join(RUNTIME_EXTENSION_MANIFEST_FILE);
         let manifest: ExtensionManifest = serde_json::from_value(json!({
             "schema": "skenion.extension.manifest",
@@ -1800,7 +1748,7 @@ mod tests {
         .unwrap();
         let resolved_path = package_dir.join("help/example.skenion.json");
 
-        let details = package_file_diagnostic_details(
+        let details = package_file_issue_details(
             &package_dir,
             &manifest_path,
             &manifest,

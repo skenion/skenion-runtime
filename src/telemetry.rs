@@ -7,9 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    PreviewState, RuntimeDiagnostic, RuntimePreviewStatusResponse, RuntimeSessionSnapshot,
-};
+use crate::{PreviewState, RuntimeIssue, RuntimePreviewStatusResponse, RuntimeSessionSnapshot};
 
 pub const TELEMETRY_SCHEMA: &str = "skenion.runtime.telemetry";
 pub const TELEMETRY_SCHEMA_VERSION: &str = "0.1.0";
@@ -28,7 +26,7 @@ pub struct RuntimeTelemetrySnapshot {
     pub preview: RuntimeTelemetryPreview,
     pub render: RuntimeTelemetryRender,
     pub process: RuntimeTelemetryProcess,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,7 +66,7 @@ pub struct RuntimeTelemetryRender {
     pub last_frame_ms: Option<f64>,
     pub last_error: Option<String>,
     pub source_node_id: Option<String>,
-    pub diagnostics: Vec<ShaderDiagnostic>,
+    pub issues: Vec<ShaderIssue>,
     pub generated_source_available: bool,
     pub control_revision: Option<u64>,
     pub preview_control_revision: Option<u64>,
@@ -100,7 +98,7 @@ pub struct PreviewTelemetryHeartbeat {
     pub last_frame_ms: Option<f64>,
     pub last_error: Option<String>,
     pub source_node_id: Option<String>,
-    pub diagnostics: Vec<ShaderDiagnostic>,
+    pub issues: Vec<ShaderIssue>,
     pub generated_source_available: bool,
     pub control_revision: Option<u64>,
     pub preview_control_revision: Option<u64>,
@@ -110,7 +108,7 @@ pub struct PreviewTelemetryHeartbeat {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ShaderDiagnosticSeverity {
+pub enum ShaderIssueSeverity {
     Error,
     Warning,
     Info,
@@ -118,7 +116,7 @@ pub enum ShaderDiagnosticSeverity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ShaderDiagnosticPhase {
+pub enum ShaderIssuePhase {
     InterfaceAnalysis,
     SourceSync,
     WgslGeneration,
@@ -129,7 +127,7 @@ pub enum ShaderDiagnosticPhase {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ShaderDiagnosticSource {
+pub enum ShaderIssueSource {
     User,
     Generated,
     Runtime,
@@ -137,9 +135,9 @@ pub enum ShaderDiagnosticSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ShaderDiagnostic {
-    pub severity: ShaderDiagnosticSeverity,
-    pub phase: ShaderDiagnosticPhase,
+pub struct ShaderIssue {
+    pub severity: ShaderIssueSeverity,
+    pub phase: ShaderIssuePhase,
     pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,16 +150,16 @@ pub struct ShaderDiagnostic {
     pub end_column: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uniform_id: Option<String>,
-    pub source: ShaderDiagnosticSource,
+    pub source: ShaderIssueSource,
 }
 
-impl ShaderDiagnostic {
+impl ShaderIssue {
     pub fn new(
-        severity: ShaderDiagnosticSeverity,
-        phase: ShaderDiagnosticPhase,
+        severity: ShaderIssueSeverity,
+        phase: ShaderIssuePhase,
         code: impl Into<String>,
         message: impl Into<String>,
-        source: ShaderDiagnosticSource,
+        source: ShaderIssueSource,
     ) -> Self {
         Self {
             severity,
@@ -178,18 +176,12 @@ impl ShaderDiagnostic {
     }
 
     pub fn error(
-        phase: ShaderDiagnosticPhase,
+        phase: ShaderIssuePhase,
         code: impl Into<String>,
         message: impl Into<String>,
-        source: ShaderDiagnosticSource,
+        source: ShaderIssueSource,
     ) -> Self {
-        Self::new(
-            ShaderDiagnosticSeverity::Error,
-            phase,
-            code,
-            message,
-            source,
-        )
+        Self::new(ShaderIssueSeverity::Error, phase, code, message, source)
     }
 
     pub fn with_line_column(mut self, line: Option<usize>, column: Option<usize>) -> Self {
@@ -218,7 +210,7 @@ pub struct PreviewTelemetryWriter {
     last_write_at: Option<Instant>,
     last_frame_ms: Option<f64>,
     last_error: Option<String>,
-    diagnostics: Vec<ShaderDiagnostic>,
+    issues: Vec<ShaderIssue>,
     generated_source_available: bool,
     control_revision: Option<u64>,
     preview_control_revision: Option<u64>,
@@ -233,9 +225,9 @@ impl RuntimeTelemetrySnapshot {
         heartbeat: Option<PreviewTelemetryHeartbeat>,
         dry_run: bool,
         uptime_ms: u64,
-        diagnostics: Vec<RuntimeDiagnostic>,
+        issues: Vec<RuntimeIssue>,
     ) -> Self {
-        let render = render_from_preview(&preview, heartbeat, dry_run, &diagnostics);
+        let render = render_from_preview(&preview, heartbeat, dry_run, &issues);
 
         Self {
             schema: TELEMETRY_SCHEMA.to_owned(),
@@ -267,7 +259,7 @@ impl RuntimeTelemetrySnapshot {
                 runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
                 uptime_ms,
             },
-            diagnostics,
+            issues,
         }
     }
 }
@@ -297,7 +289,7 @@ impl PreviewTelemetryWriter {
             last_write_at: None,
             last_frame_ms: None,
             last_error: None,
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
             generated_source_available,
             control_revision: None,
             preview_control_revision: None,
@@ -317,20 +309,20 @@ impl PreviewTelemetryWriter {
     pub fn record_error(&mut self, error: impl Into<String>) {
         let message = error.into();
         self.last_error = Some(message.clone());
-        self.diagnostics.push(ShaderDiagnostic::error(
-            ShaderDiagnosticPhase::RenderFrame,
+        self.issues.push(ShaderIssue::error(
+            ShaderIssuePhase::RenderFrame,
             "render-error",
             message,
-            ShaderDiagnosticSource::Runtime,
+            ShaderIssueSource::Runtime,
         ));
         self.write_if_due(Instant::now(), true);
     }
 
-    pub fn record_shader_diagnostic(&mut self, diagnostic: ShaderDiagnostic) {
-        if diagnostic.severity == ShaderDiagnosticSeverity::Error {
-            self.last_error = Some(diagnostic.message.clone());
+    pub fn record_shader_issue(&mut self, issue: ShaderIssue) {
+        if issue.severity == ShaderIssueSeverity::Error {
+            self.last_error = Some(issue.message.clone());
         }
-        self.diagnostics.push(diagnostic);
+        self.issues.push(issue);
         self.write_if_due(Instant::now(), true);
     }
 
@@ -388,7 +380,7 @@ impl PreviewTelemetryWriter {
             last_frame_ms: self.last_frame_ms.map(round_1),
             last_error: self.last_error.clone(),
             source_node_id: self.source_node_id.clone(),
-            diagnostics: self.diagnostics.clone(),
+            issues: self.issues.clone(),
             generated_source_available: self.generated_source_available,
             control_revision: self.control_revision,
             preview_control_revision: self.preview_control_revision,
@@ -462,7 +454,7 @@ fn render_from_preview(
     preview: &RuntimePreviewStatusResponse,
     heartbeat: Option<PreviewTelemetryHeartbeat>,
     dry_run: bool,
-    diagnostics: &[RuntimeDiagnostic],
+    issues: &[RuntimeIssue],
 ) -> RuntimeTelemetryRender {
     let active = matches!(
         preview.state,
@@ -489,9 +481,9 @@ fn render_from_preview(
             last_frame_ms: None,
             last_error,
             source_node_id,
-            diagnostics: heartbeat
+            issues: heartbeat
                 .as_ref()
-                .map(|heartbeat| heartbeat.diagnostics.clone())
+                .map(|heartbeat| heartbeat.issues.clone())
                 .unwrap_or_default(),
             generated_source_available: heartbeat
                 .as_ref()
@@ -533,7 +525,7 @@ fn render_from_preview(
             last_frame_ms: heartbeat.last_frame_ms,
             last_error: heartbeat.last_error.or_else(|| preview.message.clone()),
             source_node_id: heartbeat.source_node_id,
-            diagnostics: heartbeat.diagnostics,
+            issues: heartbeat.issues,
             generated_source_available: heartbeat.generated_source_available,
             control_revision,
             preview_control_revision,
@@ -549,12 +541,12 @@ fn render_from_preview(
         frames_rendered: 0,
         approx_fps: None,
         last_frame_ms: None,
-        last_error: diagnostics
+        last_error: issues
             .first()
-            .map(|diagnostic| diagnostic.message.clone())
+            .map(|issue| issue.message.clone())
             .or_else(|| preview.message.clone()),
         source_node_id: None,
-        diagnostics: Vec::new(),
+        issues: Vec::new(),
         generated_source_available: false,
         control_revision: preview.control_revision,
         preview_control_revision: preview.preview_control_revision,
@@ -572,9 +564,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        DiagnosticSeverity, GraphDocument, GraphNode, ProjectDocumentCurrent, RuntimeDiagnostic,
-    };
+    use crate::{GraphDocument, GraphNode, IssueSeverity, ProjectDocumentCurrent, RuntimeIssue};
 
     #[test]
     fn writes_and_reads_preview_heartbeat_atomically() {
@@ -713,9 +703,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_snapshot_keeps_invalid_heartbeat_diagnostic_nonfatal() {
-        let diagnostic = RuntimeDiagnostic {
-            severity: DiagnosticSeverity::Warning,
+    fn runtime_snapshot_keeps_invalid_heartbeat_issue_nonfatal() {
+        let issue = RuntimeIssue {
+            severity: IssueSeverity::Warning,
             message: "invalid preview telemetry heartbeat: expected value".to_owned(),
             code: None,
             details: None,
@@ -726,14 +716,11 @@ mod tests {
             None,
             false,
             0,
-            vec![diagnostic],
+            vec![issue],
         );
 
         assert!(snapshot.ok);
-        assert_eq!(
-            snapshot.diagnostics[0].severity,
-            DiagnosticSeverity::Warning
-        );
+        assert_eq!(snapshot.issues[0].severity, IssueSeverity::Warning);
         assert_eq!(
             snapshot.render.last_error.as_deref(),
             Some("invalid preview telemetry heartbeat: expected value")
@@ -820,24 +807,21 @@ mod tests {
 
         assert_eq!(decoded.frames_rendered, 0);
         assert_eq!(decoded.last_error.as_deref(), Some("surface lost"));
-        assert_eq!(
-            decoded.diagnostics[0].phase,
-            ShaderDiagnosticPhase::RenderFrame
-        );
+        assert_eq!(decoded.issues[0].phase, ShaderIssuePhase::RenderFrame);
         std::fs::remove_file(path).expect("heartbeat should be removable");
     }
 
     #[test]
-    fn preview_telemetry_writer_records_shader_diagnostics() {
+    fn preview_telemetry_writer_records_shader_issues() {
         let path = std::env::temp_dir().join(format!(
-            "skenion-preview-telemetry-shader-diagnostic-{}.json",
+            "skenion-preview-telemetry-shader-issue-{}.json",
             std::process::id()
         ));
         let mut writer = test_writer(path.clone());
 
-        writer.record_shader_diagnostic(ShaderDiagnostic {
-            severity: ShaderDiagnosticSeverity::Warning,
-            phase: ShaderDiagnosticPhase::InterfaceAnalysis,
+        writer.record_shader_issue(ShaderIssue {
+            severity: ShaderIssueSeverity::Warning,
+            phase: ShaderIssuePhase::InterfaceAnalysis,
             code: "unused-uniform".to_owned(),
             message: "uniform tint is not referenced".to_owned(),
             line: Some(2),
@@ -845,32 +829,26 @@ mod tests {
             end_line: None,
             end_column: None,
             uniform_id: Some("tint".to_owned()),
-            source: ShaderDiagnosticSource::User,
+            source: ShaderIssueSource::User,
         });
         let warning = read_preview_telemetry(&path)
             .expect("heartbeat should read")
             .expect("heartbeat should exist");
         assert_eq!(warning.last_error, None);
-        assert_eq!(
-            warning.diagnostics[0].severity,
-            ShaderDiagnosticSeverity::Warning
-        );
+        assert_eq!(warning.issues[0].severity, ShaderIssueSeverity::Warning);
 
-        writer.record_shader_diagnostic(ShaderDiagnostic::error(
-            ShaderDiagnosticPhase::WgslCompile,
+        writer.record_shader_issue(ShaderIssue::error(
+            ShaderIssuePhase::WgslCompile,
             "wgsl-validation",
             "invalid shader module",
-            ShaderDiagnosticSource::Generated,
+            ShaderIssueSource::Generated,
         ));
         let error = read_preview_telemetry(&path)
             .expect("heartbeat should read")
             .expect("heartbeat should exist");
         assert_eq!(error.last_error.as_deref(), Some("invalid shader module"));
-        assert_eq!(error.diagnostics.len(), 2);
-        assert_eq!(
-            error.diagnostics[1].phase,
-            ShaderDiagnosticPhase::WgslCompile
-        );
+        assert_eq!(error.issues.len(), 2);
+        assert_eq!(error.issues[1].phase, ShaderIssuePhase::WgslCompile);
         std::fs::remove_file(path).expect("heartbeat should be removable");
     }
 
@@ -922,11 +900,11 @@ mod tests {
             last_frame_ms: Some(16.7),
             last_error: None,
             source_node_id: Some("clear_1".to_owned()),
-            diagnostics: vec![ShaderDiagnostic::error(
-                ShaderDiagnosticPhase::RenderFrame,
-                "test-diagnostic",
-                "test diagnostic",
-                ShaderDiagnosticSource::Runtime,
+            issues: vec![ShaderIssue::error(
+                ShaderIssuePhase::RenderFrame,
+                "test-issue",
+                "test issue",
+                ShaderIssueSource::Runtime,
             )],
             generated_source_available: false,
             control_revision: Some(7),
@@ -971,7 +949,7 @@ mod tests {
             package_registry_revision: None,
             project,
             binding_formats: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
             plan: None,
         }
     }
@@ -981,6 +959,7 @@ mod tests {
             "schema": "skenion.project",
             "schemaVersion": "0.1.0",
             "id": format!("{}-project", graph.id),
+            "documentId": "30000000-0000-0000-0000-000000000002",
             "revision": graph.revision.clone(),
             "graph": {
                 "schema": "skenion.graph",
@@ -989,8 +968,16 @@ mod tests {
                 "revision": graph.revision.clone(),
                 "nodes": graph.nodes.iter().map(|node| json!({
                     "id": node.id.clone(),
-                    "kind": node.kind.clone(),
-                    "kindVersion": node.kind_version.clone(),
+                    "implementation": {
+                        "provider": { "kind": "core" },
+                        "objectId": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str())
+                    },
+                    "objectSpec": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str()),
+                    "objectResolution": {
+                        "status": "resolved",
+                        "candidates": [],
+                        "issues": []
+                    },
                     "params": node.params.clone(),
                     "ports": []
                 })).collect::<Vec<_>>(),
@@ -1039,7 +1026,7 @@ mod tests {
             exited_at: None,
             exit_code: None,
             message: None,
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }
     }
 
@@ -1054,7 +1041,7 @@ mod tests {
         );
         assert_eq!(value["framesRendered"], json!(10));
         assert_eq!(value["sourceNodeId"], json!("clear_1"));
-        assert_eq!(value["diagnostics"][0]["phase"], json!("render-frame"));
+        assert_eq!(value["issues"][0]["phase"], json!("render-frame"));
         assert_eq!(value["generatedSourceAvailable"], json!(false));
     }
 }

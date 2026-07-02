@@ -10,13 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use skenion_contracts::{
-    PackageChecksumAlgorithmV01, PackageChecksumV01, PackageContractsSupportV01,
-    PackageDiagnosticSeverityV01, PackageDiagnosticV01, PackageManifestV01, PackageProvidedRefV01,
-    PackageProvidesV01, PackageRootKindV01, PackageSourceV01, PackageTargetTripleV01,
-    PackageTrustV01, SKENION_PACKAGE_MANIFEST_FILE_NAME, validate_package_manifest_v01,
+    PackageChecksumAlgorithmV01, PackageChecksumV01, PackageContractsRequirementV01,
+    PackageIssueSeverityV01, PackageIssueV01, PackageManifestV01, PackageObjectExportV01,
+    PackageProvidedRefV01, PackageProvidesV01, PackageRootKindV01, PackageSourceV01,
+    PackageTargetTripleV01, PackageTrustV01, SKENION_PACKAGE_MANIFEST_FILE_NAME,
+    validate_package_manifest_v01,
 };
-
-use crate::{DiagnosticSeverity, RuntimeDiagnostic};
 
 pub const RUNTIME_PACKAGE_MANIFEST_FILE: &str = SKENION_PACKAGE_MANIFEST_FILE_NAME;
 pub const SKENION_PACKAGE_PATH_ENV: &str = "SKENION_PACKAGE_PATH";
@@ -34,15 +33,17 @@ pub struct PackageRegistryEntryV01 {
     pub source: PackageSourceV01,
     pub root: PackageRootKindV01,
     pub trust: PackageTrustV01,
-    pub contracts: PackageContractsSupportV01,
+    pub contracts: PackageContractsRequirementV01,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_abi_range: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<PackageTargetTripleV01>,
     pub manifest_path: String,
+    #[serde(skip)]
+    pub(crate) root_path: Option<PathBuf>,
     pub manifest_checksum: PackageChecksumV01,
     pub provides: PackageProvidesV01,
-    pub diagnostics: Vec<PackageDiagnosticV01>,
+    pub issues: Vec<PackageIssueV01>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -51,7 +52,7 @@ pub struct PackageRegistryEntryV01 {
 pub struct PackageRegistryListResponseV01 {
     pub ok: bool,
     pub packages: Vec<PackageRegistryEntryV01>,
-    pub diagnostics: Vec<PackageDiagnosticV01>,
+    pub issues: Vec<PackageIssueV01>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -76,7 +77,7 @@ impl Default for RuntimePackageRegistrySnapshot {
             response: PackageRegistryListResponseV01 {
                 ok: true,
                 packages: Vec::new(),
-                diagnostics: Vec::new(),
+                issues: Vec::new(),
             },
             revision: 0,
             event_id: "package-registry-event-000000".to_owned(),
@@ -123,14 +124,9 @@ impl RuntimePackageRegistrySnapshot {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimePackageRegistryScan {
     snapshot: RuntimePackageRegistrySnapshot,
-    log_diagnostics: Vec<RuntimeDiagnostic>,
 }
 
 impl RuntimePackageRegistryScan {
-    pub(crate) fn log_diagnostics(&self) -> &[RuntimeDiagnostic] {
-        &self.log_diagnostics
-    }
-
     pub(crate) fn into_snapshot(self) -> RuntimePackageRegistrySnapshot {
         self.snapshot
     }
@@ -163,7 +159,7 @@ impl RuntimePackageManager {
 
     pub(crate) fn scan_registry(&self) -> RuntimePackageRegistryScan {
         let root_infos = self.root_infos();
-        let mut diagnostics = root_overlap_diagnostics(&root_infos);
+        let mut issues = root_overlap_issues(&root_infos);
         let duplicate_root_indexes = duplicate_root_indexes(&root_infos);
         let mut packages = Vec::new();
 
@@ -174,14 +170,14 @@ impl RuntimePackageManager {
 
             match read_package_root(&root_info) {
                 PackageRootRead::Package(entry) => packages.push(*entry),
-                PackageRootRead::Diagnostics(mut root_diagnostics) => {
-                    diagnostics.append(&mut root_diagnostics);
+                PackageRootRead::Issues(mut root_issues) => {
+                    issues.append(&mut root_issues);
                 }
             }
         }
 
-        diagnostics.extend(duplicate_package_diagnostics(&packages));
-        sort_package_diagnostics(&mut diagnostics);
+        issues.extend(duplicate_package_issues(&packages));
+        sort_package_issues(&mut issues);
         packages.sort_by(|a, b| {
             a.package_id
                 .cmp(&b.package_id)
@@ -189,21 +185,15 @@ impl RuntimePackageManager {
         });
 
         let response = PackageRegistryListResponseV01 {
-            ok: !diagnostics
+            ok: !issues
                 .iter()
-                .chain(
-                    packages
-                        .iter()
-                        .flat_map(|package| package.diagnostics.iter()),
-                )
-                .any(package_diagnostic_is_error),
+                .chain(packages.iter().flat_map(|package| package.issues.iter()))
+                .any(package_issue_is_error),
             packages,
-            diagnostics,
+            issues,
         };
-        let log_diagnostics = registry_log_diagnostics(&response);
         RuntimePackageRegistryScan {
             snapshot: RuntimePackageRegistrySnapshot::from_response(response),
-            log_diagnostics,
         }
     }
 
@@ -235,13 +225,13 @@ struct PackageRootInfo {
 
 enum PackageRootRead {
     Package(Box<PackageRegistryEntryV01>),
-    Diagnostics(Vec<PackageDiagnosticV01>),
+    Issues(Vec<PackageIssueV01>),
 }
 
 fn read_package_root(root_info: &PackageRootInfo) -> PackageRootRead {
     let Some(root_canonical) = root_info.canonical_path.as_deref() else {
-        return PackageRootRead::Diagnostics(vec![root_diagnostic(
-            PackageDiagnosticSeverityV01::Error,
+        return PackageRootRead::Issues(vec![root_issue(
+            PackageIssueSeverityV01::Error,
             "package.root.unreadable",
             format!("package root {} is not readable", root_info.display_name),
             root_info,
@@ -258,8 +248,8 @@ fn read_package_root(root_info: &PackageRootInfo) -> PackageRootRead {
     let has_extension_manifest = extension_manifest_path.is_file();
 
     if has_package_manifest && has_extension_manifest {
-        return PackageRootRead::Diagnostics(vec![root_diagnostic(
-            PackageDiagnosticSeverityV01::Error,
+        return PackageRootRead::Issues(vec![root_issue(
+            PackageIssueSeverityV01::Error,
             "package.root.both-manifests",
             format!(
                 "package root {} must not contain both skenion.package.json and skenion.extension.json",
@@ -274,8 +264,8 @@ fn read_package_root(root_info: &PackageRootInfo) -> PackageRootRead {
     }
 
     if !has_package_manifest && has_extension_manifest {
-        return PackageRootRead::Diagnostics(vec![root_diagnostic(
-            PackageDiagnosticSeverityV01::Error,
+        return PackageRootRead::Issues(vec![root_issue(
+            PackageIssueSeverityV01::Error,
             "package.root.extension-only",
             format!(
                 "package root {} contains only the legacy extension manifest",
@@ -290,8 +280,8 @@ fn read_package_root(root_info: &PackageRootInfo) -> PackageRootRead {
     }
 
     if !has_package_manifest {
-        return PackageRootRead::Diagnostics(vec![root_diagnostic(
-            PackageDiagnosticSeverityV01::Error,
+        return PackageRootRead::Issues(vec![root_issue(
+            PackageIssueSeverityV01::Error,
             "package.manifest.missing",
             format!(
                 "package root {} does not contain skenion.package.json",
@@ -308,8 +298,8 @@ fn read_package_root(root_info: &PackageRootInfo) -> PackageRootRead {
     let contents = match fs::read_to_string(&manifest_path) {
         Ok(contents) => contents,
         Err(error) => {
-            return PackageRootRead::Diagnostics(vec![root_diagnostic(
-                PackageDiagnosticSeverityV01::Error,
+            return PackageRootRead::Issues(vec![root_issue(
+                PackageIssueSeverityV01::Error,
                 "package.manifest.read-failed",
                 format!(
                     "failed to read package manifest for {}",
@@ -327,8 +317,8 @@ fn read_package_root(root_info: &PackageRootInfo) -> PackageRootRead {
     let manifest_value = match serde_json::from_str::<Value>(&contents) {
         Ok(value) => value,
         Err(error) => {
-            return PackageRootRead::Diagnostics(vec![root_diagnostic(
-                PackageDiagnosticSeverityV01::Error,
+            return PackageRootRead::Issues(vec![root_issue(
+                PackageIssueSeverityV01::Error,
                 "package.manifest.parse-failed",
                 format!(
                     "failed to parse package manifest for {}",
@@ -346,8 +336,8 @@ fn read_package_root(root_info: &PackageRootInfo) -> PackageRootRead {
     let manifest = match serde_json::from_value::<PackageManifestV01>(manifest_value) {
         Ok(manifest) => manifest,
         Err(error) => {
-            return PackageRootRead::Diagnostics(vec![root_diagnostic(
-                PackageDiagnosticSeverityV01::Error,
+            return PackageRootRead::Issues(vec![root_issue(
+                PackageIssueSeverityV01::Error,
                 "package.manifest.decode-failed",
                 format!(
                     "failed to decode package manifest for {}",
@@ -376,14 +366,10 @@ fn package_entry_from_manifest(
     manifest_contents: &str,
     manifest: PackageManifestV01,
 ) -> PackageRegistryEntryV01 {
-    let mut diagnostics = manifest.diagnostics.clone();
-    diagnostics.extend(contract_validation_diagnostics(root_info, &manifest));
-    diagnostics.extend(package_path_diagnostics(
-        root_info,
-        root_canonical,
-        &manifest,
-    ));
-    sort_package_diagnostics(&mut diagnostics);
+    let mut issues = manifest.issues.clone();
+    issues.extend(contract_validation_issues(root_info, &manifest));
+    issues.extend(package_path_issues(root_info, root_canonical, &manifest));
+    sort_package_issues(&mut issues);
 
     PackageRegistryEntryV01 {
         package_id: manifest.id,
@@ -396,15 +382,17 @@ fn package_entry_from_manifest(
         runtime_abi_range: manifest.runtime_abi_range,
         targets: manifest.targets,
         manifest_path: RUNTIME_PACKAGE_MANIFEST_FILE.to_owned(),
+        root_path: Some(root_canonical.to_path_buf()),
         manifest_checksum: manifest_checksum(manifest_contents.as_bytes()),
         provides: public_package_provides(manifest.provides),
-        diagnostics,
+        issues,
     }
 }
 
 fn public_package_provides(mut provides: PackageProvidesV01) -> PackageProvidesV01 {
     sanitize_provided_paths(&mut provides.patches);
     sanitize_provided_paths(&mut provides.nodes);
+    sanitize_object_definition_paths(&mut provides.objects);
     sanitize_provided_paths(&mut provides.resources);
     sanitize_provided_paths(&mut provides.help);
     provides
@@ -416,18 +404,24 @@ fn sanitize_provided_paths(provided: &mut [PackageProvidedRefV01]) {
     }
 }
 
-fn contract_validation_diagnostics(
+fn sanitize_object_definition_paths(objects: &mut [PackageObjectExportV01]) {
+    for object in objects {
+        object.definition_path = public_manifest_path(&object.definition_path);
+    }
+}
+
+fn contract_validation_issues(
     root_info: &PackageRootInfo,
     manifest: &PackageManifestV01,
-) -> Vec<PackageDiagnosticV01> {
+) -> Vec<PackageIssueV01> {
     match validate_package_manifest_v01(manifest) {
         Ok(()) => Vec::new(),
         Err(report) => report
             .errors()
             .iter()
             .map(|error| {
-                manifest_diagnostic(
-                    PackageDiagnosticSeverityV01::Error,
+                manifest_issue(
+                    PackageIssueSeverityV01::Error,
                     "package.manifest.contract-invalid",
                     format!(
                         "package manifest failed contract validation: {}",
@@ -444,21 +438,21 @@ fn contract_validation_diagnostics(
     }
 }
 
-fn package_path_diagnostics(
+fn package_path_issues(
     root_info: &PackageRootInfo,
     root_canonical: &Path,
     manifest: &PackageManifestV01,
-) -> Vec<PackageDiagnosticV01> {
-    let mut diagnostics = Vec::new();
+) -> Vec<PackageIssueV01> {
+    let mut issues = Vec::new();
     let mut check_path = |relative_path: &str, path_kind: &'static str| {
-        if let Some(diagnostic) = validate_package_relative_path(
+        if let Some(issue) = validate_package_relative_path(
             root_info,
             root_canonical,
             manifest,
             relative_path,
             path_kind,
         ) {
-            diagnostics.push(diagnostic);
+            issues.push(issue);
         }
     };
 
@@ -467,6 +461,9 @@ fn package_path_diagnostics(
     }
     for provided in &manifest.provides.nodes {
         check_path(&provided.path, "provided-node");
+    }
+    for object in &manifest.provides.objects {
+        check_path(&object.definition_path, "provided-object-definition");
     }
     for provided in &manifest.provides.resources {
         check_path(&provided.path, "provided-resource");
@@ -496,7 +493,7 @@ fn package_path_diagnostics(
         check_path(&artifact.path, "native-artifact-path");
     }
 
-    diagnostics
+    issues
 }
 
 fn validate_package_relative_path(
@@ -505,7 +502,7 @@ fn validate_package_relative_path(
     manifest: &PackageManifestV01,
     relative_path: &str,
     path_kind: &'static str,
-) -> Option<PackageDiagnosticV01> {
+) -> Option<PackageIssueV01> {
     let path = Path::new(relative_path);
     if relative_path.is_empty()
         || path.is_absolute()
@@ -516,8 +513,8 @@ fn validate_package_relative_path(
             )
         })
     {
-        return Some(manifest_diagnostic(
-            PackageDiagnosticSeverityV01::Error,
+        return Some(manifest_issue(
+            PackageIssueSeverityV01::Error,
             "package.path.invalid",
             "package path must stay inside package root",
             root_info,
@@ -532,25 +529,23 @@ fn validate_package_relative_path(
 
     let candidate = root_info.path.join(path);
     match fs::canonicalize(&candidate) {
-        Ok(resolved_path) if !resolved_path.starts_with(root_canonical) => {
-            Some(manifest_diagnostic(
-                PackageDiagnosticSeverityV01::Error,
-                "package.path.symlink-escape",
-                format!("package path escapes package root through a symlink: {relative_path}"),
-                root_info,
-                manifest,
-                json!({
-                    "pathKind": path_kind,
-                    "relativePath": relative_path,
-                }),
-            ))
-        }
+        Ok(resolved_path) if !resolved_path.starts_with(root_canonical) => Some(manifest_issue(
+            PackageIssueSeverityV01::Error,
+            "package.path.symlink-escape",
+            format!("package path escapes package root through a symlink: {relative_path}"),
+            root_info,
+            manifest,
+            json!({
+                "pathKind": path_kind,
+                "relativePath": relative_path,
+            }),
+        )),
         Ok(_) | Err(_) => None,
     }
 }
 
-fn root_overlap_diagnostics(root_infos: &[PackageRootInfo]) -> Vec<PackageDiagnosticV01> {
-    let mut diagnostics = Vec::new();
+fn root_overlap_issues(root_infos: &[PackageRootInfo]) -> Vec<PackageIssueV01> {
+    let mut issues = Vec::new();
     for (left_index, left) in root_infos.iter().enumerate() {
         let Some(left_canonical) = left.canonical_path.as_deref() else {
             continue;
@@ -560,8 +555,8 @@ fn root_overlap_diagnostics(root_infos: &[PackageRootInfo]) -> Vec<PackageDiagno
                 continue;
             };
             if left_canonical == right_canonical {
-                diagnostics.push(root_diagnostic(
-                    PackageDiagnosticSeverityV01::Error,
+                issues.push(root_issue(
+                    PackageIssueSeverityV01::Error,
                     "package.root.duplicate",
                     format!(
                         "package root {} duplicates another configured package root",
@@ -577,8 +572,8 @@ fn root_overlap_diagnostics(root_infos: &[PackageRootInfo]) -> Vec<PackageDiagno
             } else if left_canonical.starts_with(right_canonical)
                 || right_canonical.starts_with(left_canonical)
             {
-                diagnostics.push(root_diagnostic(
-                    PackageDiagnosticSeverityV01::Error,
+                issues.push(root_issue(
+                    PackageIssueSeverityV01::Error,
                     "package.root.overlap",
                     format!(
                         "package root {} overlaps another configured package root",
@@ -594,7 +589,7 @@ fn root_overlap_diagnostics(root_infos: &[PackageRootInfo]) -> Vec<PackageDiagno
             }
         }
     }
-    diagnostics
+    issues
 }
 
 fn duplicate_root_indexes(root_infos: &[PackageRootInfo]) -> HashSet<usize> {
@@ -611,22 +606,20 @@ fn duplicate_root_indexes(root_infos: &[PackageRootInfo]) -> HashSet<usize> {
     duplicate_indexes
 }
 
-fn duplicate_package_diagnostics(
-    packages: &[PackageRegistryEntryV01],
-) -> Vec<PackageDiagnosticV01> {
-    let mut diagnostics = Vec::new();
+fn duplicate_package_issues(packages: &[PackageRegistryEntryV01]) -> Vec<PackageIssueV01> {
+    let mut issues = Vec::new();
     let mut seen = HashMap::<(&str, &str), usize>::new();
     for (index, package) in packages.iter().enumerate() {
         let key = (package.package_id.as_str(), package.version.as_str());
         if let Some(previous_index) = seen.insert(key, index) {
-            diagnostics.push(package_diagnostic(
-                PackageDiagnosticSeverityV01::Error,
+            issues.push(package_issue(
+                PackageIssueSeverityV01::Error,
                 "package.registry.duplicate-package",
                 format!(
                     "package registry contains duplicate package {}@{}",
                     package.package_id, package.version
                 ),
-                registry_diagnostic_details(
+                registry_issue_details(
                     "package-registry-entry",
                     None,
                     Some(&package.package_id),
@@ -639,59 +632,24 @@ fn duplicate_package_diagnostics(
             ));
         }
     }
-    diagnostics
-}
-
-fn registry_log_diagnostics(response: &PackageRegistryListResponseV01) -> Vec<RuntimeDiagnostic> {
-    response
-        .diagnostics
-        .iter()
-        .chain(
-            response
-                .packages
-                .iter()
-                .flat_map(|package| package.diagnostics.iter()),
-        )
-        .filter(|diagnostic| {
-            matches!(
-                diagnostic.severity,
-                PackageDiagnosticSeverityV01::Warning | PackageDiagnosticSeverityV01::Error
-            )
-        })
-        .map(runtime_diagnostic_from_package_diagnostic)
-        .collect()
-}
-
-fn runtime_diagnostic_from_package_diagnostic(
-    diagnostic: &PackageDiagnosticV01,
-) -> RuntimeDiagnostic {
-    RuntimeDiagnostic {
-        severity: match diagnostic.severity {
-            PackageDiagnosticSeverityV01::Error => DiagnosticSeverity::Error,
-            PackageDiagnosticSeverityV01::Warning => DiagnosticSeverity::Warning,
-            PackageDiagnosticSeverityV01::Info => DiagnosticSeverity::Info,
-        },
-        message: diagnostic.message.clone(),
-        code: Some(diagnostic.code.clone()),
-        details: diagnostic.details.clone(),
-    }
+    issues
 }
 
 fn has_error(response: &PackageRegistryListResponseV01) -> bool {
     response
-        .diagnostics
+        .issues
         .iter()
         .chain(
             response
                 .packages
                 .iter()
-                .flat_map(|package| package.diagnostics.iter()),
+                .flat_map(|package| package.issues.iter()),
         )
-        .any(package_diagnostic_is_error)
+        .any(package_issue_is_error)
 }
 
-fn package_diagnostic_is_error(diagnostic: &PackageDiagnosticV01) -> bool {
-    diagnostic.severity == PackageDiagnosticSeverityV01::Error
+fn package_issue_is_error(issue: &PackageIssueV01) -> bool {
+    issue.severity == PackageIssueSeverityV01::Error
 }
 
 fn public_manifest_path(path: &str) -> String {
@@ -720,19 +678,19 @@ fn package_path_violation(path: &str) -> &'static str {
     }
 }
 
-fn root_diagnostic(
-    severity: PackageDiagnosticSeverityV01,
+fn root_issue(
+    severity: PackageIssueSeverityV01,
     code: impl Into<String>,
     message: impl Into<String>,
     root_info: &PackageRootInfo,
     manifest_path: Option<&str>,
     extra_details: Value,
-) -> PackageDiagnosticV01 {
-    package_diagnostic(
+) -> PackageIssueV01 {
+    package_issue(
         severity,
         code,
         message,
-        registry_diagnostic_details(
+        registry_issue_details(
             "package-root",
             manifest_path,
             None,
@@ -742,19 +700,19 @@ fn root_diagnostic(
     )
 }
 
-fn manifest_diagnostic(
-    severity: PackageDiagnosticSeverityV01,
+fn manifest_issue(
+    severity: PackageIssueSeverityV01,
     code: impl Into<String>,
     message: impl Into<String>,
     root_info: &PackageRootInfo,
     manifest: &PackageManifestV01,
     extra_details: Value,
-) -> PackageDiagnosticV01 {
-    package_diagnostic(
+) -> PackageIssueV01 {
+    package_issue(
         severity,
         code,
         message,
-        registry_diagnostic_details(
+        registry_issue_details(
             "package-manifest",
             Some(RUNTIME_PACKAGE_MANIFEST_FILE),
             Some(&manifest.id),
@@ -764,13 +722,13 @@ fn manifest_diagnostic(
     )
 }
 
-fn package_diagnostic(
-    severity: PackageDiagnosticSeverityV01,
+fn package_issue(
+    severity: PackageIssueSeverityV01,
     code: impl Into<String>,
     message: impl Into<String>,
     details: Value,
-) -> PackageDiagnosticV01 {
-    PackageDiagnosticV01 {
+) -> PackageIssueV01 {
+    PackageIssueV01 {
         severity,
         code: code.into(),
         message: message.into(),
@@ -778,7 +736,7 @@ fn package_diagnostic(
     }
 }
 
-fn registry_diagnostic_details(
+fn registry_issue_details(
     surface: &str,
     manifest_path: Option<&str>,
     package_id: Option<&str>,
@@ -833,8 +791,8 @@ fn manifest_checksum(bytes: &[u8]) -> PackageChecksumV01 {
     }
 }
 
-fn sort_package_diagnostics(diagnostics: &mut [PackageDiagnosticV01]) {
-    diagnostics.sort_by(|left, right| {
+fn sort_package_issues(issues: &mut [PackageIssueV01]) {
+    issues.sort_by(|left, right| {
         left.code
             .cmp(&right.code)
             .then_with(|| left.message.cmp(&right.message))
@@ -858,6 +816,7 @@ mod tests {
 
     fn valid_manifest(package_id: &str) -> String {
         let provided_id = package_id.replace('/', ".");
+        let contracts_version = skenion_contracts::CONTRACTS_PACKAGE_VERSION;
         format!(
             r#"{{
               "schema": "skenion.package.manifest",
@@ -865,7 +824,7 @@ mod tests {
               "id": "{package_id}",
               "version": "0.49.0",
               "category": "patch",
-              "contracts": {{ "line": "0.49", "range": ">=0.49.0 <0.50.0" }},
+              "contracts": {{ "version": "{contracts_version}" }},
               "provides": {{
                 "patches": [{{ "id": "{provided_id}.main", "path": "patches/main.skenion.json" }}]
               }},
@@ -916,11 +875,8 @@ mod tests {
         .unwrap();
     }
 
-    fn codes(diagnostics: &[PackageDiagnosticV01]) -> Vec<&str> {
-        diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.code.as_str())
-            .collect()
+    fn codes(issues: &[PackageIssueV01]) -> Vec<&str> {
+        issues.iter().map(|issue| issue.code.as_str()).collect()
     }
 
     fn assert_no_absolute_root(response: &PackageRegistryListResponseV01, root: &Path) {
@@ -955,8 +911,10 @@ mod tests {
         assert_eq!(response.packages.len(), 1);
         assert_eq!(response.packages[0].package_id, "example/package");
         assert_eq!(response.packages[0].version, "0.49.0");
-        assert_eq!(response.packages[0].contracts.line, "0.49");
-        assert_eq!(response.packages[0].contracts.range, ">=0.49.0 <0.50.0");
+        assert_eq!(
+            response.packages[0].contracts.version,
+            skenion_contracts::CONTRACTS_PACKAGE_VERSION
+        );
         assert_eq!(response.packages[0].source, PackageSourceV01::Workspace);
         assert_eq!(response.packages[0].root, PackageRootKindV01::Package);
         assert_eq!(response.packages[0].trust, PackageTrustV01::Trusted);
@@ -969,7 +927,6 @@ mod tests {
             RUNTIME_PACKAGE_MANIFEST_FILE
         );
         assert_eq!(response.packages[0].manifest_checksum.value.len(), 64);
-        assert!(scan.log_diagnostics().is_empty());
         assert_eq!(scan.snapshot.revision(), 1);
         assert_eq!(scan.snapshot.event_id(), "package-registry-event-000001");
         assert_eq!(scan.snapshot.state(), RuntimePackageRegistryState::Ready);
@@ -986,10 +943,7 @@ mod tests {
 
         assert!(!response.ok);
         assert!(response.packages.is_empty());
-        assert_eq!(
-            codes(&response.diagnostics),
-            vec!["package.root.extension-only"]
-        );
+        assert_eq!(codes(&response.issues), vec!["package.root.extension-only"]);
     }
 
     #[test]
@@ -1003,14 +957,11 @@ mod tests {
 
         assert!(!response.ok);
         assert!(response.packages.is_empty());
-        assert_eq!(
-            codes(&response.diagnostics),
-            vec!["package.root.both-manifests"]
-        );
+        assert_eq!(codes(&response.issues), vec!["package.root.both-manifests"]);
     }
 
     #[test]
-    fn malformed_manifest_produces_structured_diagnostic() {
+    fn malformed_manifest_produces_structured_issue() {
         let package_dir = temp_dir("malformed");
         write_package_manifest(&package_dir, "{ not-json");
         let manager = RuntimePackageManager::with_package_dirs(vec![package_dir]);
@@ -1020,11 +971,11 @@ mod tests {
         assert!(!response.ok);
         assert!(response.packages.is_empty());
         assert_eq!(
-            codes(&response.diagnostics),
+            codes(&response.issues),
             vec!["package.manifest.parse-failed"]
         );
         assert_eq!(
-            response.diagnostics[0]
+            response.issues[0]
                 .details
                 .as_ref()
                 .unwrap()
@@ -1034,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_unreadable_package_roots_are_structured_diagnostics() {
+    fn missing_and_unreadable_package_roots_are_structured_issues() {
         let missing_manifest_dir = temp_dir("missing-manifest");
         let unreadable_dir = temp_dir("unreadable-root");
         fs::remove_dir_all(&unreadable_dir).unwrap();
@@ -1048,7 +999,7 @@ mod tests {
         assert!(!response.ok);
         assert!(response.packages.is_empty());
         assert_eq!(
-            codes(&response.diagnostics),
+            codes(&response.issues),
             vec!["package.manifest.missing", "package.root.unreadable"]
         );
         assert_no_absolute_root(&response, &missing_manifest_dir);
@@ -1056,11 +1007,14 @@ mod tests {
     }
 
     #[test]
-    fn contract_invalid_manifest_stays_in_registry_with_package_diagnostic() {
+    fn contract_invalid_manifest_stays_in_registry_with_package_issue() {
         let package_dir = temp_dir("contract-invalid");
         let body = valid_manifest("bad id").replace(
-            r#""contracts": { "line": "0.49", "range": ">=0.49.0 <0.50.0" }"#,
-            r#""contracts": { "line": "0.49", "range": "*" }"#,
+            &format!(
+                r#""contracts": {{ "version": "{}" }}"#,
+                skenion_contracts::CONTRACTS_PACKAGE_VERSION
+            ),
+            r#""contracts": { "version": "*" }"#,
         );
         write_package_manifest(&package_dir, &body);
         let manager = RuntimePackageManager::with_package_dirs(vec![package_dir.clone()]);
@@ -1070,22 +1024,13 @@ mod tests {
         assert!(!response.ok);
         assert_eq!(response.packages.len(), 1);
         assert_eq!(response.packages[0].package_id, "bad id");
-        assert!(
-            codes(&response.packages[0].diagnostics).contains(&"package.manifest.contract-invalid")
-        );
-        assert!(
-            manager
-                .scan_registry()
-                .log_diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code.as_deref()
-                    == Some("package.manifest.contract-invalid"))
-        );
+        assert!(codes(&response.packages[0].issues).contains(&"package.manifest.contract-invalid"));
+        assert!(codes(&response.packages[0].issues).contains(&"package.manifest.contract-invalid"));
         assert_no_absolute_root(&response, &package_dir);
     }
 
     #[test]
-    fn legacy_manifest_projection_fields_fail_closed_under_contracts_049() {
+    fn manifest_projection_fields_fail_closed() {
         let package_dir = temp_dir("legacy-projection-fields");
         let body = valid_manifest("example/legacy-fields").replace(
             "\"category\": \"patch\",",
@@ -1102,15 +1047,15 @@ mod tests {
         assert!(!response.ok);
         assert!(response.packages.is_empty());
         assert_eq!(
-            codes(&response.diagnostics),
+            codes(&response.issues),
             vec!["package.manifest.decode-failed"]
         );
     }
 
     #[test]
-    fn absolute_parent_and_symlink_escape_paths_are_diagnostics() {
-        let package_dir = temp_dir("path-diagnostics");
-        let outside_dir = temp_dir("path-diagnostics-outside");
+    fn absolute_parent_and_symlink_escape_paths_are_issues() {
+        let package_dir = temp_dir("path-issues");
+        let outside_dir = temp_dir("path-issues-outside");
         fs::write(outside_dir.join("secret.txt"), "secret").unwrap();
         symlink_file(
             &outside_dir.join("secret.txt"),
@@ -1128,7 +1073,7 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.packages.len(), 1);
-        let package_codes = codes(&response.packages[0].diagnostics);
+        let package_codes = codes(&response.packages[0].issues);
         assert!(package_codes.contains(&"package.path.invalid"));
         assert!(package_codes.contains(&"package.path.symlink-escape"));
         assert_no_absolute_root(&response, &package_dir);
@@ -1142,62 +1087,65 @@ mod tests {
     #[test]
     fn every_manifest_declared_path_surface_is_checked_and_public_paths_are_sanitized() {
         let package_dir = temp_dir("all-path-surfaces");
-        let body = r#"{
+        let contracts_version = skenion_contracts::CONTRACTS_PACKAGE_VERSION;
+        let body = format!(
+            r#"{{
           "schema": "skenion.package.manifest",
           "schemaVersion": "0.1.0",
           "id": "example/all-paths",
           "version": "0.49.0",
           "category": "mixed",
-          "contracts": { "line": "0.49", "range": ">=0.49.0 <0.50.0" },
+          "contracts": {{ "version": "{contracts_version}" }},
           "runtimeAbiRange": ">=0.1.0 <0.2.0",
           "targets": ["x86_64-unknown-linux-gnu"],
-          "provides": {
-            "patches": [{ "id": "example.all.patch", "path": "/absolute/patch.skenion.json" }],
-            "nodes": [{ "id": "example.all.node", "path": "../nodes/node.json" }],
-            "resources": [{ "id": "example.all.resource", "path": "" }],
-            "help": [{ "id": "example.all.help", "path": "../help/help.skenion.json" }]
-          },
-          "paths": {
+          "provides": {{
+            "patches": [{{ "id": "example.all.patch", "path": "/absolute/patch.skenion.json" }}],
+            "nodes": [{{ "id": "example.all.node", "path": "../nodes/node.json" }}],
+            "resources": [{{ "id": "example.all.resource", "path": "" }}],
+            "help": [{{ "id": "example.all.help", "path": "../help/help.skenion.json" }}]
+          }},
+          "paths": {{
             "patches": ["../patches"],
             "resources": ["/absolute/resources"],
             "docs": [""],
             "tests": ["../tests"]
-          },
+          }},
           "checksums": [
-            {
+            {{
               "id": "manifest",
               "path": "/absolute/checksum.sha256",
-              "checksum": {
+              "checksum": {{
                 "algorithm": "sha256",
                 "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-              }
-            }
+              }}
+            }}
           ],
           "evidence": [
-            {
+            {{
               "id": "sbom",
               "kind": "sbom",
               "path": "../evidence/sbom.json",
-              "checksum": {
+              "checksum": {{
                 "algorithm": "sha256",
                 "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-              }
-            }
+              }}
+            }}
           ],
           "nativeArtifacts": [
-            {
+            {{
               "target": "x86_64-unknown-linux-gnu",
               "path": "/absolute/libexample.so",
               "entrypoint": "skenion_extension_init",
-              "checksum": {
+              "checksum": {{
                 "algorithm": "sha256",
                 "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-              },
+              }},
               "evidenceRefs": ["sbom"]
-            }
+            }}
           ]
-        }"#;
-        write_package_manifest(&package_dir, body);
+        }}"#
+        );
+        write_package_manifest(&package_dir, &body);
         let manager = RuntimePackageManager::with_package_dirs(vec![package_dir.clone()]);
 
         let response = manager.list_packages();
@@ -1217,14 +1165,14 @@ mod tests {
             response.packages[0].provides.help[0].path,
             "../help/help.skenion.json"
         );
-        let path_diagnostics = response.packages[0]
-            .diagnostics
+        let path_issues = response.packages[0]
+            .issues
             .iter()
-            .filter(|diagnostic| diagnostic.code == "package.path.invalid")
+            .filter(|issue| issue.code == "package.path.invalid")
             .collect::<Vec<_>>();
-        assert!(path_diagnostics.len() >= 11);
-        assert!(path_diagnostics.iter().any(|diagnostic| {
-            diagnostic
+        assert!(path_issues.len() >= 11);
+        assert!(path_issues.iter().any(|issue| {
+            issue
                 .details
                 .as_ref()
                 .and_then(|details| details.get("pathKind"))
@@ -1234,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_and_overlapping_roots_are_diagnostics() {
+    fn duplicate_and_overlapping_roots_are_issues() {
         let parent = temp_dir("overlap-parent");
         let child = parent.join("child");
         fs::create_dir_all(&child).unwrap();
@@ -1246,13 +1194,13 @@ mod tests {
         let response = manager.list_packages();
 
         assert!(!response.ok);
-        let top_level_codes = codes(&response.diagnostics);
+        let top_level_codes = codes(&response.issues);
         assert!(top_level_codes.contains(&"package.root.duplicate"));
         assert!(top_level_codes.contains(&"package.root.overlap"));
     }
 
     #[test]
-    fn duplicate_package_identity_is_diagnostic() {
+    fn duplicate_package_identity_is_issue() {
         let first = temp_dir("duplicate-package-one");
         let second = temp_dir("duplicate-package-two");
         write_package_manifest(&first, &valid_manifest("example/duplicate"));
@@ -1262,7 +1210,7 @@ mod tests {
         let response = manager.list_packages();
 
         assert!(!response.ok);
-        assert!(codes(&response.diagnostics).contains(&"package.registry.duplicate-package"));
+        assert!(codes(&response.issues).contains(&"package.registry.duplicate-package"));
     }
 
     #[test]
@@ -1273,6 +1221,7 @@ mod tests {
                 "/absolute/patch.skenion.json",
             )],
             nodes: vec![provided_ref("example.node", "nodes/node.json")],
+            objects: Vec::new(),
             resources: vec![provided_ref("example.resource", "/absolute/resource.bin")],
             help: vec![provided_ref("example.help", "help/help.skenion.json")],
         };
@@ -1298,19 +1247,19 @@ mod tests {
             canonical_path: None,
             display_name: "root-name".to_owned(),
         };
-        let root_diag = root_diagnostic(
-            PackageDiagnosticSeverityV01::Warning,
+        let root_diag = root_issue(
+            PackageIssueSeverityV01::Warning,
             "package.root.warning",
             "root warning",
             &info,
             Some(RUNTIME_PACKAGE_MANIFEST_FILE),
             json!("ignored-non-object"),
         );
-        let package_diag = package_diagnostic(
-            PackageDiagnosticSeverityV01::Info,
+        let package_diag = package_issue(
+            PackageIssueSeverityV01::Info,
             "package.info",
             "package info",
-            registry_diagnostic_details(
+            registry_issue_details(
                 "package-registry-entry",
                 Some(RUNTIME_PACKAGE_MANIFEST_FILE),
                 Some("example/package"),
@@ -1318,11 +1267,11 @@ mod tests {
                 json!("ignored-non-object"),
             ),
         );
-        let package_error = package_diagnostic(
-            PackageDiagnosticSeverityV01::Error,
+        let package_error = package_issue(
+            PackageIssueSeverityV01::Error,
             "package.error",
             "package error",
-            registry_diagnostic_details(
+            registry_issue_details(
                 "package-registry-entry",
                 Some(RUNTIME_PACKAGE_MANIFEST_FILE),
                 Some("example/package"),
@@ -1339,41 +1288,35 @@ mod tests {
                 source: PackageSourceV01::Workspace,
                 root: PackageRootKindV01::Package,
                 trust: PackageTrustV01::Trusted,
-                contracts: PackageContractsSupportV01 {
-                    line: "0.49".to_owned(),
-                    range: ">=0.49.0 <0.50.0".to_owned(),
+                contracts: PackageContractsRequirementV01 {
+                    version: skenion_contracts::CONTRACTS_PACKAGE_VERSION.to_owned(),
                 },
                 runtime_abi_range: None,
                 targets: Vec::new(),
                 manifest_path: RUNTIME_PACKAGE_MANIFEST_FILE.to_owned(),
+                root_path: None,
                 manifest_checksum: PackageChecksumV01 {
                     algorithm: PackageChecksumAlgorithmV01::Sha256,
                     value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_owned(),
                 },
                 provides,
-                diagnostics: vec![package_diag, package_error],
+                issues: vec![package_diag, package_error],
             }],
-            diagnostics: vec![root_diag],
+            issues: vec![root_diag],
         };
 
         assert!(has_error(&response));
-        let log_diagnostics = registry_log_diagnostics(&response);
-        assert_eq!(log_diagnostics.len(), 2);
-        assert_eq!(log_diagnostics[0].severity, DiagnosticSeverity::Warning);
         assert_eq!(
-            log_diagnostics[0].code.as_deref(),
-            Some("package.root.warning")
+            response.issues[0].severity,
+            PackageIssueSeverityV01::Warning
         );
-        assert_eq!(log_diagnostics[1].severity, DiagnosticSeverity::Error);
-        assert_eq!(log_diagnostics[1].code.as_deref(), Some("package.error"));
+        assert_eq!(response.issues[0].code, "package.root.warning");
         assert_eq!(
-            log_diagnostics[0]
-                .details
-                .as_ref()
-                .and_then(|details| details.get("packageRoot")),
-            Some(&json!("<redacted>"))
+            response.packages[0].issues[1].severity,
+            PackageIssueSeverityV01::Error
         );
+        assert_eq!(response.packages[0].issues[1].code, "package.error");
     }
 
     fn provided_ref(id: &str, path: &str) -> PackageProvidedRefV01 {

@@ -43,7 +43,7 @@ Skenion v0 does not support legacy, deprecated, or import-only compatibility
 paths. Runtime endpoints, CLI commands, payload decoders, sessions, and
 capability responses must model the current product surface only. Unsupported
 schema, protocol, graph, project, package, manifest, extension, or ABI versions
-must be rejected with structured diagnostics rather than migrated, imported,
+must be rejected with structured issues rather than migrated, imported,
 shimmed, or kept behind deprecated aliases.
 
 The forward graph/project contract label is `0.1`. Runtime should follow
@@ -65,6 +65,15 @@ Runtime boundary: build against the released Contracts crate version, expose
 the Runtime API/protocol metadata Studio needs, and verify the release artifact
 workflow in Runtime CI. Do not introduce a separate hub-owned compatibility
 matrix verifier or push Runtime/Studio artifact evidence into Contracts.
+
+CI must not hardcode or independently enforce a Contracts version, Contracts
+line, or supported Contracts range as a compatibility authority. Default CI
+should build and test against the `skenion-contracts` version declared by this
+repo's `Cargo.toml`/`Cargo.lock` and reject only invalid dependency sources
+such as local/path/Git dependencies in release mode. Runtime may expose exact
+built-against Contracts provenance and a supported Contracts range in runtime
+metadata, but those values must be derived from source-controlled metadata or
+the built binary, not duplicated as workflow-owned constants.
 
 Registry publishing and binary release artifacts must be produced only through
 GitHub Actions release workflows and Release Please. Local verification may use

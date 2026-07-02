@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ControlState, ExecutionPlan, GraphDocument, PreviewDocument, RuntimeDiagnostic,
+    ControlState, ExecutionPlan, GraphDocument, PreviewDocument, RuntimeIssue,
     RuntimeSessionSnapshot, RuntimeTelemetrySnapshot,
     preview_control_state::{
         PreviewControlStateSnapshot, preview_control_state_path,
@@ -83,7 +83,7 @@ pub struct RuntimePreviewStatusResponse {
     pub exited_at: Option<String>,
     pub exit_code: Option<i32>,
     pub message: Option<String>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Clone)]
@@ -141,12 +141,12 @@ impl PreviewManager {
         uptime_ms: u64,
     ) -> RuntimeTelemetrySnapshot {
         self.poll();
-        let mut diagnostics = Vec::new();
+        let mut issues = Vec::new();
         let heartbeat = match self.status.telemetry_path.as_deref() {
             Some(path) => match read_preview_telemetry(path) {
                 Ok(heartbeat) => heartbeat,
                 Err(error) => {
-                    diagnostics.push(RuntimeDiagnostic::warning(format!(
+                    issues.push(RuntimeIssue::warning(format!(
                         "invalid preview telemetry heartbeat: {error}"
                     )));
                     None
@@ -161,13 +161,13 @@ impl PreviewManager {
             heartbeat,
             self.dry_run,
             uptime_ms,
-            diagnostics,
+            issues,
         )
     }
 
     pub(crate) fn start(
         &mut self,
-        context: Result<PreviewContext, Vec<RuntimeDiagnostic>>,
+        context: Result<PreviewContext, Vec<RuntimeIssue>>,
         snapshot: RuntimeSessionSnapshot,
         restart: bool,
     ) -> RuntimePreviewStatusResponse {
@@ -182,7 +182,7 @@ impl PreviewManager {
 
         let context = match context {
             Ok(context) => context,
-            Err(diagnostics) => return self.to_response(false, &snapshot, diagnostics),
+            Err(issues) => return self.to_response(false, &snapshot, issues),
         };
 
         let control_state_path = self
@@ -215,7 +215,7 @@ impl PreviewManager {
         if let Err(error) = self.write_control_snapshot(&control_snapshot) {
             self.status.state = PreviewState::Error;
             self.status.message = Some(error.clone());
-            return self.to_response(false, &snapshot, vec![RuntimeDiagnostic::error(error)]);
+            return self.to_response(false, &snapshot, vec![RuntimeIssue::error(error)]);
         }
 
         let document = PreviewDocument::with_control_state(
@@ -253,14 +253,14 @@ impl PreviewManager {
                 self.status.state = PreviewState::Error;
                 self.status.message = Some(error.clone());
                 self.handle = None;
-                self.to_response(false, &snapshot, vec![RuntimeDiagnostic::error(error)])
+                self.to_response(false, &snapshot, vec![RuntimeIssue::error(error)])
             }
         }
     }
 
     pub(crate) fn restart(
         &mut self,
-        context: Result<PreviewContext, Vec<RuntimeDiagnostic>>,
+        context: Result<PreviewContext, Vec<RuntimeIssue>>,
         snapshot: RuntimeSessionSnapshot,
     ) -> RuntimePreviewStatusResponse {
         self.start(context, snapshot, true)
@@ -269,7 +269,7 @@ impl PreviewManager {
     pub fn stop(&mut self, snapshot: RuntimeSessionSnapshot) -> RuntimePreviewStatusResponse {
         match self.stop_current() {
             Ok(()) => self.to_response(true, &snapshot, Vec::new()),
-            Err(error) => self.to_response(false, &snapshot, vec![RuntimeDiagnostic::error(error)]),
+            Err(error) => self.to_response(false, &snapshot, vec![RuntimeIssue::error(error)]),
         }
     }
 
@@ -300,9 +300,9 @@ impl PreviewManager {
     pub fn request_error(
         &self,
         snapshot: RuntimeSessionSnapshot,
-        diagnostic: RuntimeDiagnostic,
+        issue: RuntimeIssue,
     ) -> RuntimePreviewStatusResponse {
-        self.to_response(false, &snapshot, vec![diagnostic])
+        self.to_response(false, &snapshot, vec![issue])
     }
 
     fn is_active(&self) -> bool {
@@ -390,7 +390,7 @@ impl PreviewManager {
         &self,
         ok: bool,
         snapshot: &RuntimeSessionSnapshot,
-        diagnostics: Vec<RuntimeDiagnostic>,
+        issues: Vec<RuntimeIssue>,
     ) -> RuntimePreviewStatusResponse {
         let session_revision = snapshot.loaded().then_some(snapshot.session_revision);
         let control_revision = snapshot.loaded().then_some(snapshot.control_revision);
@@ -424,7 +424,7 @@ impl PreviewManager {
             exited_at: self.status.exited_at.clone(),
             exit_code: self.status.exit_code,
             message: self.status.message.clone(),
-            diagnostics,
+            issues,
         }
     }
 
@@ -447,11 +447,6 @@ impl PreviewManager {
     fn with_control_state_path_override(mut self, path: PathBuf) -> Self {
         self.control_state_path_override = Some(path);
         self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_control_state_path_for_test(&mut self, path: PathBuf) {
-        self.status.control_state_path = Some(path);
     }
 }
 
@@ -522,23 +517,22 @@ fn dry_run_heartbeat(
     control_snapshot: Option<&PreviewControlStateSnapshot>,
 ) -> PreviewTelemetryHeartbeat {
     let scene = render_scene_from_preview_document(document);
-    let (renderer, source_node_id, last_error, diagnostics, generated_source_available) =
-        match scene {
-            Ok(scene) => (
-                scene.renderer_label().to_owned(),
-                scene.source_node_id(),
-                None,
-                Vec::new(),
-                matches!(scene, crate::RenderScene::FullscreenShader(_)),
-            ),
-            Err(error) => (
-                "clear-color".to_owned(),
-                None,
-                Some(error.to_string()),
-                error.shader_diagnostics(),
-                false,
-            ),
-        };
+    let (renderer, source_node_id, last_error, issues, generated_source_available) = match scene {
+        Ok(scene) => (
+            scene.renderer_label().to_owned(),
+            scene.source_node_id(),
+            None,
+            Vec::new(),
+            matches!(scene, crate::RenderScene::FullscreenShader(_)),
+        ),
+        Err(error) => (
+            "clear-color".to_owned(),
+            None,
+            Some(error.to_string()),
+            error.shader_issues(),
+            false,
+        ),
+    };
 
     PreviewTelemetryHeartbeat {
         schema: PREVIEW_TELEMETRY_SCHEMA.to_owned(),
@@ -555,7 +549,7 @@ fn dry_run_heartbeat(
         last_frame_ms: None,
         last_error,
         source_node_id,
-        diagnostics,
+        issues,
         generated_source_available,
         control_revision: control_snapshot.map(|snapshot| snapshot.control_revision),
         preview_control_revision: control_snapshot.map(|snapshot| snapshot.control_revision),
@@ -730,11 +724,8 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.state, PreviewState::Error);
-        assert!(response.diagnostics[0].severity == crate::DiagnosticSeverity::Error);
-        assert_eq!(
-            response.message,
-            Some(response.diagnostics[0].message.clone())
-        );
+        assert!(response.issues[0].severity == crate::IssueSeverity::Error);
+        assert_eq!(response.message, Some(response.issues[0].message.clone()));
         std::fs::remove_file(blocker).expect("blocker should remove");
     }
 
@@ -790,7 +781,7 @@ mod tests {
         assert_eq!(heartbeat.source_node_id.as_deref(), Some("shader_1"));
         assert_eq!(heartbeat.graph_revision, "7");
         assert!(heartbeat.generated_source_available);
-        assert!(heartbeat.diagnostics.is_empty());
+        assert!(heartbeat.issues.is_empty());
     }
 
     #[test]
@@ -813,28 +804,24 @@ mod tests {
                 .contains("unsupported language glsl")
         );
         assert_eq!(
-            heartbeat.diagnostics[0].phase,
-            crate::ShaderDiagnosticPhase::SourceSync
+            heartbeat.issues[0].phase,
+            crate::ShaderIssuePhase::SourceSync
         );
         assert!(!heartbeat.generated_source_available);
     }
 
     #[test]
-    fn start_without_context_returns_diagnostics() {
+    fn start_without_context_returns_issues() {
         let mut manager = PreviewManager::dry_run();
         let response = manager.start(
-            Err(vec![RuntimeDiagnostic::error("no project loaded")]),
+            Err(vec![RuntimeIssue::error("no project loaded")]),
             empty_snapshot(),
             false,
         );
 
         assert!(!response.ok);
         assert_eq!(response.state, PreviewState::Stopped);
-        assert!(
-            response.diagnostics[0]
-                .message
-                .contains("no project loaded")
-        );
+        assert!(response.issues[0].message.contains("no project loaded"));
     }
 
     #[test]
@@ -926,12 +913,9 @@ mod tests {
         let telemetry = manager.telemetry(loaded_snapshot(42, "1"), 0);
 
         assert!(telemetry.ok);
-        assert_eq!(
-            telemetry.diagnostics[0].severity,
-            crate::DiagnosticSeverity::Warning
-        );
+        assert_eq!(telemetry.issues[0].severity, crate::IssueSeverity::Warning);
         assert!(
-            telemetry.diagnostics[0]
+            telemetry.issues[0]
                 .message
                 .contains("invalid preview telemetry heartbeat")
         );
@@ -957,7 +941,7 @@ mod tests {
         assert!(!response.ok);
         assert_eq!(response.state, PreviewState::Error);
         assert_eq!(response.message.as_deref(), Some("spawn failed"));
-        assert_eq!(response.diagnostics[0].message, "spawn failed");
+        assert_eq!(response.issues[0].message, "spawn failed");
     }
 
     #[test]
@@ -972,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_failure_returns_diagnostic() {
+    fn stop_failure_returns_issue() {
         let mut manager = PreviewManager::with_test_spawner(false, spawn_unstoppable_handle);
         manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
 
@@ -980,7 +964,7 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.state, PreviewState::Error);
-        assert_eq!(response.diagnostics[0].message, "stop failed");
+        assert_eq!(response.issues[0].message, "stop failed");
     }
 
     #[test]
@@ -1120,7 +1104,7 @@ mod tests {
                 last_frame_ms: Some(16.7),
                 last_error: None,
                 source_node_id: Some("clear_1".to_owned()),
-                diagnostics: Vec::new(),
+                issues: Vec::new(),
                 generated_source_available: false,
                 control_revision: Some(0),
                 preview_control_revision: Some(0),
@@ -1329,7 +1313,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             package_registry_revision: None,
             project: Some(project_document(&graph)),
             binding_formats: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
             plan: Some(plan(graph_revision)),
         }
     }
@@ -1339,6 +1323,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             "schema": "skenion.project",
             "schemaVersion": "0.1.0",
             "id": format!("{}-project", graph.id),
+            "documentId": "30000000-0000-0000-0000-000000000001",
             "revision": graph.revision.clone(),
             "graph": {
                 "schema": "skenion.graph",
@@ -1347,8 +1332,16 @@ fn fs_main() -> @location(0) vec4<f32> {
                 "revision": graph.revision.clone(),
                 "nodes": graph.nodes.iter().map(|node| json!({
                     "id": node.id.clone(),
-                    "kind": node.kind.clone(),
-                    "kindVersion": node.kind_version.clone(),
+                    "implementation": {
+                        "provider": { "kind": "core" },
+                        "objectId": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str())
+                    },
+                    "objectSpec": node.kind.strip_prefix("object.core.").unwrap_or(node.kind.as_str()),
+                    "objectResolution": {
+                        "status": "resolved",
+                        "candidates": [],
+                        "issues": []
+                    },
                     "params": node.params.clone(),
                     "ports": []
                 })).collect::<Vec<_>>(),
@@ -1386,7 +1379,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             control_revision: 0,
             package_registry_revision: None,
             binding_formats: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
             plan: None,
         }
     }

@@ -354,6 +354,8 @@ mod tests {
         }));
 
         let plan = build_execution_plan(&graph, &registry()).unwrap();
+        assert_eq!(plan.graph_id(), "dag");
+        assert_eq!(plan.graph_revision(), "1");
         assert_eq!(plan.nodes[0].node_id, "value");
         assert_eq!(plan.nodes[1].node_id, "pass");
         assert_eq!(plan.groups[0].node_ids, vec!["value", "pass"]);

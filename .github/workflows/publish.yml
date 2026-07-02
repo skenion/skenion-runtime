@@ -32,7 +32,7 @@ jobs:
       tag_ref: ${{ steps.request.outputs.tag_ref }}
       version: ${{ steps.package.outputs.version }}
       contracts_version: ${{ steps.package.outputs.contracts_version }}
-      contracts_line: ${{ steps.package.outputs.contracts_line }}
+      contracts_supported_range: ${{ steps.package.outputs.contracts_supported_range }}
     steps:
       - id: request
         name: Validate release tag input
@@ -74,6 +74,32 @@ jobs:
               if not SEMVER.fullmatch(value):
                   fail(f"{label} must be exact SemVer-like x.y.z; got '{value}'.")
 
+          def read_contracts_dependency_requirement(manifest):
+              dep = manifest["dependencies"].get("skenion-contracts")
+              if dep is None:
+                  fail("Cargo.toml must declare the skenion-contracts dependency.")
+
+              if isinstance(dep, str):
+                  requirement = dep.strip()
+              elif isinstance(dep, dict):
+                  forbidden = sorted(
+                      key
+                      for key in ("path", "git", "branch", "tag", "rev")
+                      if key in dep
+                  )
+                  if forbidden:
+                      fail(
+                          "release mode must use the registry skenion-contracts dependency; "
+                          f"remove keys {forbidden} from Cargo.toml."
+                      )
+                  requirement = str(dep.get("version", "")).strip()
+              else:
+                  fail("skenion-contracts dependency must be a string or table dependency.")
+
+              if not requirement:
+                  fail("skenion-contracts dependency must declare a registry version requirement.")
+              return requirement
+
           with open("Cargo.toml", "rb") as fh:
               manifest = tomllib.load(fh)
 
@@ -87,19 +113,16 @@ jobs:
                   f"{expected_version} does not match skenion-runtime package version {runtime_version}."
               )
 
-          dep = manifest["dependencies"].get("skenion-contracts")
-          if dep is None:
-              fail("Cargo.toml must declare the skenion-contracts dependency.")
-
-          if isinstance(dep, str):
-              contracts_version = dep.strip()
-          elif isinstance(dep, dict):
-              contracts_version = str(dep.get("version", "")).strip()
-          else:
-              fail("skenion-contracts dependency must be a string or table dependency.")
-
-          require_exact_semver(contracts_version, "skenion-contracts dependency version")
-          contracts_line = ".".join(contracts_version.split(".")[:2])
+          contracts_requirement = read_contracts_dependency_requirement(manifest)
+          skenion_metadata = manifest.get("package", {}).get("metadata", {}).get("skenion", {})
+          contracts_supported_range = str(
+              skenion_metadata.get("supported-contracts-range", "")
+          ).strip()
+          if not contracts_supported_range:
+              fail(
+                  "Cargo.toml [package.metadata.skenion] must declare "
+                  "supported-contracts-range."
+              )
 
           with open("Cargo.lock", "rb") as fh:
               lockfile = tomllib.load(fh)
@@ -109,11 +132,11 @@ jobs:
               for package in lockfile.get("package", [])
               if package.get("name") == "skenion-runtime"
           }
-          locked_contracts_versions = {
-              package["version"]
+          locked_contracts_packages = [
+              package
               for package in lockfile.get("package", [])
               if package.get("name") == "skenion-contracts"
-          }
+          ]
 
           if locked_runtime_versions != {runtime_version}:
               fail(
@@ -121,16 +144,30 @@ jobs:
                   f"{runtime_version}; found {sorted(locked_runtime_versions)}."
               )
 
-          if locked_contracts_versions != {contracts_version}:
+          if len(locked_contracts_packages) != 1:
               fail(
-                  "Cargo.lock must contain exactly skenion-contracts "
-                  f"{contracts_version}; found {sorted(locked_contracts_versions)}."
+                  "Cargo.lock must contain exactly one resolved skenion-contracts package; "
+                  f"found {len(locked_contracts_packages)}."
               )
+
+          contracts_package = locked_contracts_packages[0]
+          contracts_version = str(contracts_package.get("version", "")).strip()
+          contracts_source = str(contracts_package.get("source", "")).strip()
+          if not contracts_version:
+              fail("Cargo.lock skenion-contracts entry must include the resolved version.")
+          if not contracts_source.startswith("registry+"):
+              fail(
+                  "release mode must build against a registry-resolved skenion-contracts package; "
+                  f"Cargo.lock source was {contracts_source!r}."
+              )
+          if not contracts_package.get("checksum"):
+              fail("Cargo.lock skenion-contracts registry entry must include a checksum.")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(f"version={runtime_version}", file=output)
               print(f"contracts_version={contracts_version}", file=output)
-              print(f"contracts_line={contracts_line}", file=output)
+              print(f"contracts_supported_range={contracts_supported_range}", file=output)
+              print(f"contracts_requirement={contracts_requirement}", file=output)
           PY
       - name: Summarize runtime release inputs
         run: |
@@ -139,16 +176,10 @@ jobs:
             echo ""
             echo "- Runtime tag: ${{ steps.request.outputs.tag }}"
             echo "- Runtime version: ${{ steps.package.outputs.version }}"
-            echo "- Contracts line: ${{ steps.package.outputs.contracts_line }}"
-            echo "- Contracts dependency version: ${{ steps.package.outputs.contracts_version }}"
+            echo "- Contracts locked version: ${{ steps.package.outputs.contracts_version }}"
+            echo "- Contracts supported range: ${{ steps.package.outputs.contracts_supported_range }}"
             echo "- Distribution: DSUB S3 Runtime raw binary artifacts"
           } >> "${GITHUB_STEP_SUMMARY}"
-      - name: Verify released contracts crate
-        run: |
-          if ! curl --fail --silent -H "User-Agent: skenion-runtime-publish/0.1" "https://crates.io/api/v1/crates/skenion-contracts/${{ steps.package.outputs.contracts_version }}" >/dev/null; then
-            echo "::error::skenion-contracts ${{ steps.package.outputs.contracts_version }} is not published on crates.io."
-            exit 1
-          fi
 
   runtime-assets:
     name: runtime asset (${{ matrix.platform_slug }})
@@ -313,7 +344,7 @@ jobs:
           SKENION_RELEASE_PUBLIC_BASE_URL: ${{ secrets.SKENION_RELEASE_PUBLIC_BASE_URL }}
           RELEASE_TIER: ${{ matrix.tier }}
           CONTRACTS_VERSION: ${{ needs.release.outputs.contracts_version }}
-          CONTRACTS_LINE: ${{ needs.release.outputs.contracts_line }}
+          CONTRACTS_SUPPORTED_RANGE: ${{ needs.release.outputs.contracts_supported_range }}
         run: |
           SOURCE_COMMIT="$(git rev-parse HEAD)" scripts/publish-runtime-asset-s3.sh \
             --dry-run \
@@ -336,7 +367,7 @@ jobs:
           SKENION_RELEASE_PUBLIC_BASE_URL: ${{ secrets.SKENION_RELEASE_PUBLIC_BASE_URL }}
           RELEASE_TIER: ${{ matrix.tier }}
           CONTRACTS_VERSION: ${{ needs.release.outputs.contracts_version }}
-          CONTRACTS_LINE: ${{ needs.release.outputs.contracts_line }}
+          CONTRACTS_SUPPORTED_RANGE: ${{ needs.release.outputs.contracts_supported_range }}
         run: |
           SOURCE_COMMIT="$(git rev-parse HEAD)" scripts/publish-runtime-asset-s3.sh \
             --skip-public-verification \

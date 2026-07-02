@@ -12,6 +12,9 @@ categories = ["multimedia", "rendering"]
 rust-version = "1.85"
 publish = false
 
+[package.metadata.skenion]
+supported-contracts-range = ">=0.0.0 <1.0.0"
+
 [dependencies]
 axum = { version = "0.8", features = ["multipart", "ws"] }
 bytemuck = { version = "1", features = ["derive"] }
@@ -24,7 +27,7 @@ rand = "0.9.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10"
-skenion-contracts = "0.53.0"
+skenion-contracts = "0.61.0"
 thiserror = "2.0.17"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }

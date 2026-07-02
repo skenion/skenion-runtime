@@ -81,8 +81,16 @@ fn valid_project_request_current() -> Value {
         "nodes": [
           {
             "id": "node",
-            "kind": "object.core.loader",
-            "kindVersion": "0.1.0",
+            "implementation": {
+              "provider": { "kind": "core" },
+              "objectId": "loader"
+            },
+            "objectSpec": "loader",
+            "objectResolution": {
+              "status": "resolved",
+              "candidates": [],
+              "issues": []
+            },
             "params": {},
             "ports": [
               {
@@ -126,19 +134,16 @@ fn rejects_unsupported_project_versions_under_current_surface() {
     let request: ProjectRequestCurrent =
         serde_json::from_value(payload).expect("payload shape should still deserialize");
 
-    let diagnostics = validate_project_request_current(&request)
+    let issues = validate_project_request_current(&request)
         .expect_err("active Runtime project validation must reject non-current graph versions");
+    assert_eq!(issues[0].code.as_deref(), Some("graph.invalid-contract"));
+    assert_eq!(issues[0].details.as_ref().unwrap()["surface"], "graph");
     assert_eq!(
-        diagnostics[0].code.as_deref(),
-        Some("graph.invalid-contract")
-    );
-    assert_eq!(diagnostics[0].details.as_ref().unwrap()["surface"], "graph");
-    assert_eq!(
-        diagnostics[0].details.as_ref().unwrap()["expectedSchemaVersion"],
+        issues[0].details.as_ref().unwrap()["expectedSchemaVersion"],
         "0.1.0"
     );
     assert_eq!(
-        diagnostics[0].details.as_ref().unwrap()["receivedSchemaVersion"],
+        issues[0].details.as_ref().unwrap()["receivedSchemaVersion"],
         "9.9.9"
     );
 }
@@ -164,10 +169,10 @@ fn current_project_request_plans_value_number_graph() {
 
     validate_project_request_current(&project)
         .expect("canonical current 0.1 project should validate");
-    let (plan, diagnostics) = build_execution_plan_request_current(&project)
+    let (plan, issues) = build_execution_plan_request_current(&project)
         .expect("canonical current 0.1 project should plan");
 
-    assert!(diagnostics.is_empty());
+    assert!(issues.is_empty());
     assert_eq!(plan.graph_id(), "loader-graph-current");
     assert!(plan.contains_node("node"));
 }

@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skenion_contracts::{
     CanvasNodeViewV01, EdgeSpecV01, EndpointBindingValueFormatV01, GraphNodeV01, GraphTargetRef,
-    InterfaceDiagnosticDetailV01, InterfaceIncidentEdgePolicyV01, PasteGraphFragmentRequest,
+    InterfaceIncidentEdgePolicyV01, InterfaceIssueDetailV01, PasteGraphFragmentRequest,
     ProjectDocumentV01, validate_paste_graph_fragment_request, validate_project_document_v01,
 };
 
-use crate::{project_current::is_payload_identity_node_kind_current, server::RuntimeDiagnostic};
+use crate::{RuntimeIssue, project_current::is_payload_identity_node_kind_current};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeValidationError {
@@ -95,7 +95,7 @@ pub struct IdRemapResult {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeOperationDiagnostic {
+pub struct RuntimeOperationIssue {
     pub severity: String,
     pub code: String,
     pub message: String,
@@ -116,7 +116,7 @@ pub struct RuntimeOperationDiagnostic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interface_policy: Option<InterfaceIncidentEdgePolicyV01>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub interface_detail: Option<InterfaceDiagnosticDetailV01>,
+    pub interface_detail: Option<InterfaceIssueDetailV01>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -133,7 +133,7 @@ pub struct PasteGraphFragmentResponse {
     pub revision_after: Option<String>,
     pub history_entry_id: Option<String>,
     pub id_remap: IdRemapResult,
-    pub diagnostics: Vec<RuntimeOperationDiagnostic>,
+    pub issues: Vec<RuntimeOperationIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -317,7 +317,7 @@ pub struct RuntimeCollaborationOperationBatch {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeCollaborationOperationDiagnostic {
+pub struct RuntimeCollaborationOperationIssue {
     pub severity: String,
     pub code: String,
     pub message: String,
@@ -377,7 +377,7 @@ pub struct RuntimeCollaborationNack {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub diagnostics: Option<Vec<RuntimeCollaborationOperationDiagnostic>>,
+    pub issues: Option<Vec<RuntimeCollaborationOperationIssue>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -441,7 +441,7 @@ pub struct RuntimeCollaborationOperationResult {
     pub nack: Option<RuntimeCollaborationNack>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rebase: Option<RuntimeCollaborationRebase>,
-    pub diagnostics: Vec<RuntimeCollaborationOperationDiagnostic>,
+    pub issues: Vec<RuntimeCollaborationOperationIssue>,
     pub created_at: String,
 }
 
@@ -453,7 +453,7 @@ pub struct RuntimeCollaborationOperationBatchResult {
     pub schema_version: String,
     pub session_id: String,
     pub results: Vec<RuntimeCollaborationOperationResult>,
-    pub diagnostics: Vec<RuntimeCollaborationOperationDiagnostic>,
+    pub issues: Vec<RuntimeCollaborationOperationIssue>,
     pub created_at: String,
 }
 
@@ -735,7 +735,7 @@ pub struct RuntimeTransportSessionSnapshot {
     pub control_revision: u64,
     pub project: Option<RuntimeTransportProjectSnapshot>,
     pub binding_formats: Vec<EndpointBindingValueFormatV01>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
     pub plan: Option<Value>,
 }
 
@@ -838,7 +838,6 @@ pub struct RuntimeSessionCapabilitySet {
     pub session_addressing: bool,
     pub event_replay: bool,
     pub multi_window: bool,
-    pub profiles: Vec<RuntimeConnectionProfileMode>,
     pub auth_policy: String,
 }
 
@@ -855,7 +854,7 @@ pub struct RuntimeSessionInfoResponse {
     pub profile: RuntimeConnectionProfile,
     pub capabilities: RuntimeSessionCapabilitySet,
     pub event_replay: RuntimeEventReplayWindow,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -902,7 +901,7 @@ pub struct RuntimeSessionEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mutation: Option<RuntimeTransportHistoryEntry>,
     pub replay: RuntimeEventReplayMetadata,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
+    pub issues: Vec<RuntimeIssue>,
     pub created_at: String,
 }
 
@@ -968,23 +967,23 @@ pub fn validate_paste_graph_fragment_response(
             "applied paste response must include revisionAfter",
         ));
     }
-    for diagnostic in &response.diagnostics {
+    for issue in &response.issues {
         if matches!(
-            diagnostic.code.as_str(),
+            issue.code.as_str(),
             "interface-drift" | "invalid-incident-edge"
-        ) && diagnostic.interface_detail.is_none()
+        ) && issue.interface_detail.is_none()
         {
             errors.push(RuntimeValidationError::new(format!(
-                "runtime operation diagnostic {} requires interfaceDetail",
-                diagnostic.code
+                "runtime operation issue {} requires interfaceDetail",
+                issue.code
             )));
         }
-        if let Some(detail) = &diagnostic.interface_detail
+        if let Some(detail) = &issue.interface_detail
             && detail.recovery_actions.is_empty()
         {
             errors.push(RuntimeValidationError::new(format!(
-                "runtime operation diagnostic {} interfaceDetail requires recoveryActions",
-                diagnostic.code
+                "runtime operation issue {} interfaceDetail requires recoveryActions",
+                issue.code
             )));
         }
     }
@@ -1295,10 +1294,7 @@ pub fn validate_runtime_session_info_response(
         errors.push(RuntimeValidationError::new("sessionId must not be empty"));
     }
     errors.extend(runtime_session_snapshot_errors(&response.snapshot));
-    errors.extend(runtime_diagnostic_errors(
-        "session info",
-        &response.diagnostics,
-    ));
+    errors.extend(runtime_issue_errors("session info", &response.issues));
     errors.extend(runtime_profile_errors(&response.profile));
     if response.capabilities.auth_policy != "deferred" {
         errors.push(RuntimeValidationError::new(
@@ -1371,7 +1367,7 @@ pub fn validate_runtime_session_event(
         errors.push(RuntimeValidationError::new("createdAt must not be empty"));
     }
     errors.extend(runtime_session_snapshot_errors(&event.snapshot));
-    errors.extend(runtime_diagnostic_errors("event", &event.diagnostics));
+    errors.extend(runtime_issue_errors("event", &event.issues));
     errors.extend(runtime_history_errors(&event.history));
     if let Some(mutation) = &event.mutation {
         errors.extend(runtime_history_entry_errors(mutation, "mutation"));
@@ -1536,11 +1532,10 @@ fn runtime_collaboration_change_id(change: &RuntimeCollaborationChange) -> &str 
 }
 
 fn paste_request_contains_payload_identity(request: &PasteGraphFragmentRequest) -> bool {
-    request
-        .fragment
-        .nodes
-        .iter()
-        .any(|node| is_payload_identity_node_kind_current(&node.kind))
+    request.fragment.nodes.iter().any(|node| {
+        crate::current_node_identity::graph_node_object_id(node)
+            .is_some_and(is_payload_identity_node_kind_current)
+    })
 }
 
 fn runtime_collaboration_event_payload_kind(
@@ -1632,7 +1627,7 @@ fn runtime_session_snapshot_errors(
     snapshot: &RuntimeTransportSessionSnapshot,
 ) -> Vec<RuntimeValidationError> {
     let mut errors = Vec::new();
-    errors.extend(runtime_diagnostic_errors("snapshot", &snapshot.diagnostics));
+    errors.extend(runtime_issue_errors("snapshot", &snapshot.issues));
     if snapshot.plan.as_ref().is_some_and(|plan| !plan.is_object()) {
         errors.push(RuntimeValidationError::new(
             "snapshot plan must be an object or null",
@@ -1648,17 +1643,11 @@ fn runtime_session_snapshot_errors(
     errors
 }
 
-fn runtime_diagnostic_errors(
-    label: &str,
-    diagnostics: &[RuntimeDiagnostic],
-) -> Vec<RuntimeValidationError> {
+fn runtime_issue_errors(label: &str, issues: &[RuntimeIssue]) -> Vec<RuntimeValidationError> {
     let mut errors = Vec::new();
-    if diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message.is_empty())
-    {
+    if issues.iter().any(|issue| issue.message.is_empty()) {
         errors.push(RuntimeValidationError::new(format!(
-            "{label} diagnostics must include non-empty message"
+            "{label} issues must include non-empty message"
         )));
     }
     errors
@@ -1795,11 +1784,11 @@ fn finish_validation(errors: Vec<RuntimeValidationError>) -> Result<(), RuntimeV
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DiagnosticSeverity, RuntimeDiagnostic};
+    use crate::{IssueSeverity, RuntimeIssue};
     use serde_json::json;
     use skenion_contracts::{
         GraphFragmentOutsideEndpointPolicyV01, GraphFragmentV01, GraphFragmentViewV01,
-        IdConflictPolicy, InterfaceDiagnosticDetailV01, InterfaceIncidentEdgePolicyV01,
+        IdConflictPolicy, InterfaceIncidentEdgePolicyV01, InterfaceIssueDetailV01,
         InterfaceRecoveryActionIdV01, PasteGraphFragmentOptions, PatchPath, PortDirectionV01,
     };
 
@@ -1847,8 +1836,8 @@ mod tests {
                 edge_id_map: BTreeMap::new(),
                 omitted_edge_ids: Vec::new(),
             },
-            diagnostics: vec![
-                RuntimeOperationDiagnostic {
+            issues: vec![
+                RuntimeOperationIssue {
                     severity: "error".to_owned(),
                     code: "interface-drift".to_owned(),
                     message: "drift".to_owned(),
@@ -1862,7 +1851,7 @@ mod tests {
                     interface_policy: Some(InterfaceIncidentEdgePolicyV01::Drop),
                     interface_detail: None,
                 },
-                RuntimeOperationDiagnostic {
+                RuntimeOperationIssue {
                     severity: "error".to_owned(),
                     code: "invalid-incident-edge".to_owned(),
                     message: "edge".to_owned(),
@@ -1873,7 +1862,7 @@ mod tests {
                     duplicates: None,
                     nodes: None,
                     edges: None,
-                    interface_policy: Some(InterfaceIncidentEdgePolicyV01::PreserveDiagnostic),
+                    interface_policy: Some(InterfaceIncidentEdgePolicyV01::PreserveIssue),
                     interface_detail: Some(interface_detail(Vec::new())),
                 },
             ],
@@ -1888,7 +1877,7 @@ mod tests {
                 "expected schemaVersion 0.1.0",
                 "paste response cannot be applied when ok is false",
                 "applied paste response must include revisionAfter",
-                "diagnostic interface-drift requires interfaceDetail",
+                "issue interface-drift requires interfaceDetail",
                 "interfaceDetail requires recoveryActions",
             ],
         );
@@ -2005,7 +1994,7 @@ mod tests {
             schema_version: "9.9.9".to_owned(),
             session_id: "session_1".to_owned(),
             results: vec![mismatched.clone(), mismatched],
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
             created_at: "2026-06-27T00:00:01.000Z".to_owned(),
         };
 
@@ -2136,7 +2125,6 @@ mod tests {
                 session_addressing: true,
                 event_replay: true,
                 multi_window: true,
-                profiles: vec![RuntimeConnectionProfileMode::LocalManaged],
                 auth_policy: "required".to_owned(),
             },
             event_replay: RuntimeEventReplayWindow {
@@ -2147,7 +2135,7 @@ mod tests {
                 replay_limit: Some(128),
                 overflow: Some(false),
             },
-            diagnostics: vec![empty_runtime_diagnostic()],
+            issues: vec![empty_runtime_issue()],
         };
 
         let report = validate_runtime_session_info_response(&session_info).unwrap_err();
@@ -2158,9 +2146,9 @@ mod tests {
                 "expected schema skenion.runtime.session.info",
                 "expected schemaVersion 0.1.0",
                 "sessionId must not be empty",
-                "snapshot diagnostics must include non-empty message",
+                "snapshot issues must include non-empty message",
                 "snapshot plan must be an object or null",
-                "session info diagnostics must include non-empty message",
+                "session info issues must include non-empty message",
                 "endpoint url must not be empty",
                 "runtime session authPolicy must be deferred",
                 "runtime eventReplay cursorKind must be sequence",
@@ -2182,7 +2170,7 @@ mod tests {
             history: bad_history(),
             mutation: Some(bad_history_entry()),
             replay: replay_with_bad_gap(),
-            diagnostics: vec![empty_runtime_diagnostic()],
+            issues: vec![empty_runtime_issue()],
             created_at: String::new(),
         };
 
@@ -2197,7 +2185,7 @@ mod tests {
                 "event id must not be empty",
                 "sequence must be at least 1",
                 "createdAt must not be empty",
-                "event diagnostics must include non-empty message",
+                "event issues must include non-empty message",
                 "expected history schema skenion.runtime.history",
                 "history entry id must not be empty",
                 "mutation viewPatch operation nodeId must not be empty",
@@ -2254,8 +2242,8 @@ mod tests {
 
     fn interface_detail(
         recovery_actions: Vec<InterfaceRecoveryActionIdV01>,
-    ) -> InterfaceDiagnosticDetailV01 {
-        InterfaceDiagnosticDetailV01 {
+    ) -> InterfaceIssueDetailV01 {
+        InterfaceIssueDetailV01 {
             edge_id: "edge_1".to_owned(),
             source_node_id: "source_1".to_owned(),
             source_port_id: "out".to_owned(),
@@ -2313,7 +2301,7 @@ mod tests {
             ack: Some(ack()),
             nack: None,
             rebase: None,
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
             created_at: "2026-06-27T00:00:00.000Z".to_owned(),
         }
     }
@@ -2335,7 +2323,7 @@ mod tests {
         RuntimeCollaborationNack {
             reason,
             retryable: Some(false),
-            diagnostics: Some(vec![RuntimeCollaborationOperationDiagnostic {
+            issues: Some(vec![RuntimeCollaborationOperationIssue {
                 severity: "error".to_owned(),
                 code: "invalid-operation".to_owned(),
                 message: "invalid".to_owned(),
@@ -2397,14 +2385,14 @@ mod tests {
             control_revision: 1,
             project: None,
             binding_formats: Vec::new(),
-            diagnostics: vec![empty_runtime_diagnostic()],
+            issues: vec![empty_runtime_issue()],
             plan: Some(json!(false)),
         }
     }
 
-    fn empty_runtime_diagnostic() -> RuntimeDiagnostic {
-        RuntimeDiagnostic {
-            severity: DiagnosticSeverity::Error,
+    fn empty_runtime_issue() -> RuntimeIssue {
+        RuntimeIssue {
+            severity: IssueSeverity::Error,
             message: String::new(),
             code: Some("runtime.empty".to_owned()),
             details: Some(json!({ "field": "message" })),

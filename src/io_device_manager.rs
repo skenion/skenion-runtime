@@ -7,15 +7,15 @@ use crate::midi_input::{collect_midi_input_ports, create_midi_input};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RuntimeIoDiagnosticSeverity {
+pub enum RuntimeIoIssueSeverity {
     Warning,
     Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeIoDiagnostic {
-    pub severity: RuntimeIoDiagnosticSeverity,
+pub struct RuntimeIoIssue {
+    pub severity: RuntimeIoIssueSeverity,
     pub code: String,
     pub message: String,
 }
@@ -54,7 +54,7 @@ pub struct RuntimeIoDeviceDescriptor {
 pub struct RuntimeIoDeviceListResponse {
     pub ok: bool,
     pub devices: Vec<RuntimeIoDeviceDescriptor>,
-    pub diagnostics: Vec<RuntimeIoDiagnostic>,
+    pub issues: Vec<RuntimeIoIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -129,12 +129,12 @@ impl RuntimeIoDeviceRegistry for MidirRuntimeIoDeviceRegistry {
         match create_midi_input("skenion-runtime-io-discovery") {
             Ok(input) => {
                 let midir_ports = input.ports();
-                let mut diagnostics = Vec::new();
-                let ports = collect_midi_input_ports(&input, &midir_ports, &mut diagnostics);
+                let mut issues = Vec::new();
+                let ports = collect_midi_input_ports(&input, &midir_ports, &mut issues);
                 RuntimeIoDeviceListResponse {
-                    ok: !diagnostics.iter().any(|diagnostic| {
-                        diagnostic.severity == RuntimeIoDiagnosticSeverity::Error
-                    }),
+                    ok: !issues
+                        .iter()
+                        .any(|issue| issue.severity == RuntimeIoIssueSeverity::Error),
                     devices: ports
                         .into_iter()
                         .map(|port| RuntimeIoDeviceDescriptor {
@@ -147,13 +147,13 @@ impl RuntimeIoDeviceRegistry for MidirRuntimeIoDeviceRegistry {
                             stable: false,
                         })
                         .collect(),
-                    diagnostics,
+                    issues,
                 }
             }
-            Err(diagnostic) => RuntimeIoDeviceListResponse {
+            Err(issue) => RuntimeIoDeviceListResponse {
                 ok: false,
                 devices: Vec::new(),
-                diagnostics: vec![diagnostic],
+                issues: vec![issue],
             },
         }
     }
@@ -168,7 +168,7 @@ impl RuntimeIoDeviceRegistry for StaticRuntimeIoDeviceRegistry {
         RuntimeIoDeviceListResponse {
             ok: true,
             devices: Vec::new(),
-            diagnostics: Vec::new(),
+            issues: Vec::new(),
         }
     }
 }
@@ -186,7 +186,7 @@ mod tests {
             RuntimeIoDeviceListResponse {
                 ok: true,
                 devices: self.devices.clone(),
-                diagnostics: Vec::new(),
+                issues: Vec::new(),
             }
         }
     }
@@ -222,7 +222,7 @@ mod tests {
 
         assert!(response.ok);
         assert!(response.devices.is_empty());
-        assert!(response.diagnostics.is_empty());
+        assert!(response.issues.is_empty());
     }
 
     #[test]

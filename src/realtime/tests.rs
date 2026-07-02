@@ -1,0 +1,1656 @@
+use std::{
+    collections::BTreeMap,
+    time::{Duration, SystemTime},
+};
+
+use serde_json::{Value, json};
+
+use super::graph_command::{
+    GraphCommandPayload, apply_graph_command, apply_node_delete_graph_command,
+    apply_node_update_graph_command, apply_object_create_graph_command,
+    apply_object_replace_graph_command, apply_object_resolve_graph_command,
+    graph_command_ack_from_cached, handle_graph_command, materialize_object_command_node,
+    next_generated_node_id, node_command_result, node_id_slug, node_input_result,
+    object_spec_runtime_issues, validate_object_command_target,
+};
+use super::node_catalog::{NodeCatalogHelloMode, catalog_revision_matches};
+use super::node_input::{
+    RuntimeControlEmittedEventInput, handle_node_input, runtime_control_emitted_event,
+};
+use super::presence::handle_selection_update;
+use super::session_engine::{RuntimeRealtimeSessionEngine, decode_hello_payload};
+use super::state::{
+    RememberAckInput, RuntimeRealtimeCachedCommandResult, RuntimeRealtimeIdempotencyScope,
+    RuntimeRealtimeResumeIdentity, sync_required_issue,
+};
+use super::*;
+use crate::object_spec::{
+    ObjectRegistry, ObjectSpecPortActivation, ObjectSpecPortDirection, ObjectSpecPortRate,
+    ObjectSpecResolution,
+};
+use crate::runtime_time::created_at_now;
+use crate::{
+    ControlMessage, ControlValue, EndpointBindingValueFormat, GraphTargetRef, PatchPath,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimePatchResponse,
+    ValueOccurrenceHeader,
+};
+use skenion_contracts::{RuntimeRealtimeEnvelopeV01, validate_runtime_realtime_envelope_v01};
+
+type CommandHandler = fn(
+    &crate::RuntimeSessionRecord,
+    &RuntimeRealtimeConnectionIdentity,
+    RuntimeRealtimeEnvelope,
+) -> Result<RealtimeDispatch, RuntimeRealtimeIssue>;
+
+fn test_binding_format() -> EndpointBindingValueFormat {
+    EndpointBindingValueFormat {
+        binding_id: "edge_value_target".to_owned(),
+        binding_epoch: 2,
+        format_revision: 7,
+        format_digest: None,
+        value_format: crate::ValueFormat {
+            value_type_id: "value.core.float32".to_owned(),
+            format: Some("f32".to_owned()),
+            shape: None,
+            dynamic_shape: None,
+            layout: None,
+            strides: None,
+            byte_length: None,
+            sample_rate: None,
+            channels: None,
+            channel_layout: None,
+            color_space: None,
+            color_range: None,
+            transfer: None,
+            primaries: None,
+            alpha_policy: None,
+            resource_kind: None,
+        },
+        source: Some(crate::ValueEndpointRef {
+            node_id: "value_1".to_owned(),
+            port_id: "value".to_owned(),
+        }),
+        target: Some(crate::ValueEndpointRef {
+            node_id: "target_1".to_owned(),
+            port_id: "cold".to_owned(),
+        }),
+        delivery: None,
+    }
+}
+
+fn test_occurrence_header() -> ValueOccurrenceHeader {
+    ValueOccurrenceHeader {
+        binding_id: "edge_value_target".to_owned(),
+        binding_epoch: 2,
+        format_revision: 7,
+        sequence: 1,
+        clock: None,
+        timestamp: None,
+        payload_kind: crate::ValuePayloadKind::Json,
+        byte_length: None,
+        byte_offset: None,
+        actual_shape: None,
+        flags: None,
+        dropped_before: None,
+        duration: None,
+    }
+}
+
+fn realtime_event(session_id: &str, sequence: u64, cursor: &str) -> RuntimeRealtimeEnvelope {
+    RuntimeRealtimeEnvelope {
+        schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
+        schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
+        message_type: EVENT_SELECTION_UPDATED.to_owned(),
+        message_id: format!("{session_id}_selection_{sequence:06}"),
+        session_id: session_id.to_owned(),
+        connection_id: None,
+        client_id: None,
+        window_id: None,
+        command_id: None,
+        correlation_id: None,
+        idempotency_key: None,
+        sequence: Some(sequence),
+        cursor: Some(cursor.to_owned()),
+        created_at: Some(created_at_now()),
+        payload: json!({ "replayed": false }),
+    }
+}
+
+fn client_frame(
+    session_id: &str,
+    message_type: &str,
+    message_id: &str,
+    payload: Value,
+) -> RuntimeRealtimeEnvelope {
+    RuntimeRealtimeEnvelope {
+        schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
+        schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
+        message_type: message_type.to_owned(),
+        message_id: message_id.to_owned(),
+        session_id: session_id.to_owned(),
+        connection_id: None,
+        client_id: None,
+        window_id: None,
+        command_id: Some(format!("{message_id}-command")),
+        correlation_id: Some(format!("{message_id}-correlation")),
+        idempotency_key: None,
+        sequence: None,
+        cursor: None,
+        created_at: None,
+        payload,
+    }
+}
+
+fn frame_text(frame: &RuntimeRealtimeEnvelope) -> String {
+    serde_json::to_string(frame).expect("runtime realtime frame should serialize")
+}
+
+fn graph_payload(payload: Value) -> GraphCommandPayload {
+    serde_json::from_value(payload).expect("graph command payload should parse")
+}
+
+fn root_target(base_revision: &str) -> GraphTargetRef {
+    GraphTargetRef {
+        path: PatchPath::Root,
+        base_revision: base_revision.to_owned(),
+        target_revision: None,
+    }
+}
+
+fn empty_project_request_current() -> crate::ProjectRequestCurrent {
+    let document: crate::ProjectDocumentCurrent = serde_json::from_value(json!({
+      "schema": "skenion.project",
+      "schemaVersion": "0.1.0",
+      "id": "realtime-empty-project",
+      "documentId": "10000000-0000-0000-0000-00000000a001",
+      "revision": "1",
+      "graph": {
+        "schema": "skenion.graph",
+        "schemaVersion": "0.1.0",
+        "id": "root",
+        "revision": "1",
+        "nodes": [],
+        "edges": []
+      },
+      "viewState": {
+        "schema": "skenion.view-state",
+        "schemaVersion": "0.1.0",
+        "canvas": {
+          "nodes": {}
+        }
+      },
+      "patchLibrary": []
+    }))
+    .expect("empty current project should parse");
+    crate::ProjectRequestCurrent::from(document)
+}
+
+fn control_project_request_current() -> crate::ProjectRequestCurrent {
+    let document: crate::ProjectDocumentCurrent = serde_json::from_value(json!({
+      "schema": "skenion.project",
+      "schemaVersion": "0.1.0",
+      "id": "realtime-control-project",
+      "documentId": "10000000-0000-0000-0000-00000000a002",
+      "revision": "1",
+      "graph": {
+        "schema": "skenion.graph",
+        "schemaVersion": "0.1.0",
+        "id": "minimal-value",
+        "revision": "1",
+        "nodes": [
+          control_project_core_node("value_1"),
+          control_project_core_node("target_1")
+        ],
+        "edges": [
+          {
+            "id": "edge_value_target",
+            "source": { "nodeId": "value_1", "portId": "value" },
+            "target": { "nodeId": "target_1", "portId": "cold" },
+            "resolvedType": "value.core.float32"
+          }
+        ]
+      },
+      "viewState": {
+        "schema": "skenion.view-state",
+        "schemaVersion": "0.1.0",
+        "canvas": {
+          "nodes": {
+            "value_1": { "x": 96.0, "y": 96.0 },
+            "target_1": { "x": 260.0, "y": 96.0 }
+          }
+        }
+      },
+      "patchLibrary": []
+    }))
+    .expect("control current project should parse");
+    crate::ProjectRequestCurrent::from(document)
+}
+
+fn control_project_core_node(node_id: &str) -> Value {
+    json!({
+        "id": node_id,
+        "implementation": {
+            "provider": { "kind": "core" },
+            "objectId": "float"
+        },
+        "objectSpec": "float",
+        "objectResolution": {
+            "status": "resolved",
+            "candidates": [],
+            "issues": []
+        },
+        "params": {},
+        "ports": control_project_value_f32_ports()
+    })
+}
+
+fn control_project_value_f32_ports() -> Value {
+    json!([
+      {
+        "id": "in",
+        "direction": "input",
+        "label": "In",
+        "type": "value.core.message",
+        "rate": "control",
+        "required": false,
+        "triggerMode": "trigger",
+        "accepts": [
+          "value.core.float32",
+          "value.core.int32",
+          "value.core.uint32",
+          "value.core.bool",
+          "value.core.bang"
+        ],
+        "messageKeys": {
+          "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+          "silent": ["set"],
+          "trigger": ["bang", "float", "int", "uint", "bool"],
+          "store": ["set", "float", "int", "uint", "bool"],
+          "emit": ["bang", "float", "int", "uint", "bool"]
+        }
+      },
+      {
+        "id": "cold",
+        "direction": "input",
+        "label": "Cold",
+        "type": "value.core.float32",
+        "rate": "control",
+        "required": false,
+        "triggerMode": "passive"
+      },
+      {
+        "id": "value",
+        "direction": "output",
+        "label": "Value",
+        "type": "value.core.float32",
+        "rate": "control"
+      }
+    ])
+}
+
+fn load_control_project(record: &crate::RuntimeSessionRecord) {
+    let loaded = record
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned")
+        .load_project_current(control_project_request_current());
+    assert!(loaded.ok, "control project should load: {loaded:?}");
+}
+
+fn assert_command_metadata_rejected(
+    record: &crate::RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    message_type: &str,
+    handler: CommandHandler,
+) {
+    let missing_command_message = format!("{message_type}-missing-command");
+    let mut missing_command = client_frame(
+        &record.id,
+        message_type,
+        &missing_command_message,
+        Value::Null,
+    );
+    missing_command.command_id = None;
+    missing_command.idempotency_key = Some(format!("{message_type}-missing-command-key"));
+    assert_command_metadata_issue(
+        handler(record, identity, missing_command),
+        "realtime.command.command-id-required",
+        message_type,
+        "missing commandId",
+    );
+
+    let blank_command_message = format!("{message_type}-blank-command");
+    let mut blank_command = client_frame(
+        &record.id,
+        message_type,
+        &blank_command_message,
+        Value::Null,
+    );
+    blank_command.command_id = Some(" \t\n".to_owned());
+    blank_command.idempotency_key = Some(format!("{message_type}-blank-command-key"));
+    assert_command_metadata_issue(
+        handler(record, identity, blank_command),
+        "realtime.command.command-id-required",
+        message_type,
+        "blank commandId",
+    );
+
+    let missing_key_message = format!("{message_type}-missing-idempotency-key");
+    let missing_key = client_frame(&record.id, message_type, &missing_key_message, Value::Null);
+    assert_command_metadata_issue(
+        handler(record, identity, missing_key),
+        "realtime.command.idempotency-key-required",
+        message_type,
+        "missing idempotencyKey",
+    );
+
+    let blank_key_message = format!("{message_type}-blank-idempotency-key");
+    let mut blank_key = client_frame(&record.id, message_type, &blank_key_message, Value::Null);
+    blank_key.idempotency_key = Some(" \t\n".to_owned());
+    assert_command_metadata_issue(
+        handler(record, identity, blank_key),
+        "realtime.command.idempotency-key-required",
+        message_type,
+        "blank idempotencyKey",
+    );
+}
+
+fn assert_command_metadata_issue(
+    result: Result<RealtimeDispatch, RuntimeRealtimeIssue>,
+    expected_code: &str,
+    message_type: &str,
+    case: &str,
+) {
+    let issue = result.unwrap_err();
+    assert_eq!(
+        issue.code, expected_code,
+        "{message_type} should reject {case}"
+    );
+}
+
+fn package_patch_target(base_revision: &str) -> GraphTargetRef {
+    GraphTargetRef {
+        path: PatchPath::PackagePatchDefinition {
+            package_id: "pkg".to_owned(),
+            patch_id: "help".to_owned(),
+            version: None,
+        },
+        base_revision: base_revision.to_owned(),
+        target_revision: None,
+    }
+}
+
+fn test_identity() -> RuntimeRealtimeConnectionIdentity {
+    RuntimeRealtimeConnectionIdentity {
+        connection_id: "conn_test".to_owned(),
+        client_id: "client_test".to_owned(),
+        window_id: "window_test".to_owned(),
+        resume_token: "rtresume-test".to_owned(),
+    }
+}
+
+fn port_for_json(
+    id: &str,
+    direction: ObjectSpecPortDirection,
+    rate: ObjectSpecPortRate,
+    activation: Option<ObjectSpecPortActivation>,
+) -> crate::object_spec::ObjectSpecPort {
+    crate::object_spec::ObjectSpecPort {
+        id: id.to_owned(),
+        direction,
+        port_type: "value.core.float32".to_owned(),
+        label: Some(format!("{id} label")),
+        rate,
+        accepts: None,
+        activation,
+        message_keys: None,
+    }
+}
+
+fn resolved_float_object_spec(input: &str) -> ObjectSpecResolution {
+    ObjectRegistry::first_party_core().resolve(input)
+}
+
+fn object_spec_resolution_with_all_port_variants() -> ObjectSpecResolution {
+    let mut resolution = resolved_float_object_spec("sig~ 440");
+    resolution.instance_ports = vec![
+        port_for_json(
+            "event_in",
+            ObjectSpecPortDirection::Input,
+            ObjectSpecPortRate::Event,
+            Some(ObjectSpecPortActivation::Trigger),
+        ),
+        port_for_json(
+            "control_in",
+            ObjectSpecPortDirection::Input,
+            ObjectSpecPortRate::Control,
+            Some(ObjectSpecPortActivation::Latched),
+        ),
+        port_for_json(
+            "audio_out",
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Audio,
+            Some(ObjectSpecPortActivation::Passive),
+        ),
+        port_for_json(
+            "render_out",
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Render,
+            None,
+        ),
+        port_for_json(
+            "gpu_out",
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Gpu,
+            None,
+        ),
+        port_for_json(
+            "resource_out",
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Resource,
+            None,
+        ),
+        port_for_json(
+            "io_out",
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Io,
+            None,
+        ),
+    ];
+    resolution.candidates = vec![crate::object_spec::ObjectSpecCandidateSummary {
+        id: "object.core.sig".to_owned(),
+        source: "core".to_owned(),
+        implementation: crate::ObjectImplementationRefCurrent {
+            provider: crate::ObjectProviderRefCurrent::Core,
+            object_id: "audio.sig".to_owned(),
+            interface_digest: None,
+        },
+        object_spec: Some("sig~".to_owned()),
+        display_name: "Signal".to_owned(),
+    }];
+    resolution.issues.push(crate::object_spec::ObjectSpecIssue {
+        code: "object-spec.test-warning".to_owned(),
+        message: "test warning".to_owned(),
+    });
+    resolution
+}
+
+fn assert_response_issue_code(response: &RuntimePatchResponse, code: &str) {
+    assert_eq!(response.issues[0].code.as_deref(), Some(code));
+}
+
+#[test]
+fn value_occurrence_header_guard_accepts_current_binding() {
+    let binding = test_binding_format();
+    let header = test_occurrence_header();
+    let binding_formats = [binding.clone()];
+
+    let accepted = validate_value_occurrence_header_for_session_binding(&header, &binding_formats)
+        .expect("current binding should be accepted");
+
+    assert_eq!(accepted, &binding);
+}
+
+#[test]
+fn value_occurrence_header_guard_rejects_invalid_header() {
+    let mut header = test_occurrence_header();
+    header.binding_id.clear();
+
+    let issue =
+        validate_value_occurrence_header_for_session_binding(&header, &[test_binding_format()])
+            .expect_err("invalid header should be rejected");
+
+    assert_eq!(
+        issue.code.as_deref(),
+        Some("runtime.value-binding.invalid-header")
+    );
+}
+
+#[test]
+fn value_occurrence_header_guard_rejects_unknown_binding() {
+    let mut header = test_occurrence_header();
+    header.binding_id = "missing_edge".to_owned();
+
+    let issue =
+        validate_value_occurrence_header_for_session_binding(&header, &[test_binding_format()])
+            .expect_err("unknown binding should be rejected");
+
+    assert_eq!(
+        issue.code.as_deref(),
+        Some("runtime.value-binding.unknown-binding")
+    );
+}
+
+#[test]
+fn value_occurrence_header_guard_rejects_stale_binding_metadata() {
+    let binding = test_binding_format();
+    let mut stale_epoch = test_occurrence_header();
+    stale_epoch.binding_epoch = 1;
+    let epoch_issue = validate_value_occurrence_header_for_session_binding(
+        &stale_epoch,
+        std::slice::from_ref(&binding),
+    )
+    .expect_err("stale epoch should be rejected");
+    assert_eq!(
+        epoch_issue.code.as_deref(),
+        Some("runtime.value-binding.stale-epoch")
+    );
+
+    let mut stale_format = test_occurrence_header();
+    stale_format.format_revision = 6;
+    let format_issue =
+        validate_value_occurrence_header_for_session_binding(&stale_format, &[binding])
+            .expect_err("stale format revision should be rejected");
+    assert_eq!(
+        format_issue.code.as_deref(),
+        Some("runtime.value-binding.stale-format-revision")
+    );
+}
+
+#[test]
+fn idempotency_results_follow_retained_event_window() {
+    let state = RuntimeRealtimeState::new("default", 2);
+    let identity = state.issue_connection_identity(None);
+
+    for sequence in 1..=3 {
+        let cursor = state.cursor_for(sequence);
+        let idempotency_key = format!("key-{sequence}");
+        state.remember_ack(RememberAckInput {
+            identity: &identity,
+            message_type: "selection.update",
+            idempotency_key: &idempotency_key,
+            event_cursor: &cursor,
+            event_sequence: sequence,
+            ack_payload: json!({ "eventCursor": cursor }),
+            emitted_results: Vec::new(),
+        });
+        state.publish(realtime_event("default", sequence, &cursor));
+    }
+
+    let idempotency_results = state
+        .idempotency_results
+        .lock()
+        .expect("runtime realtime idempotency lock should not be poisoned");
+    assert_eq!(idempotency_results.len(), 2);
+    assert!(
+        !idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
+            client_id: identity.client_id.clone(),
+            window_id: identity.window_id.clone(),
+            message_type: "selection.update".to_owned(),
+            idempotency_key: "key-1".to_owned(),
+        })
+    );
+    assert!(
+        idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
+            client_id: identity.client_id.clone(),
+            window_id: identity.window_id.clone(),
+            message_type: "selection.update".to_owned(),
+            idempotency_key: "key-2".to_owned(),
+        })
+    );
+    assert!(
+        idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
+            client_id: identity.client_id.clone(),
+            window_id: identity.window_id.clone(),
+            message_type: "selection.update".to_owned(),
+            idempotency_key: "key-3".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn replay_after_reports_cursor_issues_and_marks_replayed_events() {
+    let state = RuntimeRealtimeState::new("default", 2);
+    let current_cursor = state.current_cursor();
+    let (incarnation_id, _) = current_cursor
+        .rsplit_once(':')
+        .expect("runtime cursor should include sequence separator");
+
+    let invalid_shape = state
+        .replay_after("not-a-runtime-cursor")
+        .expect_err("cursor without sequence separator should be rejected");
+    assert_eq!(invalid_shape.code, "realtime.cursor.invalid");
+
+    let wrong_incarnation = state
+        .replay_after("other-incarnation:0")
+        .expect_err("cursor from another incarnation should be rejected");
+    assert_eq!(
+        wrong_incarnation.code,
+        "realtime.cursor.incarnation-mismatch"
+    );
+
+    let invalid_sequence = state
+        .replay_after(&format!("{incarnation_id}:not-a-number"))
+        .expect_err("cursor with non-numeric sequence should be rejected");
+    assert_eq!(invalid_sequence.code, "realtime.cursor.invalid");
+
+    let ahead = state
+        .replay_after(&format!("{incarnation_id}:1"))
+        .expect_err("cursor ahead of the current sequence should require sync");
+    assert_eq!(ahead.code, "realtime.cursor.unknown");
+
+    for expected_sequence in 1..=3 {
+        let sequence = state.next_event_sequence();
+        assert_eq!(sequence, expected_sequence);
+        let cursor = state.cursor_for(sequence);
+        state.publish(realtime_event("default", sequence, &cursor));
+    }
+
+    let expired = state
+        .replay_after(&state.cursor_for(0))
+        .expect_err("cursor before retained window should require sync");
+    assert_eq!(expired.code, "realtime.cursor.expired");
+
+    let replay = state
+        .replay_after(&state.cursor_for(2))
+        .expect("cursor inside retained window should replay later events");
+    assert_eq!(replay.high_water_sequence, 3);
+    assert_eq!(replay.events.len(), 1);
+    assert_eq!(replay.events[0].sequence, Some(3));
+    assert_eq!(replay.events[0].payload["replayed"], true);
+}
+
+#[test]
+fn presence_entries_are_ttl_pruned_and_count_bounded() {
+    let state = RuntimeRealtimeState::new("default", 1);
+    let now = SystemTime::now();
+    let expired_at = now
+        .checked_sub(Duration::from_secs(1))
+        .expect("test time should support subtraction");
+    let future = now + Duration::from_secs(60);
+    let expired = state.issue_connection_identity(None);
+    let active_a = state.issue_connection_identity(None);
+    let active_b = state.issue_connection_identity(None);
+    let active_c = state.issue_connection_identity(None);
+
+    state.remember_presence(&expired, json!({ "client": "expired" }), expired_at, 1);
+    state.remember_presence(&active_a, json!({ "client": "a" }), future, 2);
+    state.remember_presence(&active_b, json!({ "client": "b" }), future, 3);
+    state.remember_presence(&active_c, json!({ "client": "c" }), future, 4);
+
+    let presence = state
+        .presence
+        .lock()
+        .expect("runtime realtime presence lock should not be poisoned");
+    assert_eq!(presence.len(), 2);
+    assert!(!presence.contains_key(&format!("{}:{}", expired.client_id, expired.window_id)));
+    assert!(!presence.contains_key(&format!("{}:{}", active_a.client_id, active_a.window_id)));
+    assert!(presence.contains_key(&format!("{}:{}", active_b.client_id, active_b.window_id)));
+    assert!(presence.contains_key(&format!("{}:{}", active_c.client_id, active_c.window_id)));
+}
+
+#[test]
+fn hello_catalog_and_error_envelopes_preserve_client_context() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let identity = record
+        .realtime
+        .issue_connection_identity(Some(RuntimeRealtimeResumeIdentity {
+            client_id: "resumed-client".to_owned(),
+            window_id: "resumed-window".to_owned(),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+        }));
+    let mut frame = client_frame(
+        &record.id,
+        "session.hello",
+        "hello-1",
+        json!({ "nodeCatalog": { "mode": "always" } }),
+    );
+    frame.cursor = Some("cursor-from-frame".to_owned());
+
+    let decoded = decode_hello_payload(&frame);
+    assert_eq!(decoded.last_cursor.as_deref(), Some("cursor-from-frame"));
+    assert_eq!(
+        decoded.node_catalog.as_ref().map(|request| request.mode),
+        Some(NodeCatalogHelloMode::Always)
+    );
+
+    let snapshot = current_snapshot(&record);
+    let catalog_snapshot = node_catalog_snapshot_for_record(&record);
+    let current_revision = serde_json::to_value(&catalog_snapshot.catalog_revision)
+        .expect("catalog revision should serialize");
+    let included_catalog = hello_node_catalog_payload(&record, decoded.node_catalog.as_ref());
+    assert_eq!(included_catalog["status"], "included");
+    assert!(included_catalog.get("snapshot").is_some());
+    let unchanged_catalog = hello_node_catalog_payload(
+        &record,
+        Some(&NodeCatalogHelloRequest {
+            mode: NodeCatalogHelloMode::IfChanged,
+            known_revision: Some(current_revision.clone()),
+        }),
+    );
+    assert_eq!(unchanged_catalog["status"], "unchanged");
+    assert!(unchanged_catalog.get("snapshot").is_none());
+    assert!(catalog_revision_matches(
+        Some(&Value::String(
+            catalog_snapshot.catalog_revision.value.clone()
+        )),
+        &catalog_snapshot.catalog_revision,
+    ));
+    assert!(catalog_revision_matches(
+        Some(&current_revision),
+        &catalog_snapshot.catalog_revision,
+    ));
+    assert!(!catalog_revision_matches(
+        None,
+        &catalog_snapshot.catalog_revision
+    ));
+
+    let attached = session_attached(
+        &record,
+        &identity,
+        &frame,
+        &snapshot,
+        decoded.node_catalog.as_ref(),
+    );
+    assert_eq!(attached.message_type, "session.attached");
+    assert_eq!(attached.correlation_id.as_deref(), Some("hello-1"));
+    assert_eq!(attached.payload["clientId"], identity.client_id);
+    assert_eq!(attached.payload["nodeCatalog"]["status"], "included");
+    assert_eq!(
+        attached.payload["currentRevisions"]["sessionRevision"],
+        snapshot.session_revision
+    );
+
+    let sync = session_sync_required(
+        &record,
+        &identity,
+        &frame,
+        &snapshot,
+        sync_required_issue(
+            "realtime.cursor.test",
+            "test sync required",
+            Some(json!({ "currentCursor": record.realtime.current_cursor() })),
+        ),
+        Some(&NodeCatalogHelloRequest {
+            mode: NodeCatalogHelloMode::IfChanged,
+            known_revision: Some(current_revision),
+        }),
+    );
+    assert_eq!(sync.message_type, "session.syncRequired");
+    assert_eq!(sync.payload["issue"]["code"], "realtime.cursor.test");
+    assert_eq!(sync.payload["nodeCatalog"]["status"], "unchanged");
+
+    let error = runtime_issue(
+        &record.id,
+        Some(&identity),
+        Some(&frame),
+        "realtime.frame.test",
+        "test error",
+        Some(json!({ "field": "payload" })),
+    );
+    assert_eq!(error.message_type, "runtime.issue");
+    assert_eq!(
+        error.connection_id.as_deref(),
+        Some(identity.connection_id.as_str())
+    );
+    assert_eq!(error.command_id.as_deref(), Some("hello-1-command"));
+    assert_eq!(error.correlation_id.as_deref(), Some("hello-1"));
+    assert_eq!(error.payload["issue"]["details"]["field"], "payload");
+
+    let internal = empty_correlation_frame(&record.id);
+    assert_eq!(internal.message_type, "runtime.internal");
+    assert_eq!(internal.session_id, record.id);
+    assert_eq!(internal.payload, Value::Null);
+}
+
+#[test]
+fn uncorrelated_control_emitted_event_omits_command_metadata_and_validates() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let sequence = record.realtime.next_event_sequence();
+    let cursor = record.realtime.cursor_for(sequence);
+    let event = runtime_control_emitted_event(
+        &record,
+        None,
+        None,
+        RuntimeControlEmittedEventInput {
+            sequence,
+            cursor: &cursor,
+            control_revision: Some(3),
+            changed: true,
+            events: vec![crate::RuntimeControlEmission {
+                node_id: "bang_1".to_owned(),
+                port_id: "out".to_owned(),
+                message: ControlMessage::bang(),
+            }],
+            values: BTreeMap::new(),
+            issues: Vec::new(),
+        },
+    );
+
+    assert_eq!(event.message_type, "control.emitted");
+    assert!(event.connection_id.is_none());
+    assert!(event.client_id.is_none());
+    assert!(event.window_id.is_none());
+    assert!(event.command_id.is_none());
+    assert!(event.correlation_id.is_none());
+    assert!(event.idempotency_key.is_none());
+    assert!(event.payload.get("commandId").is_none());
+    assert!(event.payload.get("correlationId").is_none());
+    assert!(event.payload.get("idempotencyKey").is_none());
+    assert_eq!(event.payload["controlSequence"], sequence);
+    assert_eq!(event.payload["events"][0]["message"]["key"], "bang");
+
+    let value =
+        serde_json::to_value(&event).expect("runtime realtime event should serialize to JSON");
+    let contract_envelope = serde_json::from_value::<RuntimeRealtimeEnvelopeV01>(value.clone())
+        .unwrap_or_else(|error| {
+            panic!("runtime control event should deserialize as contract DTO: {error}\n{value}")
+        });
+    if let Err(report) = validate_runtime_realtime_envelope_v01(&contract_envelope) {
+        let errors = report
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        panic!(
+            "runtime control event should pass Contracts realtime validation: {errors}\n{value}"
+        );
+    }
+}
+
+#[test]
+fn session_engine_routes_attached_frames_as_dispatch_output() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    load_control_project(&record);
+    let session_id = record.id.clone();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+
+    let before_attach = client_frame(
+        &session_id,
+        FRAME_NODE_CATALOG_REQUEST,
+        "catalog-before-attach",
+        json!({}),
+    );
+    let before_attach_output = engine.handle_text_frame(&frame_text(&before_attach));
+    assert_eq!(before_attach_output.direct_frames.len(), 1);
+    assert!(before_attach_output.broadcast_events.is_empty());
+    assert_eq!(
+        before_attach_output.direct_frames[0].payload["issue"]["code"],
+        "realtime.session.not-attached"
+    );
+
+    let hello = client_frame(&session_id, FRAME_SESSION_HELLO, "hello-engine", json!({}));
+    let hello_output = engine.handle_text_frame(&frame_text(&hello));
+    assert_eq!(hello_output.direct_frames.len(), 1);
+    assert!(hello_output.broadcast_events.is_empty());
+    assert_eq!(
+        hello_output.direct_frames[0].message_type,
+        "session.attached"
+    );
+
+    let catalog_request = client_frame(
+        &session_id,
+        FRAME_NODE_CATALOG_REQUEST,
+        "catalog-after-attach",
+        json!({}),
+    );
+    let catalog_output = engine.handle_text_frame(&frame_text(&catalog_request));
+    assert_eq!(catalog_output.direct_frames.len(), 1);
+    assert!(catalog_output.broadcast_events.is_empty());
+    assert_eq!(
+        catalog_output.direct_frames[0].message_type,
+        "nodeCatalog.snapshot"
+    );
+}
+
+#[test]
+fn session_engine_filters_broadcast_events_by_sequence() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let session_id = record.id.clone();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+    let first = realtime_event(&session_id, 1, "cursor:1");
+    let duplicate = realtime_event(&session_id, 1, "cursor:1");
+    let second = realtime_event(&session_id, 2, "cursor:2");
+
+    assert_eq!(
+        engine
+            .handle_broadcast_event(first)
+            .expect("first event should forward")
+            .sequence,
+        Some(1)
+    );
+    assert!(engine.handle_broadcast_event(duplicate).is_none());
+    assert_eq!(
+        engine
+            .handle_broadcast_event(second)
+            .expect("newer event should forward")
+            .sequence,
+        Some(2)
+    );
+}
+
+#[test]
+fn session_engine_suppresses_cached_node_input_result_after_visible_broadcast() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    load_control_project(&record);
+    let session_id = record.id.clone();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+
+    let hello = client_frame(
+        &session_id,
+        FRAME_SESSION_HELLO,
+        "hello-node-input",
+        json!({}),
+    );
+    let hello_output = engine.handle_text_frame(&frame_text(&hello));
+    assert_eq!(
+        hello_output.direct_frames[0].message_type,
+        "session.attached"
+    );
+
+    let mut input = client_frame(
+        &session_id,
+        FRAME_NODE_INPUT,
+        "node-input-visible",
+        json!({
+            "inputs": [{
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": ControlMessage::from_value(ControlValue::float(12.0)),
+            }]
+        }),
+    );
+    input.idempotency_key = Some("node-input-visible-key".to_owned());
+
+    let first_output = engine.handle_text_frame(&frame_text(&input));
+    assert_eq!(first_output.direct_frames.len(), 1);
+    assert_eq!(first_output.direct_frames[0].message_type, "command.ack");
+    assert_eq!(first_output.broadcast_events.len(), 1);
+    let delivered = engine
+        .handle_broadcast_event(first_output.broadcast_events[0].clone())
+        .expect("original control event should be visible to the sender");
+    assert_eq!(delivered.message_type, "control.emitted");
+    assert_eq!(delivered.payload["replayed"], false);
+
+    let mut duplicate = input.clone();
+    duplicate.message_id = "node-input-duplicate-visible".to_owned();
+    duplicate.command_id = Some("node-input-duplicate-visible-command".to_owned());
+    duplicate.correlation_id = Some("node-input-duplicate-visible-correlation".to_owned());
+    let duplicate_output = engine.handle_text_frame(&frame_text(&duplicate));
+
+    assert_eq!(duplicate_output.direct_frames.len(), 1);
+    assert_eq!(
+        duplicate_output.direct_frames[0].message_type,
+        "command.ack"
+    );
+    assert_eq!(duplicate_output.direct_frames[0].payload["cached"], true);
+    assert!(duplicate_output.broadcast_events.is_empty());
+}
+
+#[test]
+fn session_engine_replays_cached_node_input_result_when_sender_missed_broadcast() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    load_control_project(&record);
+    let session_id = record.id.clone();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+
+    let hello = client_frame(
+        &session_id,
+        FRAME_SESSION_HELLO,
+        "hello-node-input-replay",
+        json!({}),
+    );
+    let hello_output = engine.handle_text_frame(&frame_text(&hello));
+    assert_eq!(
+        hello_output.direct_frames[0].message_type,
+        "session.attached"
+    );
+
+    let mut input = client_frame(
+        &session_id,
+        FRAME_NODE_INPUT,
+        "node-input-missed",
+        json!({
+            "inputs": [{
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": ControlMessage::from_value(ControlValue::float(12.0)),
+            }]
+        }),
+    );
+    input.idempotency_key = Some("node-input-missed-key".to_owned());
+
+    let first_output = engine.handle_text_frame(&frame_text(&input));
+    assert_eq!(first_output.broadcast_events.len(), 1);
+
+    let mut duplicate = input.clone();
+    duplicate.message_id = "node-input-duplicate-missed".to_owned();
+    duplicate.command_id = Some("node-input-duplicate-missed-command".to_owned());
+    duplicate.correlation_id = Some("node-input-duplicate-missed-correlation".to_owned());
+    let duplicate_output = engine.handle_text_frame(&frame_text(&duplicate));
+
+    assert_eq!(duplicate_output.direct_frames.len(), 2);
+    assert_eq!(
+        duplicate_output.direct_frames[0].message_type,
+        "command.ack"
+    );
+    assert_eq!(duplicate_output.direct_frames[0].payload["cached"], true);
+    assert_eq!(
+        duplicate_output.direct_frames[1].message_type,
+        "control.emitted"
+    );
+    assert_eq!(duplicate_output.direct_frames[1].payload["replayed"], true);
+    assert!(duplicate_output.broadcast_events.is_empty());
+    assert!(
+        engine
+            .handle_broadcast_event(first_output.broadcast_events[0].clone())
+            .is_none()
+    );
+}
+
+#[test]
+fn command_handlers_reject_missing_or_blank_command_metadata() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let identity = record.realtime.issue_connection_identity(None);
+
+    for (message_type, handler) in [
+        (FRAME_GRAPH_COMMAND, handle_graph_command as CommandHandler),
+        (FRAME_NODE_INPUT, handle_node_input as CommandHandler),
+        (
+            FRAME_SELECTION_UPDATE,
+            handle_selection_update as CommandHandler,
+        ),
+    ] {
+        assert_command_metadata_rejected(&record, &identity, message_type, handler);
+    }
+}
+
+#[test]
+fn command_handlers_reject_invalid_payloads() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let identity = record.realtime.issue_connection_identity(None);
+
+    let mut node_input_missing_command = client_frame(
+        &record.id,
+        "node.input",
+        "node-input-missing-command",
+        json!({
+            "inputs": [{
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": ControlMessage::bang()
+            }]
+        }),
+    );
+    node_input_missing_command.command_id = None;
+    node_input_missing_command.idempotency_key = Some("node-input-missing-command-key".to_owned());
+    let node_input_missing_command =
+        handle_node_input(&record, &identity, node_input_missing_command)
+            .expect_err("node.input requires commandId");
+    assert_eq!(
+        node_input_missing_command.code,
+        "realtime.command.command-id-required"
+    );
+
+    let node_input_missing_key = handle_node_input(
+        &record,
+        &identity,
+        client_frame(
+            &record.id,
+            "node.input",
+            "node-input-missing-key",
+            json!({
+                "inputs": [{
+                    "nodeId": "value_1",
+                    "portId": "in",
+                    "message": ControlMessage::bang()
+                }]
+            }),
+        ),
+    )
+    .expect_err("node.input requires idempotency keys");
+    assert_eq!(
+        node_input_missing_key.code,
+        "realtime.command.idempotency-key-required"
+    );
+
+    let mut invalid_node_input = client_frame(
+        &record.id,
+        "node.input",
+        "node-input-invalid",
+        Value::String("bad-node-input".to_owned()),
+    );
+    invalid_node_input.command_id = Some("node-input-invalid".to_owned());
+    invalid_node_input.idempotency_key = Some("node-input-invalid-key".to_owned());
+    let invalid_node_input = handle_node_input(&record, &identity, invalid_node_input)
+        .expect_err("non-object node.input payload should be rejected");
+    assert_eq!(
+        invalid_node_input.code,
+        "realtime.node-input.invalid-payload"
+    );
+
+    let mut graph_missing_command = client_frame(
+        &record.id,
+        "graph.command",
+        "graph-missing-command",
+        json!({ "kind": "node.resolve" }),
+    );
+    graph_missing_command.command_id = None;
+    graph_missing_command.idempotency_key = Some("graph-missing-command-key".to_owned());
+    let graph_missing_command = handle_graph_command(&record, &identity, graph_missing_command)
+        .expect_err("graph.command requires commandId");
+    assert_eq!(
+        graph_missing_command.code,
+        "realtime.command.command-id-required"
+    );
+
+    let graph_missing_key = handle_graph_command(
+        &record,
+        &identity,
+        client_frame(
+            &record.id,
+            "graph.command",
+            "graph-missing-key",
+            json!({ "kind": "node.resolve" }),
+        ),
+    )
+    .expect_err("graph commands require idempotency keys");
+    assert_eq!(
+        graph_missing_key.code,
+        "realtime.command.idempotency-key-required"
+    );
+
+    let mut invalid_graph = client_frame(
+        &record.id,
+        "graph.command",
+        "graph-invalid",
+        json!({ "baseSessionRevision": 0 }),
+    );
+    invalid_graph.idempotency_key = Some("graph-invalid-key".to_owned());
+    let invalid_graph = handle_graph_command(&record, &identity, invalid_graph)
+        .expect_err("missing graph kind should be rejected by payload decoding");
+    assert_eq!(invalid_graph.code, "realtime.graph.invalid-payload");
+}
+
+#[test]
+fn node_command_result_serializes_resolution_ports_issues_and_input() {
+    let payload = graph_payload(json!({
+        "kind": "node.replace",
+        "target": root_target("1"),
+        "objectSpec": "sig~ 440",
+        "nodeId": "oscillator",
+        "requestedNodeId": "requested-oscillator",
+        "unresolvedPolicy": "reject",
+        "interfaceIncidentEdgePolicy": "reject",
+        "surfacePath": ["root", "oscillator"]
+    }));
+    let resolution = object_spec_resolution_with_all_port_variants();
+
+    let node_result = node_command_result(
+        &payload,
+        Some(&resolution),
+        Some("oscillator"),
+        vec!["stale-edge".to_owned()],
+        Some(json!({ "message": ControlMessage::bang() })),
+    );
+
+    assert_eq!(node_result["kind"], "node.replace");
+    assert_eq!(node_result["nodeId"], "oscillator");
+    assert_eq!(node_result["requestedNodeId"], "requested-oscillator");
+    assert_eq!(node_result["interfaceIncidentEdgePolicy"], "reject");
+    assert_eq!(node_result["droppedEdgeIds"], json!(["stale-edge"]));
+    let rates = node_result["ports"]
+        .as_array()
+        .expect("ports should serialize")
+        .iter()
+        .map(|port| port["rate"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rates,
+        vec![
+            "event", "control", "audio", "render", "gpu", "resource", "io"
+        ]
+    );
+    let activations = node_result["ports"]
+        .as_array()
+        .expect("ports should serialize")
+        .iter()
+        .map(|port| port["activation"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        activations[..3],
+        [
+            Value::String("trigger".to_owned()),
+            Value::String("latched".to_owned()),
+            Value::String("passive".to_owned())
+        ]
+    );
+    assert_eq!(node_result["issues"][0]["code"], "object-spec.test-warning");
+
+    let issues = object_spec_runtime_issues(&resolution);
+    assert_eq!(issues[0].code.as_deref(), Some("object-spec.test-warning"));
+    assert_eq!(
+        issues[0]
+            .details
+            .as_ref()
+            .expect("object spec issues should include structured details")["candidateCount"],
+        1
+    );
+
+    let input_result = node_input_result(
+        &RuntimeControlEventRequest {
+            node_id: "oscillator".to_owned(),
+            port_id: "frequency".to_owned(),
+            message: ControlMessage::from_value(ControlValue::float(440.0)),
+        },
+        &RuntimeControlEventResponse {
+            ok: true,
+            changed: true,
+            control_revision: Some(7),
+            emitted: Vec::new(),
+            issues: Vec::new(),
+        },
+    );
+    assert_eq!(input_result["accepted"], true);
+    assert_eq!(input_result["controlRevision"], 7);
+}
+
+#[test]
+fn object_command_materialization_respects_params_and_unresolved_policy() {
+    let session = crate::RuntimeSession::default();
+    let payload = graph_payload(json!({
+        "kind": "node.create",
+        "target": root_target("1"),
+        "objectSpec": "float 1",
+        "params": { "frequency": 880.0 }
+    }));
+    let materialized = materialize_object_command_node(
+        &session,
+        &payload,
+        &resolved_float_object_spec("float 1"),
+        "float_1",
+    )
+    .expect("resolved object spec should materialize");
+    assert_eq!(materialized.0.params["frequency"], 880.0);
+
+    let unresolved = ObjectRegistry::first_party_core().resolve("missingObject 1");
+    let issue_payload = graph_payload(json!({
+        "kind": "node.create",
+        "target": root_target("1"),
+        "objectSpec": "missingObject 1",
+        "params": { "label": "keep me" }
+    }));
+    let unresolved_materialized =
+        materialize_object_command_node(&session, &issue_payload, &unresolved, "missing_1")
+            .expect("default unresolved policy should materialize an unresolved Object node");
+    assert_eq!(
+        unresolved_materialized.0.object_spec.as_deref(),
+        Some("missingObject 1")
+    );
+    assert!(matches!(
+        unresolved_materialized
+            .0
+            .object_resolution
+            .as_ref()
+            .expect("unresolved node should include object resolution")
+            .status,
+        crate::ObjectResolutionStatusCurrent::Unresolved
+    ));
+    assert_eq!(unresolved_materialized.0.params["label"], "keep me");
+    assert!(unresolved_materialized.1.is_none());
+
+    let reject_payload = graph_payload(json!({
+        "kind": "node.create",
+        "target": root_target("1"),
+        "objectSpec": "missingObject 1",
+        "unresolvedPolicy": "reject"
+    }));
+    assert!(
+        materialize_object_command_node(&session, &reject_payload, &unresolved, "missing_2")
+            .is_none()
+    );
+}
+
+#[test]
+fn object_command_helpers_validate_required_fields_and_targets() {
+    let identity = test_identity();
+    let frame = client_frame("default", "graph.command", "graph-helpers", Value::Null);
+    let mut session = crate::RuntimeSession::default();
+
+    let missing_resolve = apply_object_resolve_graph_command(
+        &session,
+        &graph_payload(json!({ "kind": "node.resolve" })),
+    );
+    assert_response_issue_code(
+        &missing_resolve.response,
+        "graph.command.object-spec-required",
+    );
+    let missing_create = apply_object_create_graph_command(
+        &mut session,
+        &identity,
+        &frame,
+        &graph_payload(json!({ "kind": "node.create" })),
+    );
+    assert_response_issue_code(&missing_create.response, "graph.command.target-required");
+    let missing_replace = apply_object_replace_graph_command(
+        &mut session,
+        &identity,
+        &frame,
+        &graph_payload(json!({ "kind": "node.replace" })),
+    );
+    assert_response_issue_code(
+        &missing_replace.response,
+        "graph.command.object-spec-required",
+    );
+    let mut object_session = crate::RuntimeSession::default();
+    let loaded = object_session.load_project_current(empty_project_request_current());
+    assert!(loaded.ok);
+    let create_empty_object = apply_object_create_graph_command(
+        &mut object_session,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "node.create",
+            "target": root_target("1"),
+            "view": { "x": 128.0, "y": 96.0 }
+        })),
+    );
+    assert!(create_empty_object.response.ok);
+    assert!(create_empty_object.response.applied);
+    let node_result = create_empty_object
+        .node_result
+        .as_ref()
+        .expect("empty object create should include node result");
+    assert_eq!(node_result["objectSpec"], Value::Null);
+    assert_eq!(node_result["objectResolution"]["status"], "unresolved");
+    let after_create_revision = {
+        let project = object_session
+            .project_document_current()
+            .expect("empty object create should keep project loaded");
+        let created = project
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "object")
+            .expect("empty object create should append generated Object node");
+        assert!(created.object_spec.is_none());
+        assert!(created.implementation.is_none());
+        assert!(matches!(
+            created
+                .object_resolution
+                .as_ref()
+                .expect("empty object node should carry unresolved status")
+                .status,
+            crate::ObjectResolutionStatusCurrent::Unresolved
+        ));
+        let created_view = project
+            .view_state
+            .canvas
+            .nodes
+            .get("object")
+            .expect("empty object create should persist requested view");
+        assert_eq!(created_view.x, 128.0);
+        assert_eq!(created_view.y, 96.0);
+        project.graph.revision.clone()
+    };
+    let replace_empty_object = apply_object_replace_graph_command(
+        &mut object_session,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "node.replace",
+            "target": root_target(&after_create_revision),
+            "nodeId": "object",
+            "objectSpec": "+ 1"
+        })),
+    );
+    assert!(
+        replace_empty_object.response.ok,
+        "{:#?}",
+        replace_empty_object.response.issues
+    );
+    assert!(replace_empty_object.response.applied);
+    let project = object_session
+        .project_document_current()
+        .expect("object replace should keep project loaded");
+    let replaced_view = project
+        .view_state
+        .canvas
+        .nodes
+        .get("object")
+        .expect("object replace should keep existing view");
+    assert_eq!(replaced_view.x, 128.0);
+    assert_eq!(replaced_view.y, 96.0);
+    let missing_delete_node = apply_node_delete_graph_command(
+        &mut session,
+        &identity,
+        &frame,
+        &graph_payload(json!({ "kind": "node.delete", "target": root_target("1") })),
+    );
+    assert_response_issue_code(
+        &missing_delete_node.response,
+        "graph.command.node-id-required",
+    );
+    let missing_update_node = apply_node_update_graph_command(
+        &mut session,
+        &identity,
+        &frame,
+        &graph_payload(json!({ "kind": "node.update", "target": root_target("1") })),
+    );
+    assert_response_issue_code(
+        &missing_update_node.response,
+        "graph.command.node-id-required",
+    );
+    let empty_update = apply_node_update_graph_command(
+        &mut session,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "node.update",
+            "target": root_target("1"),
+            "nodeId": "value_1"
+        })),
+    );
+    assert_response_issue_code(&empty_update.response, "graph.command.params-required");
+
+    let no_target = validate_object_command_target(
+        &session,
+        &graph_payload(json!({ "kind": "node.resolve" })),
+        true,
+    )
+    .expect_err("node commands require a target");
+    assert_response_issue_code(&no_target, "graph.command.target-required");
+    let revision_conflict = validate_object_command_target(
+        &session,
+        &graph_payload(json!({
+            "kind": "node.create",
+            "target": root_target("1"),
+            "baseGraphRevision": "2"
+        })),
+        false,
+    )
+    .expect_err("baseGraphRevision must agree with target.baseRevision");
+    assert!(revision_conflict.conflict);
+    assert_response_issue_code(&revision_conflict, "graph.command.target-revision-conflict");
+    let missing_graph = validate_object_command_target(
+        &session,
+        &graph_payload(json!({ "kind": "node.resolve", "target": root_target("1") })),
+        true,
+    )
+    .expect_err("node.resolve requires an existing target graph");
+    assert_response_issue_code(&missing_graph, "node.target.missing-graph");
+}
+
+#[test]
+fn node_id_generation_helpers_are_stable_for_object_spec_commands() {
+    assert_eq!(
+        node_id_slug("123 Weird Object!!"),
+        Some("node_123_weird_object".to_owned())
+    );
+    assert_eq!(node_id_slug("   "), None);
+    assert_eq!(
+        next_generated_node_id(
+            "osc",
+            &["osc".to_owned(), "osc_2".to_owned(), "other".to_owned()]
+        ),
+        "osc_3"
+    );
+}
+
+#[test]
+fn graph_command_validation_covers_view_and_change_set_rejections() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let identity = test_identity();
+    let frame = client_frame(&record.id, "graph.command", "graph-validate", Value::Null);
+
+    let session_conflict = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({ "kind": "node.resolve", "baseSessionRevision": 99 })),
+    );
+    assert!(session_conflict.response.conflict);
+    assert_response_issue_code(
+        &session_conflict.response,
+        "graph.command.session-revision-conflict",
+    );
+
+    let missing_view_patch = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({ "kind": "view.patch" })),
+    );
+    assert_response_issue_code(
+        &missing_view_patch.response,
+        "graph.command.view-patch-required",
+    );
+
+    let view_revision_conflict = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "view.patch",
+            "baseViewRevision": 2,
+            "viewPatch": { "baseViewRevision": 1, "ops": [] }
+        })),
+    );
+    assert!(view_revision_conflict.response.conflict);
+    assert_response_issue_code(
+        &view_revision_conflict.response,
+        "graph.command.view-revision-conflict",
+    );
+
+    let graph_revision_conflict = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "view.patch",
+            "baseGraphRevision": "1",
+            "viewPatch": { "baseViewRevision": 0, "ops": [] }
+        })),
+    );
+    assert!(graph_revision_conflict.response.conflict);
+    assert_response_issue_code(
+        &graph_revision_conflict.response,
+        "graph.command.graph-revision-conflict",
+    );
+
+    let unsupported_view_target = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "view.patch",
+            "target": package_patch_target("1"),
+            "viewPatch": { "baseViewRevision": 0, "ops": [] }
+        })),
+    );
+    assert_response_issue_code(
+        &unsupported_view_target.response,
+        "graph.command.view-target-unsupported",
+    );
+
+    let target_revision_conflict = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "view.patch",
+            "target": root_target("1"),
+            "viewPatch": { "baseViewRevision": 0, "ops": [] }
+        })),
+    );
+    assert!(target_revision_conflict.response.conflict);
+    assert_response_issue_code(
+        &target_revision_conflict.response,
+        "graph.command.target-revision-conflict",
+    );
+
+    let missing_change_target = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({ "kind": "graph.changeSet" })),
+    );
+    assert_response_issue_code(
+        &missing_change_target.response,
+        "graph.command.target-required",
+    );
+
+    let empty_changes = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "graph.changeSet",
+            "target": root_target("1"),
+            "changes": []
+        })),
+    );
+    assert_response_issue_code(&empty_changes.response, "graph.command.changes-required");
+
+    let change_revision_conflict = apply_graph_command(
+        &record,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "graph.changeSet",
+            "target": root_target("1"),
+            "baseGraphRevision": "2",
+            "changes": [
+                { "op": "node.delete", "changeId": "delete-value", "nodeId": "value_1" }
+            ]
+        })),
+    );
+    assert!(change_revision_conflict.response.conflict);
+    assert_response_issue_code(
+        &change_revision_conflict.response,
+        "graph.command.target-revision-conflict",
+    );
+}
+
+#[test]
+fn cached_ack_helpers_preserve_payload_flags() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let identity = test_identity();
+    let mut frame = client_frame(&record.id, "graph.command", "cached-ack", Value::Null);
+    frame.idempotency_key = Some("idem-cached".to_owned());
+
+    let cached = RuntimeRealtimeCachedCommandResult {
+        event_cursor: "cursor-cached".to_owned(),
+        ack_payload: json!({ "accepted": true, "cached": false }),
+        emitted_results: Vec::new(),
+    };
+    let graph_ack = graph_command_ack_from_cached(&record, &identity, &frame, cached.clone());
+    assert_eq!(graph_ack.message_type, "command.ack");
+    assert_eq!(graph_ack.payload["cached"], true);
+    assert_eq!(graph_ack.payload["eventCursor"], "cursor-cached");
+
+    let command_ack = command_ack_from_cached(&record, &identity, &frame, cached);
+    assert_eq!(command_ack.message_type, "command.ack");
+    assert_eq!(command_ack.payload["cached"], true);
+}

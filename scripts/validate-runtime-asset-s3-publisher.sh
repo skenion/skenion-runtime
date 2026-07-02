@@ -407,7 +407,7 @@ base_env_args_for() {
     "SOURCE_COMMIT=${source_commit}" \
     "RELEASE_TIER=release-blocking" \
     "CONTRACTS_VERSION=1.2.0" \
-    "CONTRACTS_LINE=1.2"
+    "CONTRACTS_SUPPORTED_RANGE=>=0.0.0 <1.0.0"
   )
 }
 
