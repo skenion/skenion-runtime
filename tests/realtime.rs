@@ -158,9 +158,6 @@ async fn attach_with_node_catalog(
         socket,
         message_id,
         json!({
-            "clientId": "client-hint",
-            "windowId": "window-hint",
-            "hints": { "label": "test" },
             "nodeCatalog": node_catalog,
         }),
     )
@@ -173,11 +170,7 @@ async fn attach_with_resume(
     last_cursor: Option<&str>,
     resume_token: Option<&str>,
 ) -> Value {
-    let mut payload = json!({
-        "clientId": "client-hint",
-        "windowId": "window-hint",
-        "hints": { "label": "test" }
-    });
+    let mut payload = json!({});
     if let Some(last_cursor) = last_cursor {
         payload["lastCursor"] = Value::String(last_cursor.to_owned());
     }
@@ -196,13 +189,35 @@ async fn attach_with_payload(socket: &mut TestSocket, message_id: &str, payload:
             "type": "session.hello",
             "messageId": message_id,
             "sessionId": "default",
-            "clientId": "client-hint",
-            "windowId": "window-hint",
             "payload": payload
         }),
     )
     .await;
     next_json(socket).await
+}
+
+fn assert_legacy_session_hello_issue(
+    issue: &Value,
+    envelope_fields: &[&str],
+    payload_fields: &[&str],
+) {
+    assert_valid_contract_frame(issue);
+    assert_eq!(issue["type"], "runtime.issue");
+    assert!(issue.get("connectionId").is_none());
+    assert!(issue.get("clientId").is_none());
+    assert!(issue.get("windowId").is_none());
+    assert_eq!(
+        issue["payload"]["issue"]["code"],
+        "realtime.session.hello-legacy-identity"
+    );
+    assert_eq!(
+        issue["payload"]["issue"]["details"]["envelopeFields"],
+        json!(envelope_fields)
+    );
+    assert_eq!(
+        issue["payload"]["issue"]["details"]["payloadFields"],
+        json!(payload_fields)
+    );
 }
 
 async fn send_node_catalog_request(
@@ -897,13 +912,81 @@ async fn websocket_attach_returns_server_issued_identity_snapshot_and_cursor() {
     assert_eq!(attached["type"], "session.attached");
     assert_eq!(attached["schema"], "skenion.runtime.realtime");
     assert_eq!(attached["sessionId"], "default");
-    assert_ne!(attached["clientId"], "client-hint");
-    assert_ne!(attached["windowId"], "window-hint");
-    assert!(attached["connectionId"].as_str().is_some());
+    assert_eq!(attached["connectionId"], "rtconn-000001");
+    assert_eq!(attached["clientId"], "rtclient-000001");
+    assert_eq!(attached["windowId"], "rtwindow-000001");
     assert!(attached["payload"]["resumeToken"].as_str().is_some());
     assert!(attached["payload"]["currentRevisions"]["sessionRevision"].is_u64());
     assert!(attached["payload"]["snapshot"].is_object());
     assert!(attached["payload"]["globalCursor"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn websocket_rejects_legacy_session_hello_envelope_identity_fields_without_attaching() {
+    let runtime = spawn_runtime().await;
+    let mut socket = connect_session(&runtime, "default").await;
+
+    send_json(
+        &mut socket,
+        json!({
+            "schema": "skenion.runtime.realtime",
+            "schemaVersion": "0.1.0",
+            "type": "session.hello",
+            "messageId": "hello-legacy-envelope",
+            "sessionId": "default",
+            "clientId": "client-hint",
+            "windowId": "window-hint",
+            "hints": { "label": "test" },
+            "payload": {}
+        }),
+    )
+    .await;
+    let issue = next_type(&mut socket, "runtime.issue").await;
+    assert_legacy_session_hello_issue(&issue, &["clientId", "windowId", "hints"], &[]);
+
+    send_node_catalog_request(&mut socket, "catalog-after-legacy-envelope", None).await;
+    let not_attached = next_type(&mut socket, "runtime.issue").await;
+    assert_eq!(
+        not_attached["payload"]["issue"]["code"],
+        "realtime.session.not-attached"
+    );
+
+    let attached = attach(&mut socket, "hello-after-legacy-envelope", None).await;
+    assert_eq!(attached["type"], "session.attached");
+    assert_eq!(attached["connectionId"], "rtconn-000001");
+    assert_eq!(attached["clientId"], "rtclient-000001");
+    assert_eq!(attached["windowId"], "rtwindow-000001");
+}
+
+#[tokio::test]
+async fn websocket_rejects_legacy_session_hello_payload_identity_fields_without_attaching() {
+    let runtime = spawn_runtime().await;
+    let mut socket = connect_session(&runtime, "default").await;
+
+    let issue = attach_with_payload(
+        &mut socket,
+        "hello-legacy-payload",
+        json!({
+            "clientId": "client-hint",
+            "windowId": "window-hint",
+            "hints": { "label": "test" }
+        }),
+    )
+    .await;
+    assert_legacy_session_hello_issue(&issue, &[], &["clientId", "windowId", "hints"]);
+
+    send_node_catalog_request(&mut socket, "catalog-after-legacy-payload", None).await;
+    let not_attached = next_type(&mut socket, "runtime.issue").await;
+    assert_eq!(
+        not_attached["payload"]["issue"]["code"],
+        "realtime.session.not-attached"
+    );
+
+    let attached = attach(&mut socket, "hello-after-legacy-payload", None).await;
+    assert_eq!(attached["type"], "session.attached");
+    assert_eq!(attached["connectionId"], "rtconn-000001");
+    assert_eq!(attached["clientId"], "rtclient-000001");
+    assert_eq!(attached["windowId"], "rtwindow-000001");
 }
 
 #[tokio::test]
@@ -1082,6 +1165,7 @@ async fn realtime_attached_commands_reject_missing_idempotency_invalid_payloads_
             "type": "graph.command",
             "messageId": "graph-invalid-payload",
             "sessionId": "default",
+            "commandId": "graph-invalid-payload",
             "idempotencyKey": "graph-invalid-payload-key",
             "payload": "not-an-object"
         }),
@@ -1245,8 +1329,7 @@ async fn realtime_control_invalid_command_returns_rejected_ack_without_success_b
 }
 
 #[tokio::test]
-async fn realtime_control_duplicate_idempotency_key_replays_ack_without_second_apply_or_broadcast()
-{
+async fn realtime_control_duplicate_idempotency_key_returns_ack_without_second_visible_event() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
     let mut client_b = connect_session(&runtime, "default").await;
@@ -1276,14 +1359,14 @@ async fn realtime_control_duplicate_idempotency_key_replays_ack_without_second_a
     )
     .await;
     let duplicate_ack = next_type(&mut client_a, "command.ack").await;
-    let duplicate_local_result = next_type(&mut client_a, "control.emitted").await;
+    let no_duplicate_local_result =
+        timeout(Duration::from_millis(200), next_json(&mut client_a)).await;
     let no_second_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
 
     assert_valid_contract_frame(&first_ack);
     assert_valid_contract_frame(&client_a_echo);
     assert_valid_contract_frame(&first_broadcast);
     assert_valid_contract_frame(&duplicate_ack);
-    assert_valid_contract_frame(&duplicate_local_result);
     assert_ne!(duplicate_ack["messageId"], first_ack["messageId"]);
     assert_eq!(duplicate_ack["payload"]["accepted"], true);
     assert_eq!(duplicate_ack["payload"]["cached"], true);
@@ -1295,11 +1378,11 @@ async fn realtime_control_duplicate_idempotency_key_replays_ack_without_second_a
         duplicate_ack["payload"]["node"]["inputs"][0]["controlRevision"],
         1
     );
-    assert_eq!(duplicate_local_result, client_a_echo);
     assert_eq!(
         first_broadcast["payload"]["values"]["value_1"],
         json!({ "type": "float", "representation": "f32", "value": 12.0 })
     );
+    assert!(no_duplicate_local_result.is_err());
     assert!(no_second_broadcast.is_err());
 }
 
@@ -1604,7 +1687,7 @@ async fn realtime_selection_update_broadcasts_selection_updated() {
 }
 
 #[tokio::test]
-async fn realtime_graph_duplicate_replays_all_cached_local_events_without_rebroadcast() {
+async fn realtime_graph_duplicate_returns_ack_without_second_visible_events() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
     let mut client_b = connect_session(&runtime, "default").await;
@@ -1619,8 +1702,8 @@ async fn realtime_graph_duplicate_replays_all_cached_local_events_without_rebroa
     )
     .await;
     let first_ack = next_type(&mut client_a, "command.ack").await;
-    let first_applied = next_type(&mut client_a, "graph.applied").await;
-    let first_catalog = next_type(&mut client_a, "nodeCatalog.changed").await;
+    let _first_applied = next_type(&mut client_a, "graph.applied").await;
+    let _first_catalog = next_type(&mut client_a, "nodeCatalog.changed").await;
     let _broadcast_applied = next_type(&mut client_b, "graph.applied").await;
     let _broadcast_catalog = next_type(&mut client_b, "nodeCatalog.changed").await;
 
@@ -1632,17 +1715,17 @@ async fn realtime_graph_duplicate_replays_all_cached_local_events_without_rebroa
     )
     .await;
     let duplicate_ack = next_type(&mut client_a, "command.ack").await;
-    let duplicate_applied = next_type(&mut client_a, "graph.applied").await;
-    let duplicate_catalog = next_type(&mut client_a, "nodeCatalog.changed").await;
+    let no_duplicate_local_result =
+        timeout(Duration::from_millis(200), next_json(&mut client_a)).await;
     let no_second_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
 
+    assert_valid_contract_frame(&duplicate_ack);
     assert_eq!(duplicate_ack["payload"]["cached"], true);
     assert_eq!(
         duplicate_ack["payload"]["eventCursor"],
         first_ack["payload"]["eventCursor"]
     );
-    assert_eq!(duplicate_applied, first_applied);
-    assert_eq!(duplicate_catalog, first_catalog);
+    assert!(no_duplicate_local_result.is_err());
     assert!(no_second_broadcast.is_err());
 }
 
@@ -1943,9 +2026,6 @@ async fn realtime_sync_required_hydrates_node_catalog_by_requested_mode() {
         &mut always_socket,
         "hello-sync-always",
         json!({
-            "clientId": "client-hint",
-            "windowId": "window-hint",
-            "hints": { "label": "test" },
             "lastCursor": unknown_cursor,
             "nodeCatalog": { "mode": "always" }
         }),
@@ -1973,9 +2053,6 @@ async fn realtime_sync_required_hydrates_node_catalog_by_requested_mode() {
         &mut unchanged_socket,
         "hello-sync-if-changed",
         json!({
-            "clientId": "client-hint",
-            "windowId": "window-hint",
-            "hints": { "label": "test" },
             "lastCursor": unknown_cursor,
             "nodeCatalog": {
                 "mode": "ifChanged",
@@ -3072,12 +3149,12 @@ async fn realtime_node_input_invokes_control_path_without_graph_applied() {
     )
     .await;
     let duplicate_ack = next_type(&mut client_a, "command.ack").await;
-    let duplicate_local_result = next_json(&mut client_a).await;
+    let no_duplicate_local_result =
+        timeout(Duration::from_millis(200), next_json(&mut client_a)).await;
     let no_second_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
     let control_values_after_duplicate = loaded_control_values_json(&runtime);
 
     assert_valid_contract_frame(&duplicate_ack);
-    assert_valid_contract_frame(&duplicate_local_result);
     assert_ne!(duplicate_ack["messageId"], first_ack["messageId"]);
     assert_eq!(duplicate_ack["payload"]["accepted"], true);
     assert_eq!(duplicate_ack["payload"]["cached"], true);
@@ -3089,11 +3166,11 @@ async fn realtime_node_input_invokes_control_path_without_graph_applied() {
         duplicate_ack["payload"]["node"]["inputs"][0]["controlRevision"],
         first_ack["payload"]["node"]["inputs"][0]["controlRevision"]
     );
-    assert_eq!(duplicate_local_result, client_a_echo);
     assert_eq!(
         control_values_after_duplicate["value_1"],
         json!({ "type": "float", "representation": "f32", "value": 12.0 })
     );
+    assert!(no_duplicate_local_result.is_err());
     assert!(no_second_broadcast.is_err());
 }
 
@@ -3204,7 +3281,7 @@ async fn object_spec_commands_do_not_add_http_endpoints() {
 }
 
 #[tokio::test]
-async fn realtime_graph_duplicate_idempotency_key_replays_without_second_apply_or_broadcast() {
+async fn realtime_graph_duplicate_idempotency_key_returns_ack_without_second_visible_event() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
     let mut client_b = connect_session(&runtime, "default").await;
@@ -3230,7 +3307,8 @@ async fn realtime_graph_duplicate_idempotency_key_replays_without_second_apply_o
     )
     .await;
     let duplicate_ack = next_type(&mut client_a, "command.ack").await;
-    let duplicate_local_result = next_type(&mut client_a, "graph.applied").await;
+    let no_duplicate_local_result =
+        timeout(Duration::from_millis(200), next_json(&mut client_a)).await;
     let no_second_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
 
     assert_ne!(duplicate_ack["messageId"], first_ack["messageId"]);
@@ -3248,7 +3326,8 @@ async fn realtime_graph_duplicate_idempotency_key_replays_without_second_apply_o
         first_ack["payload"]["historySummary"]
     );
     assert!(duplicate_ack["payload"]["historySummary"]["latestEntryId"].is_string());
-    assert_eq!(duplicate_local_result, client_a_echo);
+    assert_valid_contract_frame(&client_a_echo);
+    assert!(no_duplicate_local_result.is_err());
     assert!(no_second_broadcast.is_err());
 }
 

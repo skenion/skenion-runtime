@@ -2,7 +2,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -16,41 +15,31 @@ mod node_catalog;
 mod node_input;
 mod presence;
 mod protocol;
+mod session_engine;
 mod state;
 mod wire;
 
-use graph_command::handle_graph_command;
 pub(crate) use node_catalog::node_catalog_snapshot_for_record;
-use node_catalog::{
-    NodeCatalogHelloRequest, handle_node_catalog_request, hello_node_catalog_payload,
-};
-use node_input::handle_node_input;
-use presence::handle_selection_update;
+use node_catalog::{NodeCatalogHelloRequest, hello_node_catalog_payload};
 use protocol::*;
 pub use protocol::{
     RUNTIME_REALTIME_REPLAY_LIMIT, RUNTIME_REALTIME_SCHEMA, RUNTIME_REALTIME_SCHEMA_VERSION,
 };
+pub(in crate::realtime) use session_engine::RealtimeDispatch;
+use session_engine::RuntimeRealtimeSessionEngine;
+use state::RuntimeRealtimeCachedCommandResult;
 pub use state::RuntimeRealtimeState;
-use state::{RuntimeRealtimeCachedCommandResult, sync_required_issue};
 use wire::{RuntimeRealtimeConnectionIdentity, RuntimeRealtimeSessionRevisions};
 pub use wire::{RuntimeRealtimeEnvelope, RuntimeRealtimeIssue, RuntimeRealtimeReplay};
 
 type RuntimeRealtimeSocketSender = futures_util::stream::SplitSink<WebSocket, Message>;
 
-#[derive(Debug)]
-pub(super) struct RealtimeCommandDispatch {
-    pub(super) ack: RuntimeRealtimeEnvelope,
-    pub(super) sender_events: Vec<RuntimeRealtimeEnvelope>,
-    pub(super) broadcast_events: Vec<RuntimeRealtimeEnvelope>,
-}
-
 pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket: WebSocket) {
-    let mut receiver = record.realtime.subscribe();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+    let mut receiver = engine.subscribe();
     let (mut sender, mut socket_receiver) = socket.split();
-    let mut identity: Option<RuntimeRealtimeConnectionIdentity> = None;
-    let mut high_water_sequence = 0;
 
-    'socket_loop: loop {
+    loop {
         tokio::select! {
             Some(message) = socket_receiver.next() => {
                 let message = match message {
@@ -59,242 +48,12 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                 };
                 match message {
                     Message::Text(text) => {
-                        let parsed = serde_json::from_str::<RuntimeRealtimeEnvelope>(&text);
-                        let frame = match parsed {
-                            Ok(frame) => frame,
-                            Err(error) => {
-                                let issue = runtime_issue(&record.id, None, None, "realtime.frame.invalid-json", format!("invalid realtime JSON frame: {error}"), None);
-                                if send_frame(&mut sender, &issue).await.is_err() {
-                                    break;
-                                }
-                                continue;
-                            }
-                        };
-
-                        if frame.session_id != record.id {
-                            let issue = runtime_issue(&record.id, None, Some(&frame), "realtime.session.mismatch", "frame sessionId does not match the WebSocket session", Some(json!({"expectedSessionId": record.id, "actualSessionId": frame.session_id})));
-                            if send_frame(&mut sender, &issue).await.is_err() {
-                                break;
-                            }
-                            continue;
+                        let output = engine.handle_text_frame(&text);
+                        if send_session_output(&mut sender, &output).await.is_err() {
+                            break;
                         }
-
-                        match frame.message_type.as_str() {
-                            FRAME_SESSION_HELLO => {
-                                let snapshot = current_snapshot(&record);
-                                let hello = decode_hello_payload(&frame);
-                                let resumed_identity = match hello.resume_token.as_deref() {
-                                    Some(resume_token) => {
-                                        match record.realtime.consume_resume_token(resume_token) {
-                                            Ok(identity) => Some(identity),
-                                            Err(issue) => {
-                                                let issued_identity =
-                                                    record.realtime.issue_connection_identity(None);
-                                                high_water_sequence =
-                                                    record.realtime.current_sequence();
-                                                let sync = session_sync_required(
-                                                    &record,
-                                                    &issued_identity,
-                                                    &frame,
-                                                    &snapshot,
-                                                    issue,
-                                                    hello.node_catalog.as_ref(),
-                                                );
-                                                if send_frame(&mut sender, &sync).await.is_err() {
-                                                    break;
-                                                }
-                                                identity = Some(issued_identity);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    None => None,
-                                };
-                                let issued_identity =
-                                    record.realtime.issue_connection_identity(resumed_identity);
-                                match hello.last_cursor.as_deref() {
-                                    Some(last_cursor) => {
-                                        match record.realtime.replay_after(last_cursor) {
-                                            Ok(replay) => {
-                                                high_water_sequence = replay.high_water_sequence;
-                                                let attached = session_attached(&record, &issued_identity, &frame, &snapshot, hello.node_catalog.as_ref());
-                                                if send_frame(&mut sender, &attached).await.is_err() {
-                                                    break;
-                                                }
-                                                for event in replay.events {
-                                                    if send_frame(&mut sender, &event).await.is_err() {
-                                                        break 'socket_loop;
-                                                    }
-                                                }
-                                            }
-                                            Err(issue) => {
-                                                high_water_sequence = record.realtime.current_sequence();
-                                                let sync = session_sync_required(&record, &issued_identity, &frame, &snapshot, issue, hello.node_catalog.as_ref());
-                                                if send_frame(&mut sender, &sync).await.is_err() {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None => {
-                                        high_water_sequence = record.realtime.current_sequence();
-                                        let attached = session_attached(&record, &issued_identity, &frame, &snapshot, hello.node_catalog.as_ref());
-                                        if send_frame(&mut sender, &attached).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                }
-                                identity = Some(issued_identity);
-                            }
-                            FRAME_SELECTION_UPDATE => {
-                                let Some(identity) = identity.as_ref() else {
-                                    if send_not_attached(&record, &mut sender, &frame)
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                    continue;
-                                };
-                                match handle_selection_update(&record, identity, frame) {
-                                    Ok((ack, event)) => {
-                                        if send_frame(&mut sender, &ack).await.is_err() {
-                                            break;
-                                        }
-                                        if let Some(event) = event {
-                                            record.realtime.publish(event);
-                                        }
-                                    }
-                                    Err(issue) => {
-                                        if send_realtime_issue(
-                                            &record,
-                                            &mut sender,
-                                            identity,
-                                            issue,
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            FRAME_GRAPH_COMMAND => {
-                                let Some(identity) = identity.as_ref() else {
-                                    if send_not_attached(&record, &mut sender, &frame)
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                    continue;
-                                };
-                                match handle_graph_command(&record, identity, frame) {
-                                    Ok(dispatch) => {
-                                        if send_frame(&mut sender, &dispatch.ack).await.is_err() {
-                                            break;
-                                        }
-                                        for event in dispatch.sender_events {
-                                            if send_frame(&mut sender, &event).await.is_err() {
-                                                break 'socket_loop;
-                                            }
-                                        }
-                                        for event in dispatch.broadcast_events {
-                                            record.realtime.publish(event);
-                                        }
-                                    }
-                                    Err(issue) => {
-                                        if send_realtime_issue(
-                                            &record,
-                                            &mut sender,
-                                            identity,
-                                            issue,
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            FRAME_NODE_INPUT => {
-                                let Some(identity) = identity.as_ref() else {
-                                    if send_not_attached(&record, &mut sender, &frame)
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                    continue;
-                                };
-                                match handle_node_input(&record, identity, frame) {
-                                    Ok(dispatch) => {
-                                        if send_frame(&mut sender, &dispatch.ack).await.is_err() {
-                                            break;
-                                        }
-                                        for event in dispatch.sender_events {
-                                            if send_frame(&mut sender, &event).await.is_err() {
-                                                break 'socket_loop;
-                                            }
-                                        }
-                                        for event in dispatch.broadcast_events {
-                                            record.realtime.publish(event);
-                                        }
-                                    }
-                                    Err(issue) => {
-                                        if send_realtime_issue(
-                                            &record,
-                                            &mut sender,
-                                            identity,
-                                            issue,
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            FRAME_NODE_CATALOG_REQUEST => {
-                                let Some(identity) = identity.as_ref() else {
-                                    if send_not_attached(&record, &mut sender, &frame)
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                    continue;
-                                };
-                                match handle_node_catalog_request(&record, identity, frame) {
-                                    Ok(response) => {
-                                        if send_frame(&mut sender, &response).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Err(issue) => {
-                                        if send_realtime_issue(
-                                            &record,
-                                            &mut sender,
-                                            identity,
-                                            issue,
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {
-                                let issue = runtime_issue(&record.id, identity.as_ref(), Some(&frame), "realtime.frame.unsupported-type", "unsupported Runtime realtime frame type", Some(json!({"type": frame.message_type})));
-                                if send_frame(&mut sender, &issue).await.is_err() {
-                                    break;
-                                }
-                            }
+                        for event in output.broadcast_events {
+                            engine.publish(event);
                         }
                     }
                     Message::Close(_) => break,
@@ -305,7 +64,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                     }
                     Message::Pong(_) => {}
                     Message::Binary(_) => {
-                        let issue = runtime_issue(&record.id, identity.as_ref(), None, "realtime.frame.binary-unsupported", "Runtime realtime frames must be JSON text", None);
+                        let issue = engine.binary_unsupported_issue();
                         if send_frame(&mut sender, &issue).await.is_err() {
                             break;
                         }
@@ -314,23 +73,18 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
             }
             event = receiver.recv() => {
                 match event {
-                    Ok(event) if event.sequence.unwrap_or_default() <= high_water_sequence => {}
                     Ok(event) => {
+                        let Some(event) = engine.handle_broadcast_event(event) else {
+                            continue;
+                        };
                         if send_frame(&mut sender, &event).await.is_err() {
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let Some(identity) = identity.as_ref() else {
+                        let Some(sync) = engine.handle_lagged_receiver() else {
                             continue;
                         };
-                        let snapshot = current_snapshot(&record);
-                        let issue = sync_required_issue(
-                            "realtime.cursor.stream-lagged",
-                            "WebSocket receiver lagged beyond the Runtime realtime event window",
-                            Some(json!({ "currentCursor": record.realtime.current_cursor() })),
-                        );
-                        let sync = session_sync_required(&record, identity, &empty_correlation_frame(&record.id), &snapshot, issue, None);
                         if send_frame(&mut sender, &sync).await.is_err() {
                             break;
                         }
@@ -340,24 +94,6 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
             }
         }
     }
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HelloPayload {
-    last_cursor: Option<String>,
-    resume_token: Option<String>,
-    #[serde(default)]
-    node_catalog: Option<NodeCatalogHelloRequest>,
-}
-
-fn decode_hello_payload(frame: &RuntimeRealtimeEnvelope) -> HelloPayload {
-    let mut hello =
-        serde_json::from_value::<HelloPayload>(frame.payload.clone()).unwrap_or_default();
-    if hello.last_cursor.is_none() {
-        hello.last_cursor = frame.cursor.clone();
-    }
-    hello
 }
 
 fn command_ack(
@@ -670,37 +406,14 @@ pub(crate) fn validate_value_occurrence_header_for_session_binding<'a>(
     Ok(binding_format)
 }
 
-async fn send_not_attached(
-    record: &RuntimeSessionRecord,
+async fn send_session_output(
     sender: &mut RuntimeRealtimeSocketSender,
-    frame: &RuntimeRealtimeEnvelope,
+    output: &RealtimeDispatch,
 ) -> Result<(), axum::Error> {
-    let issue = runtime_issue(
-        &record.id,
-        None,
-        Some(frame),
-        "realtime.session.not-attached",
-        "send session.hello before client actions",
-        None,
-    );
-    send_frame(sender, &issue).await
-}
-
-async fn send_realtime_issue(
-    record: &RuntimeSessionRecord,
-    sender: &mut RuntimeRealtimeSocketSender,
-    identity: &RuntimeRealtimeConnectionIdentity,
-    issue: RuntimeRealtimeIssue,
-) -> Result<(), axum::Error> {
-    let issue = runtime_issue(
-        &record.id,
-        Some(identity),
-        None,
-        &issue.code,
-        issue.message,
-        issue.details,
-    );
-    send_frame(sender, &issue).await
+    for frame in &output.direct_frames {
+        send_frame(sender, frame).await?;
+    }
+    Ok(())
 }
 
 async fn send_frame(

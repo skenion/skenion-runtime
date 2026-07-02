@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::node_catalog::{node_catalog_changed_event, node_catalog_snapshot_for_session};
 use super::protocol::*;
-use super::state::{RememberAckInput, sync_required_issue};
+use super::state::{RememberAckInput, sync_required_issue, validate_command_metadata};
 use super::wire::{
     RuntimeRealtimeConnectionIdentity, RuntimeRealtimeEnvelope, RuntimeRealtimeIssue,
 };
@@ -11,7 +11,7 @@ mod object_nodes;
 mod outcome;
 mod types;
 
-use super::RealtimeCommandDispatch;
+use super::RealtimeDispatch;
 use crate::runtime_time::created_at_now;
 use crate::{
     IssueSeverity, PatchPath, RuntimeIssue, RuntimeMutationRequest, RuntimeOperationAttribution,
@@ -29,24 +29,18 @@ pub(super) fn handle_graph_command(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: RuntimeRealtimeEnvelope,
-) -> Result<RealtimeCommandDispatch, RuntimeRealtimeIssue> {
-    let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
-        sync_required_issue(
-            "realtime.command.idempotency-key-required",
-            "graph.command requires idempotencyKey",
-            None,
-        )
-    })?;
+) -> Result<RealtimeDispatch, RuntimeRealtimeIssue> {
+    let idempotency_key = validate_command_metadata(&frame, "graph.command")?;
     if let Some(cached) =
         record
             .realtime
-            .cached_command_result(identity, &frame.message_type, &idempotency_key)
+            .cached_command_result(identity, &frame.message_type, idempotency_key)
     {
-        return Ok(RealtimeCommandDispatch {
-            ack: graph_command_ack_from_cached(record, identity, &frame, cached.clone()),
-            sender_events: cached.emitted_results,
-            broadcast_events: Vec::new(),
-        });
+        return Ok(RealtimeDispatch::command(
+            graph_command_ack_from_cached(record, identity, &frame, cached.clone()),
+            cached.emitted_results,
+            Vec::new(),
+        ));
     }
 
     let payload =
@@ -102,18 +96,14 @@ pub(super) fn handle_graph_command(
     record.realtime.remember_ack(RememberAckInput {
         identity,
         message_type: &frame.message_type,
-        idempotency_key: &idempotency_key,
+        idempotency_key,
         event_cursor: &cursor,
         event_sequence: sequence,
         ack_payload: ack.payload.clone(),
         emitted_results: events.clone(),
     });
 
-    Ok(RealtimeCommandDispatch {
-        ack,
-        sender_events: Vec::new(),
-        broadcast_events: events,
-    })
+    Ok(RealtimeDispatch::command(ack, Vec::new(), events))
 }
 
 pub(super) fn apply_graph_command(

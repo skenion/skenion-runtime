@@ -282,7 +282,12 @@ impl RuntimeRealtimeState {
             .map(|entry| RuntimeRealtimeCachedCommandResult {
                 event_cursor: entry.event_cursor.clone(),
                 ack_payload: entry.ack_payload.clone(),
-                emitted_results: entry.emitted_results.clone(),
+                emitted_results: entry
+                    .emitted_results
+                    .iter()
+                    .cloned()
+                    .map(mark_replayed)
+                    .collect(),
             })
     }
 
@@ -507,6 +512,35 @@ pub(super) fn sync_required_issue(
         message: message.into(),
         details,
     }
+}
+
+pub(super) fn validate_command_metadata<'a>(
+    frame: &'a RuntimeRealtimeEnvelope,
+    frame_type: &str,
+) -> Result<&'a str, RuntimeRealtimeIssue> {
+    if frame
+        .command_id
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(sync_required_issue(
+            "realtime.command.command-id-required",
+            format!("{frame_type} requires commandId"),
+            None,
+        ));
+    }
+
+    frame
+        .idempotency_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            sync_required_issue(
+                "realtime.command.idempotency-key-required",
+                format!("{frame_type} requires idempotencyKey"),
+                None,
+            )
+        })
 }
 
 fn trim_btree_map_by_key<T>(map: &mut BTreeMap<String, T>, retention_limit: usize) {

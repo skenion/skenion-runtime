@@ -6,11 +6,11 @@ use serde_json::json;
 use super::protocol::{
     EVENT_SELECTION_UPDATED, RUNTIME_REALTIME_SCHEMA, RUNTIME_REALTIME_SCHEMA_VERSION,
 };
-use super::state::{RememberAckInput, sync_required_issue};
+use super::state::{RememberAckInput, sync_required_issue, validate_command_metadata};
 use super::wire::{
     RuntimeRealtimeConnectionIdentity, RuntimeRealtimeEnvelope, RuntimeRealtimeIssue,
 };
-use super::{command_ack, command_ack_from_cached, unix_ms_timestamp};
+use super::{RealtimeDispatch, command_ack, command_ack_from_cached, unix_ms_timestamp};
 use crate::runtime_time::created_at_now;
 use crate::{
     GraphTargetRef, RuntimeCollaborationCursor, RuntimeCollaborationSelection,
@@ -33,22 +33,17 @@ pub(super) fn handle_selection_update(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: RuntimeRealtimeEnvelope,
-) -> Result<(RuntimeRealtimeEnvelope, Option<RuntimeRealtimeEnvelope>), RuntimeRealtimeIssue> {
-    let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
-        sync_required_issue(
-            "realtime.command.idempotency-key-required",
-            "selection.update requires idempotencyKey",
-            None,
-        )
-    })?;
+) -> Result<RealtimeDispatch, RuntimeRealtimeIssue> {
+    let idempotency_key = validate_command_metadata(&frame, "selection.update")?;
     if let Some(cached) =
         record
             .realtime
-            .cached_command_result(identity, &frame.message_type, &idempotency_key)
+            .cached_command_result(identity, &frame.message_type, idempotency_key)
     {
-        return Ok((
+        return Ok(RealtimeDispatch::command(
             command_ack_from_cached(record, identity, &frame, cached),
-            None,
+            Vec::new(),
+            Vec::new(),
         ));
     }
 
@@ -104,7 +99,7 @@ pub(super) fn handle_selection_update(
             .correlation_id
             .clone()
             .or_else(|| Some(frame.message_id.clone())),
-        idempotency_key: Some(idempotency_key.clone()),
+        idempotency_key: Some(idempotency_key.to_owned()),
         sequence: Some(sequence),
         cursor: Some(cursor.clone()),
         created_at: Some(created_at_now()),
@@ -123,11 +118,11 @@ pub(super) fn handle_selection_update(
     record.realtime.remember_ack(RememberAckInput {
         identity,
         message_type: &frame.message_type,
-        idempotency_key: &idempotency_key,
+        idempotency_key,
         event_cursor: &cursor,
         event_sequence: sequence,
         ack_payload: ack.payload.clone(),
         emitted_results: Vec::new(),
     });
-    Ok((ack, Some(event)))
+    Ok(RealtimeDispatch::command(ack, Vec::new(), vec![event]))
 }

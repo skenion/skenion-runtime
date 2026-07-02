@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, SystemTime},
+};
 
 use serde_json::{Value, json};
 
@@ -6,15 +9,19 @@ use super::graph_command::{
     GraphCommandPayload, apply_graph_command, apply_node_delete_graph_command,
     apply_node_update_graph_command, apply_object_create_graph_command,
     apply_object_replace_graph_command, apply_object_resolve_graph_command,
-    graph_command_ack_from_cached, materialize_object_command_node, next_generated_node_id,
-    node_command_result, node_id_slug, node_input_result, object_spec_runtime_issues,
-    validate_object_command_target,
+    graph_command_ack_from_cached, handle_graph_command, materialize_object_command_node,
+    next_generated_node_id, node_command_result, node_id_slug, node_input_result,
+    object_spec_runtime_issues, validate_object_command_target,
 };
 use super::node_catalog::{NodeCatalogHelloMode, catalog_revision_matches};
-use super::node_input::handle_node_input;
+use super::node_input::{
+    RuntimeControlEmittedEventInput, handle_node_input, runtime_control_emitted_event,
+};
+use super::presence::handle_selection_update;
+use super::session_engine::{RuntimeRealtimeSessionEngine, decode_hello_payload};
 use super::state::{
     RememberAckInput, RuntimeRealtimeCachedCommandResult, RuntimeRealtimeIdempotencyScope,
-    RuntimeRealtimeResumeIdentity,
+    RuntimeRealtimeResumeIdentity, sync_required_issue,
 };
 use super::*;
 use crate::object_spec::{
@@ -27,6 +34,13 @@ use crate::{
     RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimePatchResponse,
     ValueOccurrenceHeader,
 };
+use skenion_contracts::{RuntimeRealtimeEnvelopeV01, validate_runtime_realtime_envelope_v01};
+
+type CommandHandler = fn(
+    &crate::RuntimeSessionRecord,
+    &RuntimeRealtimeConnectionIdentity,
+    RuntimeRealtimeEnvelope,
+) -> Result<RealtimeDispatch, RuntimeRealtimeIssue>;
 
 fn test_binding_format() -> EndpointBindingValueFormat {
     EndpointBindingValueFormat {
@@ -127,6 +141,10 @@ fn client_frame(
     }
 }
 
+fn frame_text(frame: &RuntimeRealtimeEnvelope) -> String {
+    serde_json::to_string(frame).expect("runtime realtime frame should serialize")
+}
+
 fn graph_payload(payload: Value) -> GraphCommandPayload {
     serde_json::from_value(payload).expect("graph command payload should parse")
 }
@@ -165,6 +183,189 @@ fn empty_project_request_current() -> crate::ProjectRequestCurrent {
     }))
     .expect("empty current project should parse");
     crate::ProjectRequestCurrent::from(document)
+}
+
+fn control_project_request_current() -> crate::ProjectRequestCurrent {
+    let document: crate::ProjectDocumentCurrent = serde_json::from_value(json!({
+      "schema": "skenion.project",
+      "schemaVersion": "0.1.0",
+      "id": "realtime-control-project",
+      "documentId": "10000000-0000-0000-0000-00000000a002",
+      "revision": "1",
+      "graph": {
+        "schema": "skenion.graph",
+        "schemaVersion": "0.1.0",
+        "id": "minimal-value",
+        "revision": "1",
+        "nodes": [
+          control_project_core_node("value_1"),
+          control_project_core_node("target_1")
+        ],
+        "edges": [
+          {
+            "id": "edge_value_target",
+            "source": { "nodeId": "value_1", "portId": "value" },
+            "target": { "nodeId": "target_1", "portId": "cold" },
+            "resolvedType": "value.core.float32"
+          }
+        ]
+      },
+      "viewState": {
+        "schema": "skenion.view-state",
+        "schemaVersion": "0.1.0",
+        "canvas": {
+          "nodes": {
+            "value_1": { "x": 96.0, "y": 96.0 },
+            "target_1": { "x": 260.0, "y": 96.0 }
+          }
+        }
+      },
+      "patchLibrary": []
+    }))
+    .expect("control current project should parse");
+    crate::ProjectRequestCurrent::from(document)
+}
+
+fn control_project_core_node(node_id: &str) -> Value {
+    json!({
+        "id": node_id,
+        "implementation": {
+            "provider": { "kind": "core" },
+            "objectId": "float"
+        },
+        "objectSpec": "float",
+        "objectResolution": {
+            "status": "resolved",
+            "candidates": [],
+            "issues": []
+        },
+        "params": {},
+        "ports": control_project_value_f32_ports()
+    })
+}
+
+fn control_project_value_f32_ports() -> Value {
+    json!([
+      {
+        "id": "in",
+        "direction": "input",
+        "label": "In",
+        "type": "value.core.message",
+        "rate": "control",
+        "required": false,
+        "triggerMode": "trigger",
+        "accepts": [
+          "value.core.float32",
+          "value.core.int32",
+          "value.core.uint32",
+          "value.core.bool",
+          "value.core.bang"
+        ],
+        "messageKeys": {
+          "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+          "silent": ["set"],
+          "trigger": ["bang", "float", "int", "uint", "bool"],
+          "store": ["set", "float", "int", "uint", "bool"],
+          "emit": ["bang", "float", "int", "uint", "bool"]
+        }
+      },
+      {
+        "id": "cold",
+        "direction": "input",
+        "label": "Cold",
+        "type": "value.core.float32",
+        "rate": "control",
+        "required": false,
+        "triggerMode": "passive"
+      },
+      {
+        "id": "value",
+        "direction": "output",
+        "label": "Value",
+        "type": "value.core.float32",
+        "rate": "control"
+      }
+    ])
+}
+
+fn load_control_project(record: &crate::RuntimeSessionRecord) {
+    let loaded = record
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned")
+        .load_project_current(control_project_request_current());
+    assert!(loaded.ok, "control project should load: {loaded:?}");
+}
+
+fn assert_command_metadata_rejected(
+    record: &crate::RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    message_type: &str,
+    handler: CommandHandler,
+) {
+    let missing_command_message = format!("{message_type}-missing-command");
+    let mut missing_command = client_frame(
+        &record.id,
+        message_type,
+        &missing_command_message,
+        Value::Null,
+    );
+    missing_command.command_id = None;
+    missing_command.idempotency_key = Some(format!("{message_type}-missing-command-key"));
+    assert_command_metadata_issue(
+        handler(record, identity, missing_command),
+        "realtime.command.command-id-required",
+        message_type,
+        "missing commandId",
+    );
+
+    let blank_command_message = format!("{message_type}-blank-command");
+    let mut blank_command = client_frame(
+        &record.id,
+        message_type,
+        &blank_command_message,
+        Value::Null,
+    );
+    blank_command.command_id = Some(" \t\n".to_owned());
+    blank_command.idempotency_key = Some(format!("{message_type}-blank-command-key"));
+    assert_command_metadata_issue(
+        handler(record, identity, blank_command),
+        "realtime.command.command-id-required",
+        message_type,
+        "blank commandId",
+    );
+
+    let missing_key_message = format!("{message_type}-missing-idempotency-key");
+    let missing_key = client_frame(&record.id, message_type, &missing_key_message, Value::Null);
+    assert_command_metadata_issue(
+        handler(record, identity, missing_key),
+        "realtime.command.idempotency-key-required",
+        message_type,
+        "missing idempotencyKey",
+    );
+
+    let blank_key_message = format!("{message_type}-blank-idempotency-key");
+    let mut blank_key = client_frame(&record.id, message_type, &blank_key_message, Value::Null);
+    blank_key.idempotency_key = Some(" \t\n".to_owned());
+    assert_command_metadata_issue(
+        handler(record, identity, blank_key),
+        "realtime.command.idempotency-key-required",
+        message_type,
+        "blank idempotencyKey",
+    );
+}
+
+fn assert_command_metadata_issue(
+    result: Result<RealtimeDispatch, RuntimeRealtimeIssue>,
+    expected_code: &str,
+    message_type: &str,
+    case: &str,
+) {
+    let issue = result.unwrap_err();
+    assert_eq!(
+        issue.code, expected_code,
+        "{message_type} should reject {case}"
+    );
 }
 
 fn package_patch_target(base_revision: &str) -> GraphTargetRef {
@@ -594,10 +795,301 @@ fn hello_catalog_and_error_envelopes_preserve_client_context() {
 }
 
 #[test]
+fn uncorrelated_control_emitted_event_omits_command_metadata_and_validates() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let sequence = record.realtime.next_event_sequence();
+    let cursor = record.realtime.cursor_for(sequence);
+    let event = runtime_control_emitted_event(
+        &record,
+        None,
+        None,
+        RuntimeControlEmittedEventInput {
+            sequence,
+            cursor: &cursor,
+            control_revision: Some(3),
+            changed: true,
+            events: vec![crate::RuntimeControlEmission {
+                node_id: "bang_1".to_owned(),
+                port_id: "out".to_owned(),
+                message: ControlMessage::bang(),
+            }],
+            values: BTreeMap::new(),
+            issues: Vec::new(),
+        },
+    );
+
+    assert_eq!(event.message_type, "control.emitted");
+    assert!(event.connection_id.is_none());
+    assert!(event.client_id.is_none());
+    assert!(event.window_id.is_none());
+    assert!(event.command_id.is_none());
+    assert!(event.correlation_id.is_none());
+    assert!(event.idempotency_key.is_none());
+    assert!(event.payload.get("commandId").is_none());
+    assert!(event.payload.get("correlationId").is_none());
+    assert!(event.payload.get("idempotencyKey").is_none());
+    assert_eq!(event.payload["controlSequence"], sequence);
+    assert_eq!(event.payload["events"][0]["message"]["key"], "bang");
+
+    let value =
+        serde_json::to_value(&event).expect("runtime realtime event should serialize to JSON");
+    let contract_envelope = serde_json::from_value::<RuntimeRealtimeEnvelopeV01>(value.clone())
+        .unwrap_or_else(|error| {
+            panic!("runtime control event should deserialize as contract DTO: {error}\n{value}")
+        });
+    if let Err(report) = validate_runtime_realtime_envelope_v01(&contract_envelope) {
+        let errors = report
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        panic!(
+            "runtime control event should pass Contracts realtime validation: {errors}\n{value}"
+        );
+    }
+}
+
+#[test]
+fn session_engine_routes_attached_frames_as_dispatch_output() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    load_control_project(&record);
+    let session_id = record.id.clone();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+
+    let before_attach = client_frame(
+        &session_id,
+        FRAME_NODE_CATALOG_REQUEST,
+        "catalog-before-attach",
+        json!({}),
+    );
+    let before_attach_output = engine.handle_text_frame(&frame_text(&before_attach));
+    assert_eq!(before_attach_output.direct_frames.len(), 1);
+    assert!(before_attach_output.broadcast_events.is_empty());
+    assert_eq!(
+        before_attach_output.direct_frames[0].payload["issue"]["code"],
+        "realtime.session.not-attached"
+    );
+
+    let hello = client_frame(&session_id, FRAME_SESSION_HELLO, "hello-engine", json!({}));
+    let hello_output = engine.handle_text_frame(&frame_text(&hello));
+    assert_eq!(hello_output.direct_frames.len(), 1);
+    assert!(hello_output.broadcast_events.is_empty());
+    assert_eq!(
+        hello_output.direct_frames[0].message_type,
+        "session.attached"
+    );
+
+    let catalog_request = client_frame(
+        &session_id,
+        FRAME_NODE_CATALOG_REQUEST,
+        "catalog-after-attach",
+        json!({}),
+    );
+    let catalog_output = engine.handle_text_frame(&frame_text(&catalog_request));
+    assert_eq!(catalog_output.direct_frames.len(), 1);
+    assert!(catalog_output.broadcast_events.is_empty());
+    assert_eq!(
+        catalog_output.direct_frames[0].message_type,
+        "nodeCatalog.snapshot"
+    );
+}
+
+#[test]
+fn session_engine_filters_broadcast_events_by_sequence() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let session_id = record.id.clone();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+    let first = realtime_event(&session_id, 1, "cursor:1");
+    let duplicate = realtime_event(&session_id, 1, "cursor:1");
+    let second = realtime_event(&session_id, 2, "cursor:2");
+
+    assert_eq!(
+        engine
+            .handle_broadcast_event(first)
+            .expect("first event should forward")
+            .sequence,
+        Some(1)
+    );
+    assert!(engine.handle_broadcast_event(duplicate).is_none());
+    assert_eq!(
+        engine
+            .handle_broadcast_event(second)
+            .expect("newer event should forward")
+            .sequence,
+        Some(2)
+    );
+}
+
+#[test]
+fn session_engine_suppresses_cached_node_input_result_after_visible_broadcast() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    load_control_project(&record);
+    let session_id = record.id.clone();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+
+    let hello = client_frame(
+        &session_id,
+        FRAME_SESSION_HELLO,
+        "hello-node-input",
+        json!({}),
+    );
+    let hello_output = engine.handle_text_frame(&frame_text(&hello));
+    assert_eq!(
+        hello_output.direct_frames[0].message_type,
+        "session.attached"
+    );
+
+    let mut input = client_frame(
+        &session_id,
+        FRAME_NODE_INPUT,
+        "node-input-visible",
+        json!({
+            "inputs": [{
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": ControlMessage::from_value(ControlValue::float(12.0)),
+            }]
+        }),
+    );
+    input.idempotency_key = Some("node-input-visible-key".to_owned());
+
+    let first_output = engine.handle_text_frame(&frame_text(&input));
+    assert_eq!(first_output.direct_frames.len(), 1);
+    assert_eq!(first_output.direct_frames[0].message_type, "command.ack");
+    assert_eq!(first_output.broadcast_events.len(), 1);
+    let delivered = engine
+        .handle_broadcast_event(first_output.broadcast_events[0].clone())
+        .expect("original control event should be visible to the sender");
+    assert_eq!(delivered.message_type, "control.emitted");
+    assert_eq!(delivered.payload["replayed"], false);
+
+    let mut duplicate = input.clone();
+    duplicate.message_id = "node-input-duplicate-visible".to_owned();
+    duplicate.command_id = Some("node-input-duplicate-visible-command".to_owned());
+    duplicate.correlation_id = Some("node-input-duplicate-visible-correlation".to_owned());
+    let duplicate_output = engine.handle_text_frame(&frame_text(&duplicate));
+
+    assert_eq!(duplicate_output.direct_frames.len(), 1);
+    assert_eq!(
+        duplicate_output.direct_frames[0].message_type,
+        "command.ack"
+    );
+    assert_eq!(duplicate_output.direct_frames[0].payload["cached"], true);
+    assert!(duplicate_output.broadcast_events.is_empty());
+}
+
+#[test]
+fn session_engine_replays_cached_node_input_result_when_sender_missed_broadcast() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    load_control_project(&record);
+    let session_id = record.id.clone();
+    let mut engine = RuntimeRealtimeSessionEngine::new(record);
+
+    let hello = client_frame(
+        &session_id,
+        FRAME_SESSION_HELLO,
+        "hello-node-input-replay",
+        json!({}),
+    );
+    let hello_output = engine.handle_text_frame(&frame_text(&hello));
+    assert_eq!(
+        hello_output.direct_frames[0].message_type,
+        "session.attached"
+    );
+
+    let mut input = client_frame(
+        &session_id,
+        FRAME_NODE_INPUT,
+        "node-input-missed",
+        json!({
+            "inputs": [{
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": ControlMessage::from_value(ControlValue::float(12.0)),
+            }]
+        }),
+    );
+    input.idempotency_key = Some("node-input-missed-key".to_owned());
+
+    let first_output = engine.handle_text_frame(&frame_text(&input));
+    assert_eq!(first_output.broadcast_events.len(), 1);
+
+    let mut duplicate = input.clone();
+    duplicate.message_id = "node-input-duplicate-missed".to_owned();
+    duplicate.command_id = Some("node-input-duplicate-missed-command".to_owned());
+    duplicate.correlation_id = Some("node-input-duplicate-missed-correlation".to_owned());
+    let duplicate_output = engine.handle_text_frame(&frame_text(&duplicate));
+
+    assert_eq!(duplicate_output.direct_frames.len(), 2);
+    assert_eq!(
+        duplicate_output.direct_frames[0].message_type,
+        "command.ack"
+    );
+    assert_eq!(duplicate_output.direct_frames[0].payload["cached"], true);
+    assert_eq!(
+        duplicate_output.direct_frames[1].message_type,
+        "control.emitted"
+    );
+    assert_eq!(duplicate_output.direct_frames[1].payload["replayed"], true);
+    assert!(duplicate_output.broadcast_events.is_empty());
+    assert!(
+        engine
+            .handle_broadcast_event(first_output.broadcast_events[0].clone())
+            .is_none()
+    );
+}
+
+#[test]
+fn command_handlers_reject_missing_or_blank_command_metadata() {
+    let registry = crate::RuntimeSessionRegistry::dry_preview();
+    let record = registry.default_record();
+    let identity = record.realtime.issue_connection_identity(None);
+
+    for (message_type, handler) in [
+        (FRAME_GRAPH_COMMAND, handle_graph_command as CommandHandler),
+        (FRAME_NODE_INPUT, handle_node_input as CommandHandler),
+        (
+            FRAME_SELECTION_UPDATE,
+            handle_selection_update as CommandHandler,
+        ),
+    ] {
+        assert_command_metadata_rejected(&record, &identity, message_type, handler);
+    }
+}
+
+#[test]
 fn command_handlers_reject_invalid_payloads() {
     let registry = crate::RuntimeSessionRegistry::dry_preview();
     let record = registry.default_record();
     let identity = record.realtime.issue_connection_identity(None);
+
+    let mut node_input_missing_command = client_frame(
+        &record.id,
+        "node.input",
+        "node-input-missing-command",
+        json!({
+            "inputs": [{
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": ControlMessage::bang()
+            }]
+        }),
+    );
+    node_input_missing_command.command_id = None;
+    node_input_missing_command.idempotency_key = Some("node-input-missing-command-key".to_owned());
+    let node_input_missing_command =
+        handle_node_input(&record, &identity, node_input_missing_command)
+            .expect_err("node.input requires commandId");
+    assert_eq!(
+        node_input_missing_command.code,
+        "realtime.command.command-id-required"
+    );
 
     let node_input_missing_key = handle_node_input(
         &record,
@@ -634,6 +1126,21 @@ fn command_handlers_reject_invalid_payloads() {
     assert_eq!(
         invalid_node_input.code,
         "realtime.node-input.invalid-payload"
+    );
+
+    let mut graph_missing_command = client_frame(
+        &record.id,
+        "graph.command",
+        "graph-missing-command",
+        json!({ "kind": "node.resolve" }),
+    );
+    graph_missing_command.command_id = None;
+    graph_missing_command.idempotency_key = Some("graph-missing-command-key".to_owned());
+    let graph_missing_command = handle_graph_command(&record, &identity, graph_missing_command)
+        .expect_err("graph.command requires commandId");
+    assert_eq!(
+        graph_missing_command.code,
+        "realtime.command.command-id-required"
     );
 
     let graph_missing_key = handle_graph_command(

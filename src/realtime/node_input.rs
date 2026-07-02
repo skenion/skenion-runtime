@@ -3,13 +3,13 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::RealtimeCommandDispatch;
+use super::RealtimeDispatch;
 use super::control_input::apply_control_input;
 use super::protocol::{
     EVENT_CONTROL_EMITTED, FRAME_NODE_INPUT, RUNTIME_REALTIME_SCHEMA,
     RUNTIME_REALTIME_SCHEMA_VERSION,
 };
-use super::state::{RememberAckInput, sync_required_issue};
+use super::state::{RememberAckInput, sync_required_issue, validate_command_metadata};
 use super::wire::{
     RuntimeRealtimeConnectionIdentity, RuntimeRealtimeEnvelope, RuntimeRealtimeIssue,
 };
@@ -44,39 +44,22 @@ pub(super) fn handle_node_input(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: RuntimeRealtimeEnvelope,
-) -> Result<RealtimeCommandDispatch, RuntimeRealtimeIssue> {
-    if frame
-        .command_id
-        .as_ref()
-        .is_none_or(|value| value.trim().is_empty())
-    {
-        return Err(sync_required_issue(
-            "realtime.command.command-id-required",
-            "node.input requires commandId",
-            None,
-        ));
-    }
-    let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
-        sync_required_issue(
-            "realtime.command.idempotency-key-required",
-            "node.input requires idempotencyKey",
-            None,
-        )
-    })?;
+) -> Result<RealtimeDispatch, RuntimeRealtimeIssue> {
+    let idempotency_key = validate_command_metadata(&frame, "node.input")?;
     if let Some(cached) =
         record
             .realtime
-            .cached_command_result(identity, &frame.message_type, &idempotency_key)
+            .cached_command_result(identity, &frame.message_type, idempotency_key)
     {
         let mut payload = mark_ack_payload_cached(cached.ack_payload);
         if let Some(object) = payload.as_object_mut() {
             object.insert("eventCursor".to_owned(), Value::String(cached.event_cursor));
         }
-        return Ok(RealtimeCommandDispatch {
-            ack: command_ack_with_payload(record, identity, &frame, payload),
-            sender_events: cached.emitted_results,
-            broadcast_events: Vec::new(),
-        });
+        return Ok(RealtimeDispatch::command(
+            command_ack_with_payload(record, identity, &frame, payload),
+            cached.emitted_results,
+            Vec::new(),
+        ));
     }
 
     let payload =
@@ -145,23 +128,24 @@ pub(super) fn handle_node_input(
             "issues": issues,
         }),
     );
-    let event = control_emitted_event(record, identity, &frame, &applied, sequence, &cursor);
+    let event =
+        node_input_control_emitted_event(record, identity, &frame, &applied, sequence, &cursor);
     let emitted_results = event.iter().cloned().collect::<Vec<_>>();
     record.realtime.remember_ack(RememberAckInput {
         identity,
         message_type: &frame.message_type,
-        idempotency_key: &idempotency_key,
+        idempotency_key,
         event_cursor: &cursor,
         event_sequence: sequence,
         ack_payload: ack.payload.clone(),
         emitted_results,
     });
 
-    Ok(RealtimeCommandDispatch {
+    Ok(RealtimeDispatch::command(
         ack,
-        sender_events: Vec::new(),
-        broadcast_events: event.into_iter().collect(),
-    })
+        Vec::new(),
+        event.into_iter().collect(),
+    ))
 }
 
 fn node_input_result(index: usize, input: &AppliedNodeInput) -> Value {
@@ -178,7 +162,7 @@ fn node_input_result(index: usize, input: &AppliedNodeInput) -> Value {
     })
 }
 
-fn control_emitted_event(
+fn node_input_control_emitted_event(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: &RuntimeRealtimeEnvelope,
@@ -200,44 +184,107 @@ fn control_emitted_event(
         return None;
     }
 
-    Some(RuntimeRealtimeEnvelope {
+    let issues = applied
+        .iter()
+        .flat_map(|input| input.response.issues.iter().cloned())
+        .collect::<Vec<_>>();
+    Some(runtime_control_emitted_event(
+        record,
+        Some(identity),
+        Some(frame),
+        RuntimeControlEmittedEventInput {
+            sequence,
+            cursor,
+            control_revision: applied
+                .iter()
+                .rev()
+                .find_map(|input| input.response.control_revision),
+            changed: applied.iter().any(|input| input.response.changed),
+            events,
+            values,
+            issues,
+        },
+    ))
+}
+
+pub(in crate::realtime) struct RuntimeControlEmittedEventInput<'a> {
+    pub(in crate::realtime) sequence: u64,
+    pub(in crate::realtime) cursor: &'a str,
+    pub(in crate::realtime) control_revision: Option<u64>,
+    pub(in crate::realtime) changed: bool,
+    pub(in crate::realtime) events: Vec<RuntimeControlEmission>,
+    pub(in crate::realtime) values: BTreeMap<String, ControlValue>,
+    pub(in crate::realtime) issues: Vec<RuntimeIssue>,
+}
+
+pub(in crate::realtime) fn runtime_control_emitted_event(
+    record: &RuntimeSessionRecord,
+    identity: Option<&RuntimeRealtimeConnectionIdentity>,
+    frame: Option<&RuntimeRealtimeEnvelope>,
+    input: RuntimeControlEmittedEventInput<'_>,
+) -> RuntimeRealtimeEnvelope {
+    let mut payload = json!({
+        "controlSequence": input.sequence,
+        "controlRevision": input.control_revision,
+        "changed": input.changed,
+        "events": input.events,
+        "values": if input.values.is_empty() { Value::Null } else { json!(input.values) },
+        "issues": realtime_issue_payloads(input.issues.iter()),
+        "replayed": false,
+    });
+    if let Some(frame) = frame
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(
+            "commandId".to_owned(),
+            Value::String(
+                frame
+                    .command_id
+                    .clone()
+                    .unwrap_or_else(|| frame.message_id.clone()),
+            ),
+        );
+        object.insert(
+            "correlationId".to_owned(),
+            Value::String(
+                frame
+                    .correlation_id
+                    .clone()
+                    .unwrap_or_else(|| frame.message_id.clone()),
+            ),
+        );
+        if let Some(idempotency_key) = frame.idempotency_key.clone() {
+            object.insert("idempotencyKey".to_owned(), Value::String(idempotency_key));
+        }
+    }
+
+    RuntimeRealtimeEnvelope {
         schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
         schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
         message_type: EVENT_CONTROL_EMITTED.to_owned(),
-        message_id: format!("{}_control_{sequence:06}", record.id),
+        message_id: format!("{}_control_{:06}", record.id, input.sequence),
         session_id: record.id.clone(),
-        connection_id: Some(identity.connection_id.clone()),
-        client_id: Some(identity.client_id.clone()),
-        window_id: Some(identity.window_id.clone()),
-        command_id: frame
-            .command_id
-            .clone()
-            .or_else(|| Some(frame.message_id.clone())),
-        correlation_id: frame
-            .correlation_id
-            .clone()
-            .or_else(|| Some(frame.message_id.clone())),
-        idempotency_key: frame.idempotency_key.clone(),
-        sequence: Some(sequence),
-        cursor: Some(cursor.to_owned()),
-        created_at: Some(created_at_now()),
-        payload: json!({
-            "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
-            "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
-            "idempotencyKey": frame.idempotency_key,
-            "controlSequence": sequence,
-            "controlRevision": applied.iter().rev().find_map(|input| input.response.control_revision),
-            "changed": applied.iter().any(|input| input.response.changed),
-            "events": events,
-            "values": if values.is_empty() { Value::Null } else { json!(values) },
-            "issues": realtime_issue_payloads(
-                applied
-                    .iter()
-                    .flat_map(|input| input.response.issues.iter())
-            ),
-            "replayed": false,
+        connection_id: identity.map(|identity| identity.connection_id.clone()),
+        client_id: identity.map(|identity| identity.client_id.clone()),
+        window_id: identity.map(|identity| identity.window_id.clone()),
+        command_id: frame.and_then(|frame| {
+            frame
+                .command_id
+                .clone()
+                .or_else(|| Some(frame.message_id.clone()))
         }),
-    })
+        correlation_id: frame.and_then(|frame| {
+            frame
+                .correlation_id
+                .clone()
+                .or_else(|| Some(frame.message_id.clone()))
+        }),
+        idempotency_key: frame.and_then(|frame| frame.idempotency_key.clone()),
+        sequence: Some(input.sequence),
+        cursor: Some(input.cursor.to_owned()),
+        created_at: Some(created_at_now()),
+        payload,
+    }
 }
 
 fn realtime_issue_payloads<'a>(issues: impl IntoIterator<Item = &'a RuntimeIssue>) -> Vec<Value> {
