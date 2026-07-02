@@ -69,7 +69,7 @@ jobs:
           assert manifest["platformSlug"] == "linux-x64"
           assert manifest["tier"] == "release-blocking"
           assert manifest["sourceCommit"] == "0000000000000000000000000000000000000000"
-          assert manifest["contracts"] == {"version": None}
+          assert manifest["contracts"] == {"version": None, "supportedContractsRange": None}
           assert manifest["artifact"]["binaryFormat"] == "raw-binary"
           assert manifest["artifact"]["executableName"] == "skenion-runtime-v0.0.0-linux-x64"
           assert manifest["artifact"]["s3"] == {

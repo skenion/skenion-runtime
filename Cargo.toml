@@ -12,6 +12,9 @@ categories = ["multimedia", "rendering"]
 rust-version = "1.85"
 publish = false
 
+[package.metadata.skenion]
+supported-contracts-range = ">=0.0.0 <1.0.0"
+
 [dependencies]
 axum = { version = "0.8", features = ["multipart", "ws"] }
 bytemuck = { version = "1", features = ["derive"] }

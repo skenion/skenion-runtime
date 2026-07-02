@@ -229,6 +229,16 @@ for forbidden in (
     if forbidden in workflow_text:
         fail(f"publish workflow must not use developer-only local Contracts integration; found {forbidden!r}")
 
+for forbidden in (
+    "crates.io/api/v1/crates/skenion-contracts",
+    "Verify released contracts crate",
+):
+    if forbidden in workflow_text:
+        fail(
+            "publish workflow must derive Contracts provenance from the locked dependency, "
+            f"not a separate Contracts version probe; found {forbidden!r}"
+        )
+
 runtime_asset_steps = workflow_steps(jobs["runtime-assets"])
 runtime_assets = "\n".join(jobs["runtime-assets"])
 for line in jobs["runtime-assets"]:

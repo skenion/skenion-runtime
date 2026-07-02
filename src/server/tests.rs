@@ -19,10 +19,10 @@ use skenion_contracts::CONTRACTS_PACKAGE_VERSION;
 use tower::ServiceExt;
 
 use crate::{
-    IssueSeverity, RUNTIME_API_VERSION, RuntimeEndpointConfig, RuntimeExtensionManager,
-    RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,
-    RuntimeIoDeviceManager, RuntimeLogStore, RuntimePackageManager, RuntimePackageRegistrySnapshot,
-    RuntimeSessionRegistry,
+    IssueSeverity, RUNTIME_API_VERSION, RUNTIME_SUPPORTED_CONTRACTS_RANGE, RuntimeEndpointConfig,
+    RuntimeExtensionManager, RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceDescriptor,
+    RuntimeIoDeviceListResponse, RuntimeIoDeviceManager, RuntimeLogStore, RuntimePackageManager,
+    RuntimePackageRegistrySnapshot, RuntimeSessionRegistry,
     asset_store::{RuntimeAssetStore, asset_kind, store_asset_with_id},
     io_device_manager::RuntimeIoDeviceRegistry,
     runtime_time::created_at_now,
@@ -118,8 +118,8 @@ async fn health_response() {
         CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(
-        response["requiredContractsVersion"],
-        CONTRACTS_PACKAGE_VERSION
+        response["supportedContractsRange"],
+        RUNTIME_SUPPORTED_CONTRACTS_RANGE
     );
 }
 
@@ -135,8 +135,8 @@ async fn runtime_info_response() {
         CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(
-        response["requiredContractsVersion"],
-        CONTRACTS_PACKAGE_VERSION
+        response["supportedContractsRange"],
+        RUNTIME_SUPPORTED_CONTRACTS_RANGE
     );
     let capabilities = response["capabilities"].as_array().unwrap();
     for expected in [
@@ -301,8 +301,8 @@ async fn sidecar_startup_health_and_shutdown_are_machine_readable() {
         CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(
-        startup["runtime"]["requiredContractsVersion"],
-        CONTRACTS_PACKAGE_VERSION
+        startup["runtime"]["supportedContractsRange"],
+        RUNTIME_SUPPORTED_CONTRACTS_RANGE
     );
     assert_eq!(startup["endpoint"]["protocol"], "http");
     assert_eq!(startup["profile"]["mode"], "local-managed");
@@ -326,8 +326,8 @@ async fn sidecar_startup_health_and_shutdown_are_machine_readable() {
         CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(
-        health["runtime"]["requiredContractsVersion"],
-        CONTRACTS_PACKAGE_VERSION
+        health["runtime"]["supportedContractsRange"],
+        RUNTIME_SUPPORTED_CONTRACTS_RANGE
     );
     assert_eq!(health["endpoint"]["protocol"], "http");
     assert_eq!(health["profile"]["mode"], "local-managed");

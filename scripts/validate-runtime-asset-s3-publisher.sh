@@ -406,7 +406,8 @@ base_env_args_for() {
     "SKENION_PUBLIC_VERIFY_SLEEP_SECONDS=0" \
     "SOURCE_COMMIT=${source_commit}" \
     "RELEASE_TIER=release-blocking" \
-    "CONTRACTS_VERSION=1.2.0"
+    "CONTRACTS_VERSION=1.2.0" \
+    "CONTRACTS_SUPPORTED_RANGE=>=0.0.0 <1.0.0"
   )
 }
 

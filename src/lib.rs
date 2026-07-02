@@ -160,7 +160,9 @@ pub use render::{
     ShaderLanguage, ShaderUniformBinding, ShaderUniformValue, run_render_preview_document_file,
 };
 pub(crate) use render::{PreviewDocument, generated_shader_response_from_preview_document};
-pub use runtime_info::{HealthResponse, RUNTIME_API_VERSION, RuntimeInfoResponse};
+pub use runtime_info::{
+    HealthResponse, RUNTIME_API_VERSION, RUNTIME_SUPPORTED_CONTRACTS_RANGE, RuntimeInfoResponse,
+};
 pub use runtime_transport::{
     IdRemapResult, PasteGraphFragmentResponse, RuntimeCollaborationAck,
     RuntimeCollaborationAuthSubject, RuntimeCollaborationAuthSubjectKind,
